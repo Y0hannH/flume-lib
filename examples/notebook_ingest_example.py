@@ -2,7 +2,7 @@
 # Prérequis : les tokens sont déjà injectés en variables d'environnement
 # (depuis Key Vault) avant l'exécution de cette boucle.
 
-# %pip install git+https://github.com/<org>/flume-lib.git@v0.1.0
+# %pip install git+https://github.com/Y0hannH/flume-lib.git@v0.1.0
 
 import json
 

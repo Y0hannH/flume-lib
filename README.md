@@ -5,7 +5,7 @@ Accélérateur d'ingestion API générique pour notebooks **Microsoft Fabric Pyt
 ## Installation
 
 ```
-%pip install git+https://github.com/<org>/flume-lib.git@v0.1.0
+%pip install git+https://github.com/Y0hannH/flume-lib.git@v0.1.0
 ```
 
 ## Usage
