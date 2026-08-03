@@ -4,6 +4,24 @@ Accélérateur d'ingestion API générique pour notebooks **Microsoft Fabric Pyt
 
 ## Installation
 
+### Recommandé : wheels dans le lakehouse (hors-ligne, sans GitHub ni PyPI au runtime)
+
+Générer le lot de wheels (lib + dépendances, pour le kernel Fabric Python 3.12 / Linux) :
+
+```
+python scripts/build_fabric_wheels.py
+```
+
+Uploader les `.whl` du dossier `fabric-wheels/` dans `Files/libs` du lakehouse, puis dans le notebook :
+
+```
+%pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib
+```
+
+`--no-index` garantit que rien n'est téléchargé au runtime : le code exécuté est exactement celui déposé dans le lakehouse. Ne jamais écraser un wheel existant — une nouvelle version = un nouveau fichier. Autre kernel : `--python-version 3.11`.
+
+### Alternative : install directe depuis GitHub
+
 Épingler le **commit SHA complet** de la release plutôt que le tag : un tag peut être re-pointé par un attaquant ayant un accès en écriture au repo, un SHA est immuable.
 
 ```

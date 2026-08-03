@@ -4,6 +4,7 @@ __pycache__/
 .eggs/
 build/
 dist/
+fabric-wheels/
 .venv/
 venv/
 .pytest_cache/
