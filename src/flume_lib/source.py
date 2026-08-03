@@ -17,11 +17,21 @@ from flume_lib._delta import append_records, resolve_lakehouse_tables_path, tabl
 from flume_lib.auth import build_auth_headers
 from flume_lib.logging_ import write_log_run
 from flume_lib.pagination import paginate
+from flume_lib.validation import validate_config
 from flume_lib.watermark import read_watermark, write_watermark
 
 DEFAULT_LAKEHOUSE_TABLES_PATH = "/lakehouse/default/Tables"
 DEFAULT_LOG_SCHEMA = "flume"
 DEFAULT_TIMEOUT_SECONDS = 60
+
+# Colonnes de traçabilité ajoutées à chaque ligne écrite : elles permettent de
+# relier une ligne au run qui l'a produite (dédoublonnage après retry partiel,
+# annulation ciblée d'un run). Préfixées pour éviter toute collision avec les
+# champs de l'API.
+LINEAGE_RUN_ID = "_flume_run_id"
+LINEAGE_INGESTED_AT = "_flume_ingested_at"
+
+DRY_RUN_SAMPLE_SIZE = 3
 
 
 class RetryableHTTPError(Exception):
@@ -46,6 +56,8 @@ class RunResult:
     start_ts: str
     end_ts: str
     run_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    # Renseigné uniquement en dry-run : premiers enregistrements bruts reçus
+    sample: list | None = None
 
 
 def _utc_now() -> str:
@@ -56,6 +68,10 @@ def _build_fetch_page(config: dict):
     headers = build_auth_headers(config.get("auth"))
     retry_config = config.get("retry", {})
     timeout = config.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
+    method = str(config.get("method", "GET")).upper()
+    base_body = config.get("body", {})
+    body_format = config.get("body_format", "json")
+    params_in = (config.get("pagination") or {}).get("params_in", "query")
     retryer = Retrying(
         stop=stop_after_attempt(retry_config.get("max_attempts", 3)),
         wait=wait_exponential(multiplier=retry_config.get("backoff_multiplier", 1)),
@@ -64,9 +80,18 @@ def _build_fetch_page(config: dict):
     )
     session = requests.Session()
     session.headers.update(headers)
+    body_key = "json" if body_format == "json" else "data"
 
-    def _get(url: str, params: dict):
-        response = session.get(url, params=params, timeout=timeout)
+    def _request(url: str, params: dict):
+        kwargs = {"timeout": timeout}
+        if method == "GET":
+            kwargs["params"] = params
+        elif params_in == "body":
+            kwargs[body_key] = {**base_body, **params}
+        else:
+            kwargs["params"] = params
+            kwargs[body_key] = dict(base_body)
+        response = session.request(method, url, **kwargs)
         if response.status_code == 429 or response.status_code >= 500:
             raise RetryableHTTPError(response.status_code, url)
         response.raise_for_status()
@@ -74,7 +99,7 @@ def _build_fetch_page(config: dict):
         return response.json(), response.headers
 
     def fetch_page(url: str, params: dict):
-        return retryer(_get, url, params)
+        return retryer(_request, url, params)
 
     return fetch_page
 
@@ -84,28 +109,44 @@ def _max_incremental_value(records: list[dict], field_name: str):
     return max(values) if values else None
 
 
+def _add_lineage(records: list[dict], run_id: str) -> None:
+    ingested_at = _utc_now()
+    for record in records:
+        record[LINEAGE_RUN_ID] = run_id
+        record[LINEAGE_INGESTED_AT] = ingested_at
+
+
 def run_source(
     config: dict,
     lakehouse_tables_path: str = DEFAULT_LAKEHOUSE_TABLES_PATH,
     storage_options: dict | None = None,
     log_schema: str = DEFAULT_LOG_SCHEMA,
+    dry_run: bool = False,
 ) -> RunResult:
     """Exécute l'ingestion d'une source d'après sa config. Toute erreur est
     catchée et remontée dans RunResult, jamais levée vers l'appelant.
 
     Cible exclusivement des lakehouses avec schémas : les données vont dans
     config['target_schema'] (requis), les tables techniques watermark et
-    log_runs dans log_schema (défaut : 'flume').
+    log_runs dans log_schema (défaut : 'flume'). Chaque ligne écrite porte
+    les colonnes de traçabilité _flume_run_id et _flume_ingested_at.
+
+    dry_run=True valide la config, appelle réellement l'API (donc vérifie
+    aussi les credentials) et compte les lignes, mais n'écrit rien : ni
+    données, ni watermark, ni log_runs. Les premiers enregistrements bruts
+    sont renvoyés dans RunResult.sample. Sans accumulation en mémoire.
 
     Dans Fabric, le chemin local par défaut est automatiquement résolu vers
     l'URI ABFSS OneLake du lakehouse par défaut (le montage local ne permet
     pas le commit du transaction log delta-rs). storage_options est passé tel
     quel à delta-rs pour un stockage non-Fabric ou une auth spécifique."""
-    source_name = config.get("name", "<sans_nom>")
+    source_name = config.get("name", "<sans_nom>") if isinstance(config, dict) else "<sans_nom>"
+    run_id = str(uuid.uuid4())
     start_ts = _utc_now()
     status = "failed"
     rows_loaded = 0
     error_message = None
+    sample = None
 
     try:
         lakehouse_tables_path = resolve_lakehouse_tables_path(lakehouse_tables_path)
@@ -113,12 +154,7 @@ def run_source(
         pass
 
     try:
-        target_schema = config.get("target_schema")
-        if not target_schema:
-            raise ValueError(
-                "'target_schema' est requis dans la config "
-                "(lakehouse avec schémas uniquement)"
-            )
+        validate_config(config)
 
         incremental = config.get("incremental", {})
         params = dict(config.get("params", {}))
@@ -132,31 +168,49 @@ def run_source(
             if last_value is not None:
                 params[incremental["param_name"]] = last_value
 
-        fetch_page = _build_fetch_page(config)
-        records: list[dict] = []
-        for page in paginate(
-            fetch_page, config["base_url"], params, config.get("pagination")
-        ):
-            records.extend(page)
+        pages = paginate(
+            _build_fetch_page(config),
+            config["base_url"],
+            params,
+            config.get("pagination"),
+        )
 
-        if records:
-            append_records(
-                table_uri(lakehouse_tables_path, target_schema, config["target_table"]),
-                records,
-                storage_options=storage_options,
-            )
-        rows_loaded = len(records)
+        if dry_run:
+            sample = []
+            for page in pages:
+                if len(sample) < DRY_RUN_SAMPLE_SIZE:
+                    sample.extend(page[: DRY_RUN_SAMPLE_SIZE - len(sample)])
+                rows_loaded += len(page)
+        else:
+            records: list[dict] = []
+            for page in pages:
+                records.extend(page)
+            rows_loaded = len(records)
 
-        if incremental.get("enabled") and records:
-            new_watermark = _max_incremental_value(records, incremental["field"])
-            if new_watermark is not None:
-                write_watermark(
-                    lakehouse_tables_path,
-                    source_name,
-                    new_watermark,
-                    schema=log_schema,
+            if records:
+                _add_lineage(records, run_id)
+                append_records(
+                    table_uri(
+                        lakehouse_tables_path,
+                        config["target_schema"],
+                        config["target_table"],
+                    ),
+                    records,
                     storage_options=storage_options,
                 )
+
+                if incremental.get("enabled"):
+                    new_watermark = _max_incremental_value(
+                        records, incremental["field"]
+                    )
+                    if new_watermark is not None:
+                        write_watermark(
+                            lakehouse_tables_path,
+                            source_name,
+                            new_watermark,
+                            schema=log_schema,
+                            storage_options=storage_options,
+                        )
 
         status = "success"
     except Exception as exc:  # noqa: BLE001 — contrat : ne jamais lever
@@ -170,12 +224,17 @@ def run_source(
         error_message=error_message,
         start_ts=start_ts,
         end_ts=end_ts,
+        run_id=run_id,
+        sample=sample,
     )
+
+    if dry_run:
+        return result
 
     try:
         write_log_run(
             lakehouse_tables_path,
-            run_id=result.run_id,
+            run_id=run_id,
             source_name=source_name,
             start_ts=start_ts,
             end_ts=end_ts,

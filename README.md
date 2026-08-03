@@ -30,7 +30,7 @@ No code is fetched from GitHub or PyPI at runtime — the notebook installs exac
 3. In the notebook:
 
    ```python
-   %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.6.0
+   %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.7.0
    ```
 
 `--no-index` guarantees pip resolves only from that folder — nothing is fetched from PyPI or GitHub. The folder layout is entirely up to you: any path works as long as the same path is passed to `--find-links`.
@@ -69,11 +69,23 @@ for source_config in sources:
 
 `run_source(config)` **never raises**: every error is caught and reported in the returned `RunResult` (`status`, `rows_loaded`, `error_message`, `start_ts`, `end_ts`, `run_id`), so the calling loop always continues with the next source.
 
+Before a first run — or when onboarding a new client API — use dry-run mode: it validates the config and really calls the API (credentials and pagination included), but writes nothing.
+
+```python
+result = run_source(config, dry_run=True)
+print(result.status, result.rows_loaded, result.error_message)
+print(result.sample)   # first raw records
+```
+
+Every written row carries `_flume_run_id` and `_flume_ingested_at`, so any row can be traced back to the run that produced it — and to its `log_runs` entry.
+
 The library targets **schema-enabled lakehouses only**: each source declares its destination schema (`target_schema`, required — e.g. `bronze`), and the technical tables (`watermark`, `log_runs`) live in a dedicated schema, `flume` by default (`run_source(..., log_schema="...")` to change it).
 
 ## Source configuration
 
 > 📖 **Full reference**: [docs/configuration.md](docs/configuration.md) — every key of every auth and pagination type, with required/optional status, defaults, stop conditions and examples. Below is an overview.
+
+Configurations are **strictly validated**: an unknown key is an error with a "did you mean…" suggestion, never a silent no-op. `validate_config(config)` is exported so a whole source list can be checked before running anything.
 
 ```json
 {
@@ -128,6 +140,8 @@ The token is obtained once per `run_source` (no mid-run refresh).
 | `next_link` | Follows a next-page URL from the response body (e.g. `@odata.nextLink`) |
 | `cursor` | Not implemented (stub) |
 
+Data endpoints can be `GET` (default) or `POST`/`PUT`/`PATCH` via `method` + `body`; `pagination.params_in` decides whether pagination params go to the query string or into the request payload.
+
 ### Incremental (watermark)
 
 When `incremental.enabled`, the last watermark is read from `<log_schema>.watermark` and sent as a query param (`param_name`). After a **successful** run only, the max of `incremental.field` over the loaded records becomes the new watermark.
@@ -177,6 +191,8 @@ Unit tests are fully mocked — no network calls. Python ≥ 3.10 required local
 3. Commit, tag (`git tag vX.Y.Z`), push branch and tag
 4. Add the new tag's SHA to the table above (`git rev-parse vX.Y.Z`)
 5. `python scripts/build_fabric_wheels.py` and upload `fabric-wheels/` to the wheels folder of the target lakehouses (`Files/libs/` by convention)
+
+Version history: [CHANGELOG.md](CHANGELOG.md).
 
 ## Out of scope
 

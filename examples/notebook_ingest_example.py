@@ -3,7 +3,7 @@
 # (see scripts/build_fabric_wheels.py); each source in the JSON declares
 # target_schema + target_table.
 
-# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.6.0
+# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.7.0
 
 import json
 

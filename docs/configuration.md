@@ -31,11 +31,43 @@ Exhaustive reference of every option: the JSON configuration of a source (key by
 | `target_table` | string | **yes** | — | Destination table. Written in `append` mode with `schema_mode=merge`. Letters/digits/underscore only. |
 | `retry` | object | no | see [Retry](#retry) | HTTP retry policy. |
 | `timeout_seconds` | number | no | `60` | Timeout of each data HTTP request. |
+| `method` | string | no | `GET` | HTTP method of the data calls: `GET`, `POST`, `PUT`, `PATCH`. |
+| `body` | object | no | `{}` | Request body sent on every data call. Requires a non-`GET` `method`. |
+| `body_format` | string | no | `json` | `json` or `form` encoding of `body`. |
+
+**Configuration is validated strictly**: an unknown key raises a `ConfigError` (with a "did you mean…" suggestion) instead of being ignored. This is deliberate — a typo on an optional key such as `pagintaion` used to silently disable pagination, producing a run reported as `success` with most of the data missing. Validate ahead of a long batch with:
+
+```python
+from flume_lib import validate_config, ConfigError
+
+for source in sources:
+    try:
+        validate_config(source)
+    except ConfigError as exc:
+        print(f"{source.get('name')}: {exc}")
+```
+
+### POST endpoints
+
+Search and reporting APIs often require a POST with a JSON payload. Set `method` and `body`; use `pagination.params_in` to say whether pagination and incremental params belong in the query string (default) or inside the payload:
+
+```json
+{
+  "base_url": "https://api.example.com/v1/search",
+  "method": "POST",
+  "body": {"query": "status:active", "fields": ["id", "updated_at"]},
+  "pagination": {"type": "offset", "limit": 200, "params_in": "body"},
+  "target_schema": "bronze",
+  "target_table": "search_results"
+}
+```
+
+With `"params_in": "body"` the request payload for the second page is `{"query": …, "fields": …, "limit": 200, "offset": 200}`. With the default `"query"`, `body` stays constant and the pagination params go to the query string.
 
 ## `run_source` parameters
 
 ```python
-run_source(config, lakehouse_tables_path=..., storage_options=..., log_schema=...)
+run_source(config, lakehouse_tables_path=..., storage_options=..., log_schema=..., dry_run=False)
 ```
 
 | Parameter | Type | Default | Description |
@@ -44,8 +76,32 @@ run_source(config, lakehouse_tables_path=..., storage_options=..., log_schema=..
 | `lakehouse_tables_path` | str | `/lakehouse/default/Tables` | Tables root. In Fabric, the default is automatically resolved to the OneLake ABFSS URI of the notebook's default lakehouse. Can be an explicit `abfss://...` URI to target another lakehouse. |
 | `storage_options` | dict \| None | `None` | Passed through to delta-rs. If absent with an `abfss://` URI, a storage bearer token is obtained via `notebookutils`. |
 | `log_schema` | str | `flume` | Schema of the technical tables `watermark` and `log_runs`. |
+| `dry_run` | bool | `False` | See [Dry run](#dry-run). |
 
-Returns a `RunResult` with `source_name`, `status` (`success`/`failed`), `rows_loaded`, `error_message` (None on success), `start_ts`, `end_ts` (ISO 8601 UTC), `run_id` (UUID). **Never raises.**
+Returns a `RunResult` with `source_name`, `status` (`success`/`failed`), `rows_loaded`, `error_message` (None on success), `start_ts`, `end_ts` (ISO 8601 UTC), `run_id` (UUID), and `sample` (dry run only). **Never raises.**
+
+### Dry run
+
+`run_source(config, dry_run=True)` validates the configuration, **really calls the API** — so credentials, pagination and the response shape are all exercised — counts the rows, and writes nothing: no data, no watermark advance, no `log_runs` entry. The first few records are returned raw (without lineage columns) in `RunResult.sample`.
+
+```python
+result = run_source(config, dry_run=True)
+print(result.status, result.rows_loaded, result.error_message)
+print(result.sample)
+```
+
+Rows are counted as they stream, never accumulated, so a dry run is safe on a source of any size. Note that it does not exercise the write path: schema conflicts on the target table only surface on a real run.
+
+### Lineage columns
+
+Every written row carries two extra columns:
+
+| Column | Content |
+|---|---|
+| `_flume_run_id` | UUID of the run — same value as `RunResult.run_id` and the matching `log_runs` row. |
+| `_flume_ingested_at` | ISO 8601 UTC timestamp of the write. |
+
+They make it possible to trace a row back to the run that produced it, de-duplicate after a partial retry, or isolate the rows of a bad run. The `_flume_` prefix avoids collisions with API fields.
 
 ## Secret references
 
@@ -197,6 +253,7 @@ The type is selected by `pagination.type`. All strategies accept:
 | Common key | Default | Description |
 |---|---|---|
 | `items_field` | auto | Response field containing the record list. By default: a list response is used as-is, otherwise `data`, `items`, `results`, `value` are probed. Explicit error if none found. |
+| `params_in` | `query` | Where pagination and incremental params are sent: `query` (query string) or `body` (merged into the request payload). `body` requires a non-`GET` `method`. |
 
 ### `offset` — offset/limit
 
