@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "flume-lib"
-version = "0.5.0"
+version = "0.6.0"
 description = "Accélérateur d'ingestion API générique pour notebooks Fabric Python (non-Spark)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "build>=1.0"]
 # Accès Key Vault hors Fabric (dans Fabric, notebookutils est préinstallé)
 azure = ["azure-identity>=1.15", "azure-keyvault-secrets>=4.8"]
 

@@ -233,6 +233,31 @@ class TestTokenEndpoint:
         with pytest.raises(AuthError, match="token_url"):
             build_auth_headers({"type": "token_endpoint"})
 
+    def test_get_with_secret_ref_in_body_raises(self, monkeypatch):
+        monkeypatch.setenv("S", "x")
+        with pytest.raises(AuthError, match="GET"):
+            build_auth_headers(
+                {
+                    "type": "token_endpoint",
+                    "token_url": "https://api.exemple.com/token",
+                    "method": "GET",
+                    "body": {"api_key": {"env_var": "S"}},
+                }
+            )
+
+    def test_get_with_literals_only_is_allowed(self, monkeypatch):
+        mock = _mock_token_response(monkeypatch, {"access_token": "t"})
+        headers = build_auth_headers(
+            {
+                "type": "token_endpoint",
+                "token_url": "https://api.exemple.com/token",
+                "method": "GET",
+                "body": {"format": "json"},
+            }
+        )
+        assert headers == {"Authorization": "Bearer t"}
+        assert mock.call_args.kwargs["params"] == {"format": "json"}
+
 
 class TestEdgeCases:
     def test_no_auth_returns_empty(self):

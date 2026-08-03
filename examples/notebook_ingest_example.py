@@ -1,9 +1,9 @@
-# Notebook Fabric Python (non-Spark) — exemple de consommation de flume-lib.
-# Prérequis : lakehouse avec schémas ; les wheels sont uploadés dans
-# Files/libs/<version>/ (voir scripts/build_fabric_wheels.py) ; chaque source
-# du JSON déclare target_schema + target_table.
+# Fabric Python notebook (non-Spark) — example consumer of flume-lib.
+# Prerequisites: schema-enabled lakehouse; wheels uploaded to
+# Files/libs/<version>/ (see scripts/build_fabric_wheels.py); each source
+# in the JSON declares target_schema + target_table.
 
-# %pip install --no-index --find-links=/lakehouse/default/Files/libs/0.5.0 flume-lib
+# %pip install --no-index --find-links=/lakehouse/default/Files/libs/0.6.0 flume-lib
 
 import json
 
@@ -16,10 +16,10 @@ results = []
 for source_config in sources:
     result = run_source(source_config)
     results.append(result)
-    print(f"{source_config['name']}: {result.status} ({result.rows_loaded} lignes)")
+    print(f"{source_config['name']}: {result.status} ({result.rows_loaded} rows)")
 
 failed = [r for r in results if r.status == "failed"]
 if failed:
-    print(f"\n{len(failed)} source(s) en échec :")
+    print(f"\n{len(failed)} source(s) failed:")
     for r in failed:
         print(f"  - {r.source_name}: {r.error_message}")

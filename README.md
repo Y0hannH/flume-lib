@@ -1,28 +1,43 @@
 # flume-lib
 
-Accélérateur d'ingestion API générique pour notebooks **Microsoft Fabric Python** (non-Spark). Python pur : écriture Delta via [delta-rs](https://github.com/delta-io/delta-rs) (`deltalake`), sans dépendance à PySpark.
+Generic API ingestion accelerator for **Microsoft Fabric Python notebooks** (non-Spark). Pure Python: Delta writes via [delta-rs](https://github.com/delta-io/delta-rs) (`deltalake`), no PySpark dependency.
+
+Point it at a JSON list of API sources; it handles authentication (Key Vault-backed secrets, OAuth2 service principals, custom login endpoints), pagination, incremental loading with watermarks, bounded retries, and writes everything — data and run logs — as Delta tables in a schema-enabled lakehouse.
+
+## Requirements
+
+- A Microsoft Fabric **Python notebook** (non-Spark) — kernels 3.10 / 3.11 / 3.12
+- A **schema-enabled lakehouse** attached as default (schemas cannot be enabled on an existing lakehouse — it must be created with the option on)
+- For Key Vault secret references: the notebook identity needs **Get** permission on the vault's secrets
 
 ## Installation
 
-### Recommandé : wheels dans le lakehouse (hors-ligne, sans GitHub ni PyPI au runtime)
+### Recommended: offline wheels from the lakehouse
 
-Générer le lot de wheels (lib + dépendances, pour le kernel Fabric Python 3.12 / Linux) :
+No code is fetched from GitHub or PyPI at runtime — the notebook installs exactly the files you uploaded.
 
-```
-python scripts/build_fabric_wheels.py
-```
+1. On your workstation, generate the wheel batch (library + all dependencies, resolved for the Fabric kernel — Linux x86_64, Python 3.12 by default):
 
-Uploader les `.whl` du dossier `fabric-wheels/` dans `Files/libs` du lakehouse, puis dans le notebook :
+   ```bash
+   git clone https://github.com/Y0hannH/flume-lib.git
+   cd flume-lib
+   pip install -e ".[dev]"
+   python scripts/build_fabric_wheels.py          # add --python-version 3.11 for another kernel
+   ```
 
-```
-%pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib
-```
+2. Upload the `.whl` files from `fabric-wheels/` to the lakehouse, one folder per version — e.g. `Files/libs/0.6.0/`. Never overwrite an existing folder: a new version is a new folder, the old one stays available for rollback.
 
-`--no-index` garantit que rien n'est téléchargé au runtime : le code exécuté est exactement celui déposé dans le lakehouse. Ne jamais écraser un wheel existant — une nouvelle version = un nouveau fichier. Autre kernel : `--python-version 3.11`.
+3. In the notebook:
 
-### Alternative : install directe depuis GitHub
+   ```python
+   %pip install --no-index --find-links=/lakehouse/default/Files/libs/0.6.0 flume-lib
+   ```
 
-Épingler le **commit SHA complet** de la release plutôt que le tag : un tag peut être re-pointé par un attaquant ayant un accès en écriture au repo, un SHA est immuable.
+`--no-index` guarantees pip resolves only from that folder. Pinning the folder per version means upgrading a notebook is an explicit, visible path change.
+
+### Alternative: direct install from GitHub (dev environments)
+
+Pin the **full commit SHA** of a release, never a tag — a tag can be re-pointed by an attacker with write access, a SHA cannot:
 
 ```
 %pip install git+https://github.com/Y0hannH/flume-lib.git@679a15adf13b7169a520194b76ee8cfd2cfe48aa
@@ -33,7 +48,7 @@ Uploader les `.whl` du dossier `fabric-wheels/` dans `Files/libs` du lakehouse, 
 | v0.5.0 | `679a15adf13b7169a520194b76ee8cfd2cfe48aa` |
 | v0.4.0 | `75fb767dad8c453930ad5249c2b4540c5f263ce0` |
 
-Le SHA d'une version se retrouve avec `git rev-parse vX.Y.Z`, ou sur la [page des tags](https://github.com/Y0hannH/flume-lib/tags).
+Find a version's SHA with `git rev-parse vX.Y.Z` or on the [tags page](https://github.com/Y0hannH/flume-lib/tags).
 
 ## Usage
 
@@ -46,30 +61,28 @@ with open("/lakehouse/default/Files/conf/sources.json") as f:
 
 for source_config in sources:
     result = run_source(source_config)
-    print(f"{source_config['name']}: {result.status} ({result.rows_loaded} lignes)")
+    print(f"{source_config['name']}: {result.status} ({result.rows_loaded} rows)")
 ```
 
-`run_source(config, lakehouse_tables_path="/lakehouse/default/Tables")` ne lève **jamais** d'exception : toute erreur est catchée et remontée dans le `RunResult` (`status`, `rows_loaded`, `error_message`, `start_ts`, `end_ts`, `run_id`), pour que la boucle appelante continue sur la source suivante.
+`run_source(config)` **never raises**: every error is caught and reported in the returned `RunResult` (`status`, `rows_loaded`, `error_message`, `start_ts`, `end_ts`, `run_id`), so the calling loop always continues with the next source.
 
-La lib cible exclusivement des **lakehouses avec schémas** : chaque source déclare son schéma de destination (`target_schema`, requis — ex. `bronze`), et les tables techniques (`watermark`, `log_runs`) vont dans un schéma dédié, `flume` par défaut, personnalisable via `run_source(..., log_schema="...")`.
+The library targets **schema-enabled lakehouses only**: each source declares its destination schema (`target_schema`, required — e.g. `bronze`), and the technical tables (`watermark`, `log_runs`) live in a dedicated schema, `flume` by default (`run_source(..., log_schema="...")` to change it).
 
-## Configuration d'une source
+## Source configuration
 
-> 📖 **Référence complète** : [docs/configuration.md](docs/configuration.md) — toutes les clés de chaque type d'auth et de pagination, avec requis/optionnel, valeurs par défaut, comportements d'arrêt et exemples. Ce qui suit est un aperçu.
+> 📖 **Full reference**: [docs/configuration.md](docs/configuration.md) — every key of every auth and pagination type, with required/optional status, defaults, stop conditions and examples. Below is an overview.
 
 ```json
 {
-  "name": "source_exemple",
-  "base_url": "https://api.exemple.com/v1/items",
+  "name": "example_source",
+  "base_url": "https://api.example.com/v1/items",
   "auth": {
     "type": "bearer_token",
-    "token_env_var": "SOURCE_EXEMPLE_TOKEN"
+    "token": {"keyvault_url": "https://mykv.vault.azure.net", "secret_name": "src-token"}
   },
   "pagination": {
     "type": "offset",
-    "limit": 100,
-    "limit_param": "limit",
-    "offset_param": "offset"
+    "limit": 100
   },
   "incremental": {
     "enabled": true,
@@ -77,7 +90,7 @@ La lib cible exclusivement des **lakehouses avec schémas** : chaque source déc
     "param_name": "updated_since"
   },
   "target_schema": "bronze",
-  "target_table": "source_exemple",
+  "target_table": "example_source",
   "retry": {
     "max_attempts": 3,
     "backoff_multiplier": 1
@@ -87,110 +100,86 @@ La lib cible exclusivement des **lakehouses avec schémas** : chaque source déc
 
 ### Auth
 
-Les credentials ne sont **jamais** en clair dans la config. Chaque credential est une **référence de secret**, résolue au runtime :
+Credentials are **never stored in the configuration** — every credential is a **secret reference** resolved at runtime:
 
-- `{"env_var": "NOM_VAR"}` — variable d'environnement
-- `{"keyvault_url": "https://monkv.vault.azure.net", "secret_name": "mon-secret"}` — Azure Key Vault, via `notebookutils` dans Fabric (préinstallé), ou `flume-lib[azure]` hors Fabric
-- une chaîne littérale — **uniquement** pour les valeurs non sensibles (username public, `grant_type`…)
+- `{"env_var": "VAR_NAME"}` — environment variable
+- `{"keyvault_url": "https://mykv.vault.azure.net", "secret_name": "my-secret"}` — Azure Key Vault, via `notebookutils` in Fabric (preinstalled) or `flume-lib[azure]` outside Fabric
+- a literal string — **only** for non-sensitive values (public username, `grant_type`, scope…)
 
-La forme historique `token_env_var` / `key_env_var` / `username_env_var` / `password_env_var` reste supportée.
+| Type | Purpose |
+|---|---|
+| `bearer_token` | Static token; custom header name/prefix supported |
+| `api_key_header` | API key in a header (e.g. `Ocp-Apim-Subscription-Key`) |
+| `basic` | HTTP Basic |
+| `oauth2_client_credentials` | Standard OAuth2 flow — Entra ID service principals (Microsoft APIs) via `tenant_id`, or any IdP via `token_url` |
+| `token_endpoint` | Arbitrary login call (JSON/form body, secret refs in any field, token extracted by JSON path) |
 
-| Type | Clés de config | Statut |
-|---|---|---|
-| `bearer_token` | `token` (réf. secret), `header_name` (défaut `Authorization`), `value_prefix` (défaut `Bearer `) | ✅ |
-| `api_key_header` | `key` (réf. secret), `header_name` (défaut `X-API-Key`) | ✅ |
-| `basic` | `username`, `password` (réf. secret) | ✅ |
-| `oauth2_client_credentials` | `tenant_id` ou `token_url`, `client_id`, `client_secret` (réf. secret), `scope` | ✅ |
-| `token_endpoint` | `token_url`, `method` (défaut `POST`), `body`, `body_format` (`json`/`form`), `headers`, `token_json_path` (défaut `access_token`), `header_name`, `value_prefix` | ✅ |
-
-**Service principal Entra ID (APIs Microsoft : Graph, Fabric, Azure Management…)** — `oauth2_client_credentials` avec `tenant_id` (le `token_url` `login.microsoftonline.com/.../oauth2/v2.0/token` est déduit) :
-
-```json
-"auth": {
-  "type": "oauth2_client_credentials",
-  "tenant_id": "00000000-0000-0000-0000-000000000000",
-  "client_id": "11111111-1111-1111-1111-111111111111",
-  "client_secret": {"keyvault_url": "https://monkv.vault.azure.net", "secret_name": "sp-flume-secret"},
-  "scope": "https://graph.microsoft.com/.default"
-}
-```
-
-**Token obtenu via un appel API de login** — `token_endpoint` ; les valeurs de `body`/`headers` sont des littéraux ou des références de secret, le token est extrait de la réponse JSON par chemin pointé :
-
-```json
-"auth": {
-  "type": "token_endpoint",
-  "token_url": "https://api.exemple.com/login",
-  "body": {
-    "username": "svc_flume",
-    "password": {"keyvault_url": "https://monkv.vault.azure.net", "secret_name": "api-exemple-pwd"}
-  },
-  "token_json_path": "data.token"
-}
-```
-
-Le token est obtenu une fois par `run_source` (pas de refresh en cours de run).
+The token is obtained once per `run_source` (no mid-run refresh).
 
 ### Pagination
 
-| Type | Clés de config | Statut |
-|---|---|---|
-| `offset` | `limit`, `limit_param`, `offset_param` | ✅ |
-| `page` | `page_param` (défaut `page`), `start_page` (défaut 1), `size_param` + `page_size` (optionnels), `total_pages_header` (optionnel) | ✅ |
-| `next_link` | `next_field` (défaut `next`), `items_field` | ✅ |
-| `cursor` | — | stub |
+| Type | Purpose |
+|---|---|
+| `offset` | Offset/limit query params; stops on empty or partial page |
+| `page` | Page number; total page count read from a response header (`total_pages_header`) or stop on empty/partial page |
+| `next_link` | Follows a next-page URL from the response body (e.g. `@odata.nextLink`) |
+| `cursor` | Not implemented (stub) |
 
-`items_field` (optionnel, toutes stratégies) : nom du champ de la réponse contenant les enregistrements. À défaut, la lib détecte une réponse liste, ou cherche `data` / `items` / `results` / `value`.
+### Incremental (watermark)
 
-**`page` avec total en header** : si `total_pages_header` est renseigné (ex. `"X-Total-Pages"`), le nombre total de pages est lu dans les headers de la première réponse et toutes les pages sont parcourues. Sans ce header, arrêt sur page vide (ou partielle si `page_size` est renseigné) :
-
-```json
-"pagination": {
-  "type": "page",
-  "page_param": "page",
-  "size_param": "per_page",
-  "page_size": 100,
-  "total_pages_header": "X-Total-Pages"
-}
-```
-
-### Incrémental (watermark)
-
-Si `incremental.enabled`, le dernier watermark est lu dans la table `watermark` et passé en query param (`param_name`). En fin de run **réussi uniquement**, le max de `incremental.field` sur les enregistrements chargés devient le nouveau watermark. Pas d'avancement du watermark en cas d'échec.
+When `incremental.enabled`, the last watermark is read from `<log_schema>.watermark` and sent as a query param (`param_name`). After a **successful** run only, the max of `incremental.field` over the loaded records becomes the new watermark.
 
 ### Retry
 
-Backoff exponentiel via `tenacity` sur les erreurs réseau et HTTP 429/5xx, paramétré par `retry.max_attempts` (défaut 3) et `retry.backoff_multiplier` (défaut 1). Les 4xx (hors 429) échouent immédiatement.
+Exponential backoff via `tenacity` on network errors and HTTP 429/5xx, driven by `retry.max_attempts` (default 3) and `retry.backoff_multiplier` (default 1). Other 4xx fail immediately.
 
-## Écriture Delta dans Fabric (OneLake)
+## Delta writes in Fabric (OneLake)
 
-Le montage local `/lakehouse/default/...` des notebooks Fabric ne supporte pas le rename atomique requis par le commit du transaction log delta-rs (`Operation not permitted (os error 1)`, table sans `_delta_log` valide). La lib contourne le problème automatiquement : dans Fabric, le chemin par défaut `/lakehouse/default/Tables` est résolu vers l'URI ABFSS OneLake du lakehouse par défaut du notebook, et l'écriture s'authentifie avec un token de stockage obtenu via `notebookutils` — rien à configurer.
+The local `/lakehouse/default/...` mount in Fabric notebooks does not support the atomic rename that the delta-rs transaction log commit requires (`Operation not permitted (os error 1)`, table left without a valid `_delta_log`). The library works around this automatically: in Fabric, the default path is resolved to the OneLake ABFSS URI of the notebook's default lakehouse, and writes authenticate with a storage token obtained via `notebookutils` — nothing to configure.
 
-Pour cibler un autre lakehouse, passer directement son URI ABFSS :
+To target another lakehouse, pass its ABFSS URI directly:
 
 ```python
 run_source(config, lakehouse_tables_path="abfss://<workspace_id>@onelake.dfs.fabric.microsoft.com/<lakehouse_id>/Tables")
 ```
 
-Hors Fabric (stockage Azure ou local), `storage_options` est transmis tel quel à delta-rs : `run_source(config, lakehouse_tables_path=..., storage_options={...})`.
+Outside Fabric (Azure or local storage), `storage_options` is passed through to delta-rs as-is.
 
-## Tables techniques
+## Technical tables
 
-Tables Delta créées automatiquement dans le schéma technique (`log_schema`, défaut `flume`) du lakehouse :
+Delta tables created automatically in the technical schema (`log_schema`, default `flume`):
 
-- **`flume.watermark`** : `source_name`, `last_value`, `updated_ts`
-- **`flume.log_runs`** : `run_id`, `source_name`, `start_ts`, `end_ts`, `status`, `rows_loaded`, `error_message` — une ligne par appel à `run_source`, succès ou échec
+- **`flume.watermark`**: `source_name`, `last_value`, `updated_ts`
+- **`flume.log_runs`**: `run_id`, `source_name`, `start_ts`, `end_ts`, `status`, `rows_loaded`, `error_message` — one row per `run_source` call, success or failure
 
-## Développement
+## Security
 
-```
+See [docs/security.md](docs/security.md) — threat model, supply-chain posture, secret handling, and how to report a vulnerability. Key point for operators: **the source configuration decides where tokens are sent** — protect `Files/conf/` like code.
+
+## Development
+
+```bash
+git clone https://github.com/Y0hannH/flume-lib.git
+cd flume-lib
 pip install -e ".[dev]"
 pytest
 ```
 
-Tests unitaires mockés, aucun appel réseau réel.
+Unit tests are fully mocked — no network calls. Python ≥ 3.10 required locally.
 
-## Hors scope
+### Release procedure
 
-- CLI d'installation/scaffolding côté client
-- Pagination cursor (stub)
+1. Bump the version in `pyproject.toml` and `src/flume_lib/__init__.py`
+2. `pytest`
+3. Commit, tag (`git tag vX.Y.Z`), push branch and tag
+4. Add the new tag's SHA to the table above (`git rev-parse vX.Y.Z`)
+5. `python scripts/build_fabric_wheels.py` and upload `fabric-wheels/` to `Files/libs/<version>/` in the target lakehouses
+
+## Out of scope
+
+- Client-side scaffolding/installation CLI
+- Cursor pagination (stub)
+
+## License
+
+[MIT](LICENSE)

@@ -9,6 +9,7 @@ import pytest
 from flume_lib._delta import (
     resolve_lakehouse_tables_path,
     storage_options_for,
+    table_uri,
 )
 
 
@@ -55,6 +56,28 @@ class TestResolveLakehouseTablesPath:
             resolve_lakehouse_tables_path("/lakehouse/default/Tables")
             == "/lakehouse/default/Tables"
         )
+
+
+class TestTableUri:
+    def test_valid_identifiers(self):
+        assert table_uri("/Tables", "bronze", "ma_source") == "/Tables/bronze/ma_source"
+
+    @pytest.mark.parametrize(
+        "schema,table",
+        [
+            ("../Files", "t"),
+            ("bronze", "../../x"),
+            ("bronze", "a/b"),
+            ("bronze", "a b"),
+            ("", "t"),
+            ("bronze", ""),
+            ("1bronze", "t"),
+            ("bronze", None),
+        ],
+    )
+    def test_invalid_identifiers_raise(self, schema, table):
+        with pytest.raises(ValueError, match="invalide"):
+            table_uri("/Tables", schema, table)
 
 
 class TestStorageOptionsFor:

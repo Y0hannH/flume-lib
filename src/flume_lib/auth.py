@@ -82,6 +82,15 @@ def _fetch_token_endpoint(auth_config: dict) -> str:
     if not token_url:
         raise AuthError("token_endpoint : 'token_url' requis")
 
+    method = auth_config.get("method", "POST").upper()
+    if method == "GET" and any(
+        isinstance(ref, dict) for ref in auth_config.get("body", {}).values()
+    ):
+        raise AuthError(
+            "token_endpoint : référence de secret interdite dans 'body' en GET — "
+            "les paramètres partent dans l'URL (logs serveurs, proxies) ; utiliser POST"
+        )
+
     body = {
         key: resolve_secret(ref, f"body.{key}")
         for key, ref in auth_config.get("body", {}).items()
@@ -91,7 +100,6 @@ def _fetch_token_endpoint(auth_config: dict) -> str:
         for key, ref in auth_config.get("headers", {}).items()
     }
 
-    method = auth_config.get("method", "POST").upper()
     body_format = auth_config.get("body_format", "json")
     timeout = auth_config.get("timeout_seconds", DEFAULT_TOKEN_TIMEOUT_SECONDS)
 

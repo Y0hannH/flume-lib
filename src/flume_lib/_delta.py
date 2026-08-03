@@ -2,6 +2,7 @@
 sans pyspark ni pyarrow)."""
 
 import json
+import re
 
 import arro3.core as ac
 from deltalake import DeltaTable, QueryBuilder, write_deltalake
@@ -10,10 +11,27 @@ from deltalake.exceptions import TableNotFoundError
 
 ONELAKE_HOST = "onelake.dfs.fabric.microsoft.com"
 
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def validate_identifier(name, kind: str) -> str:
+    """Valide un nom de schéma/table avant concaténation dans un chemin :
+    bloque toute traversée (../, /, caractères spéciaux) depuis la config."""
+    if not isinstance(name, str) or not _IDENTIFIER_RE.match(name):
+        raise ValueError(
+            f"{kind} invalide : {name!r} — uniquement lettres, chiffres et "
+            "underscore, sans commencer par un chiffre"
+        )
+    return name
+
 
 def table_uri(lakehouse_tables_path: str, schema: str, table_name: str) -> str:
     """URI d'une table dans un lakehouse avec schémas : Tables/<schema>/<table>."""
-    return f"{lakehouse_tables_path.rstrip('/')}/{schema}/{table_name}"
+    return (
+        f"{lakehouse_tables_path.rstrip('/')}/"
+        f"{validate_identifier(schema, 'schéma')}/"
+        f"{validate_identifier(table_name, 'table')}"
+    )
 
 
 def resolve_lakehouse_tables_path(path: str) -> str:
