@@ -55,6 +55,8 @@ La lib cible exclusivement des **lakehouses avec schémas** : chaque source déc
 
 ## Configuration d'une source
 
+> 📖 **Référence complète** : [docs/configuration.md](docs/configuration.md) — toutes les clés de chaque type d'auth et de pagination, avec requis/optionnel, valeurs par défaut, comportements d'arrêt et exemples. Ce qui suit est un aperçu.
+
 ```json
 {
   "name": "source_exemple",
