@@ -25,11 +25,12 @@ Uploader les `.whl` du dossier `fabric-wheels/` dans `Files/libs` du lakehouse, 
 Épingler le **commit SHA complet** de la release plutôt que le tag : un tag peut être re-pointé par un attaquant ayant un accès en écriture au repo, un SHA est immuable.
 
 ```
-%pip install git+https://github.com/Y0hannH/flume-lib.git@75fb767dad8c453930ad5249c2b4540c5f263ce0
+%pip install git+https://github.com/Y0hannH/flume-lib.git@679a15adf13b7169a520194b76ee8cfd2cfe48aa
 ```
 
 | Version | SHA |
 |---|---|
+| v0.5.0 | `679a15adf13b7169a520194b76ee8cfd2cfe48aa` |
 | v0.4.0 | `75fb767dad8c453930ad5249c2b4540c5f263ce0` |
 
 Le SHA d'une version se retrouve avec `git rev-parse vX.Y.Z`, ou sur la [page des tags](https://github.com/Y0hannH/flume-lib/tags).
