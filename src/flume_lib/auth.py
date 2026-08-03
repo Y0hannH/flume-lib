@@ -128,7 +128,9 @@ def build_auth_headers(auth_config: dict | None) -> dict[str, str]:
 
     if auth_type == "bearer_token":
         token = _resolve(auth_config, "token")
-        return {"Authorization": f"Bearer {token}"}
+        header_name = auth_config.get("header_name", "Authorization")
+        value_prefix = auth_config.get("value_prefix", "Bearer ")
+        return {header_name: f"{value_prefix}{token}"}
 
     if auth_type == "api_key_header":
         key = _resolve(auth_config, "key")

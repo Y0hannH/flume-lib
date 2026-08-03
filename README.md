@@ -5,7 +5,7 @@ Accélérateur d'ingestion API générique pour notebooks **Microsoft Fabric Pyt
 ## Installation
 
 ```
-%pip install git+https://github.com/Y0hannH/flume-lib.git@v0.2.0
+%pip install git+https://github.com/Y0hannH/flume-lib.git@v0.3.0
 ```
 
 ## Usage
@@ -65,7 +65,7 @@ La forme historique `token_env_var` / `key_env_var` / `username_env_var` / `pass
 
 | Type | Clés de config | Statut |
 |---|---|---|
-| `bearer_token` | `token` (réf. secret) | ✅ |
+| `bearer_token` | `token` (réf. secret), `header_name` (défaut `Authorization`), `value_prefix` (défaut `Bearer `) | ✅ |
 | `api_key_header` | `key` (réf. secret), `header_name` (défaut `X-API-Key`) | ✅ |
 | `basic` | `username`, `password` (réf. secret) | ✅ |
 | `oauth2_client_credentials` | `tenant_id` ou `token_url`, `client_id`, `client_secret` (réf. secret), `scope` | ✅ |
@@ -104,10 +104,23 @@ Le token est obtenu une fois par `run_source` (pas de refresh en cours de run).
 | Type | Clés de config | Statut |
 |---|---|---|
 | `offset` | `limit`, `limit_param`, `offset_param` | ✅ |
+| `page` | `page_param` (défaut `page`), `start_page` (défaut 1), `size_param` + `page_size` (optionnels), `total_pages_header` (optionnel) | ✅ |
 | `next_link` | `next_field` (défaut `next`), `items_field` | ✅ |
 | `cursor` | — | stub |
 
 `items_field` (optionnel, toutes stratégies) : nom du champ de la réponse contenant les enregistrements. À défaut, la lib détecte une réponse liste, ou cherche `data` / `items` / `results` / `value`.
+
+**`page` avec total en header** : si `total_pages_header` est renseigné (ex. `"X-Total-Pages"`), le nombre total de pages est lu dans les headers de la première réponse et toutes les pages sont parcourues. Sans ce header, arrêt sur page vide (ou partielle si `page_size` est renseigné) :
+
+```json
+"pagination": {
+  "type": "page",
+  "page_param": "page",
+  "size_param": "per_page",
+  "page_size": 100,
+  "total_pages_header": "X-Total-Pages"
+}
+```
 
 ### Incrémental (watermark)
 

@@ -38,6 +38,18 @@ class TestBearerToken:
             "Authorization": "Bearer kv:https://kv.vault.azure.net:src-token"
         }
 
+    def test_custom_header_name_and_prefix(self, monkeypatch):
+        monkeypatch.setenv("MY_TOKEN", "secret123")
+        headers = build_auth_headers(
+            {
+                "type": "bearer_token",
+                "token": {"env_var": "MY_TOKEN"},
+                "header_name": "X-Access-Token",
+                "value_prefix": "",
+            }
+        )
+        assert headers == {"X-Access-Token": "secret123"}
+
     def test_missing_env_var_raises(self, monkeypatch):
         monkeypatch.delenv("MISSING_TOKEN", raising=False)
         with pytest.raises(AuthError, match="MISSING_TOKEN"):

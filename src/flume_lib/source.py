@@ -69,7 +69,8 @@ def _build_fetch_page(config: dict):
         if response.status_code == 429 or response.status_code >= 500:
             raise RetryableHTTPError(response.status_code, url)
         response.raise_for_status()
-        return response.json()
+        # headers requis par certaines stratégies (ex. total de pages)
+        return response.json(), response.headers
 
     def fetch_page(url: str, params: dict):
         return retryer(_get, url, params)
