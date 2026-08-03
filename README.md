@@ -4,9 +4,17 @@ Accélérateur d'ingestion API générique pour notebooks **Microsoft Fabric Pyt
 
 ## Installation
 
+Épingler le **commit SHA complet** de la release plutôt que le tag : un tag peut être re-pointé par un attaquant ayant un accès en écriture au repo, un SHA est immuable.
+
 ```
-%pip install git+https://github.com/Y0hannH/flume-lib.git@v0.4.0
+%pip install git+https://github.com/Y0hannH/flume-lib.git@75fb767dad8c453930ad5249c2b4540c5f263ce0
 ```
+
+| Version | SHA |
+|---|---|
+| v0.4.0 | `75fb767dad8c453930ad5249c2b4540c5f263ce0` |
+
+Le SHA d'une version se retrouve avec `git rev-parse vX.Y.Z`, ou sur la [page des tags](https://github.com/Y0hannH/flume-lib/tags).
 
 ## Usage
 
