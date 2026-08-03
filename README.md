@@ -25,15 +25,17 @@ No code is fetched from GitHub or PyPI at runtime — the notebook installs exac
    python scripts/build_fabric_wheels.py          # add --python-version 3.11 for another kernel
    ```
 
-2. Upload the `.whl` files from `fabric-wheels/` to the lakehouse, one folder per version — e.g. `Files/libs/0.6.0/`. Never overwrite an existing folder: a new version is a new folder, the old one stays available for rollback.
+2. Upload the `.whl` files from `fabric-wheels/` to a folder in the lakehouse — `Files/libs/` by convention.
 
 3. In the notebook:
 
    ```python
-   %pip install --no-index --find-links=/lakehouse/default/Files/libs/0.6.0 flume-lib
+   %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.6.0
    ```
 
-`--no-index` guarantees pip resolves only from that folder. Pinning the folder per version means upgrading a notebook is an explicit, visible path change.
+`--no-index` guarantees pip resolves only from that folder — nothing is fetched from PyPI or GitHub. The folder layout is entirely up to you: any path works as long as the same path is passed to `--find-links`.
+
+Pin the version with `==` so the installed version is explicit and visible in the notebook. Without a pin, pip picks the highest version present in the folder, so dropping a newer batch alongside the old one silently upgrades every notebook pointing at it. Upgrading is then a deliberate act: upload the new batch, and bump the pin in the notebooks you intend to move. Keep the previous batch archived (elsewhere in `Files/`, or in the release zip) so a rollback is just re-uploading it.
 
 ### Alternative: direct install from GitHub (dev environments)
 
@@ -174,7 +176,7 @@ Unit tests are fully mocked — no network calls. Python ≥ 3.10 required local
 2. `pytest`
 3. Commit, tag (`git tag vX.Y.Z`), push branch and tag
 4. Add the new tag's SHA to the table above (`git rev-parse vX.Y.Z`)
-5. `python scripts/build_fabric_wheels.py` and upload `fabric-wheels/` to `Files/libs/<version>/` in the target lakehouses
+5. `python scripts/build_fabric_wheels.py` and upload `fabric-wheels/` to the wheels folder of the target lakehouses (`Files/libs/` by convention)
 
 ## Out of scope
 

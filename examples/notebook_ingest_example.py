@@ -1,9 +1,9 @@
 # Fabric Python notebook (non-Spark) — example consumer of flume-lib.
-# Prerequisites: schema-enabled lakehouse; wheels uploaded to
-# Files/libs/<version>/ (see scripts/build_fabric_wheels.py); each source
-# in the JSON declares target_schema + target_table.
+# Prerequisites: schema-enabled lakehouse; wheels uploaded to the lakehouse
+# (see scripts/build_fabric_wheels.py); each source in the JSON declares
+# target_schema + target_table.
 
-# %pip install --no-index --find-links=/lakehouse/default/Files/libs/0.6.0 flume-lib
+# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.6.0
 
 import json
 

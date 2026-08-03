@@ -18,7 +18,7 @@ Threat model and security posture of flume-lib. Audience: anyone deploying the l
 ## Supply chain
 
 - **Recommended install is fully offline**: wheels (library + all dependencies, resolved at release time) are uploaded to the lakehouse and installed with `pip --no-index`. Nothing is downloaded at runtime; a compromise of GitHub or PyPI after the release cannot affect running notebooks.
-- **One folder per version** (`Files/libs/0.6.0/…`), never overwritten. Upgrading is an explicit path change in the notebook; rollback is the same change in reverse. `SHA256SUMS.txt` ships with each batch.
+- **The wheels folder is the trust boundary**: whoever can write to it decides what runs in every notebook installing from it. Restrict write access to `Files/libs/` the same way you would restrict access to code, and pin the version (`flume-lib==X.Y.Z`) so an added batch cannot silently upgrade notebooks. `SHA256SUMS.txt` ships with each batch for verification.
 - **Git installs must pin a full commit SHA**, never a tag: tags are mutable, SHAs are not.
 - **Repository hardening**: rulesets forbid force-pushes and deletion on `main`, and forbid update/deletion of `v*` tags. Modifying a ruleset requires web-authenticated admin access (2FA), not just a git credential.
 

@@ -6,8 +6,8 @@ Usage :
     python scripts/build_fabric_wheels.py
     python scripts/build_fabric_wheels.py --python-version 3.11 --out dist-fabric
 
-Install côté notebook (après upload des .whl dans Files/libs) :
-    %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib
+Install côté notebook (après upload des .whl dans le dossier de wheels) :
+    %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==X.Y.Z
 """
 
 import argparse
@@ -103,8 +103,9 @@ def main() -> None:
         print(f"  {wheel.name}")
     print(f"\nZip : {zip_path}")
     print(
-        "\nUploader les .whl dans Files/libs du lakehouse, puis :\n"
-        "  %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib"
+        "\nUploader les .whl dans le dossier de wheels du lakehouse, puis :\n"
+        "  %pip install --no-index --find-links=/lakehouse/default/Files/libs "
+        f"flume-lib=={version}"
     )
 
 
