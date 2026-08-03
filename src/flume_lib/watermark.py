@@ -8,7 +8,11 @@ from flume_lib._delta import append_records, query_table, sql_quote, table_uri
 WATERMARK_TABLE = "watermark"
 
 
-def read_watermark(lakehouse_tables_path: str, source_name: str) -> str | None:
+def read_watermark(
+    lakehouse_tables_path: str,
+    source_name: str,
+    storage_options: dict | None = None,
+) -> str | None:
     uri = table_uri(lakehouse_tables_path, WATERMARK_TABLE)
     rows = query_table(
         uri,
@@ -16,11 +20,17 @@ def read_watermark(lakehouse_tables_path: str, source_name: str) -> str | None:
         f"where source_name = {sql_quote(source_name)} "
         "order by updated_ts desc limit 1",
         alias="wm",
+        storage_options=storage_options,
     )
     return rows[0]["last_value"] if rows else None
 
 
-def write_watermark(lakehouse_tables_path: str, source_name: str, last_value: str) -> None:
+def write_watermark(
+    lakehouse_tables_path: str,
+    source_name: str,
+    last_value: str,
+    storage_options: dict | None = None,
+) -> None:
     uri = table_uri(lakehouse_tables_path, WATERMARK_TABLE)
     append_records(
         uri,
@@ -31,4 +41,5 @@ def write_watermark(lakehouse_tables_path: str, source_name: str, last_value: st
                 "updated_ts": datetime.now(timezone.utc).isoformat(),
             }
         ],
+        storage_options=storage_options,
     )

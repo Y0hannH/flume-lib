@@ -44,8 +44,10 @@ def resolve_secret(ref, field_name: str = "secret") -> str:
 
     field_name n'apparaît que dans les messages d'erreur, jamais la valeur.
     """
+    # strip : un secret copié avec un espace ou retour à la ligne final
+    # produit des 401 difficiles à diagnostiquer
     if isinstance(ref, str):
-        return ref
+        return ref.strip()
 
     if isinstance(ref, dict):
         if "env_var" in ref:
@@ -55,7 +57,7 @@ def resolve_secret(ref, field_name: str = "secret") -> str:
                     f"'{field_name}' : variable d'environnement "
                     f"'{ref['env_var']}' non définie"
                 )
-            return value
+            return value.strip()
 
         if "keyvault_url" in ref:
             secret_name = ref.get("secret_name")
@@ -63,7 +65,7 @@ def resolve_secret(ref, field_name: str = "secret") -> str:
                 raise SecretResolutionError(
                     f"'{field_name}' : 'secret_name' manquant dans la référence Key Vault"
                 )
-            return _get_keyvault_secret(ref["keyvault_url"], secret_name)
+            return _get_keyvault_secret(ref["keyvault_url"], secret_name).strip()
 
     raise SecretResolutionError(
         f"'{field_name}' : référence invalide — attendu une chaîne, "

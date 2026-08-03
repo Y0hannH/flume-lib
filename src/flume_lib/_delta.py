@@ -8,8 +8,51 @@ from deltalake import DeltaTable, QueryBuilder, write_deltalake
 from deltalake.exceptions import TableNotFoundError
 
 
+ONELAKE_HOST = "onelake.dfs.fabric.microsoft.com"
+
+
 def table_uri(lakehouse_tables_path: str, table_name: str) -> str:
     return f"{lakehouse_tables_path.rstrip('/')}/{table_name}"
+
+
+def resolve_lakehouse_tables_path(path: str) -> str:
+    """Dans Fabric, convertit le chemin local du lakehouse par défaut vers son
+    URI ABFSS OneLake : le montage local ne supporte pas le rename atomique
+    requis par le commit du transaction log delta-rs (os error 1)."""
+    if not path.startswith("/lakehouse/default/"):
+        return path
+    try:
+        import notebookutils  # préinstallé dans les notebooks Fabric
+
+        context = notebookutils.runtime.context
+        workspace_id = context.get("currentWorkspaceId")
+        lakehouse_id = context.get("defaultLakehouseId")
+        if workspace_id and lakehouse_id:
+            suffix = path.removeprefix("/lakehouse/default/").strip("/")
+            return f"abfss://{workspace_id}@{ONELAKE_HOST}/{lakehouse_id}/{suffix}"
+    except Exception:  # noqa: BLE001 — hors Fabric ou contexte indisponible
+        pass
+    return path
+
+
+def _fabric_storage_options() -> dict | None:
+    try:
+        import notebookutils
+
+        token = notebookutils.credentials.getToken("storage")
+        return {"bearer_token": token, "use_fabric_endpoint": "true"}
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def storage_options_for(uri: str, storage_options: dict | None) -> dict | None:
+    """Options de stockage passées à delta-rs : celles fournies par l'appelant,
+    ou, pour une URI OneLake dans Fabric, un bearer token obtenu au runtime."""
+    if storage_options:
+        return storage_options
+    if uri.startswith("abfss://"):
+        return _fabric_storage_options()
+    return None
 
 
 def _infer_type(values: list) -> ac.DataType:
@@ -63,15 +106,28 @@ def records_to_table(records: list[dict]) -> ac.Table:
     return ac.Table.from_pydict(columns)
 
 
-def append_records(uri: str, records: list[dict], schema_mode: str = "merge") -> None:
-    write_deltalake(uri, records_to_table(records), mode="append", schema_mode=schema_mode)
+def append_records(
+    uri: str,
+    records: list[dict],
+    schema_mode: str = "merge",
+    storage_options: dict | None = None,
+) -> None:
+    write_deltalake(
+        uri,
+        records_to_table(records),
+        mode="append",
+        schema_mode=schema_mode,
+        storage_options=storage_options_for(uri, storage_options),
+    )
 
 
-def query_table(uri: str, sql: str, alias: str = "t") -> list[dict]:
+def query_table(
+    uri: str, sql: str, alias: str = "t", storage_options: dict | None = None
+) -> list[dict]:
     """Exécute une requête SQL sur une table Delta. Retourne [] si la table
     n'existe pas encore."""
     try:
-        dt = DeltaTable(uri)
+        dt = DeltaTable(uri, storage_options=storage_options_for(uri, storage_options))
     except TableNotFoundError:
         return []
     qb = QueryBuilder()

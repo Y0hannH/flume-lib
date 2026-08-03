@@ -13,7 +13,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from flume_lib._delta import append_records, table_uri
+from flume_lib._delta import append_records, resolve_lakehouse_tables_path, table_uri
 from flume_lib.auth import build_auth_headers
 from flume_lib.logging_ import write_log_run
 from flume_lib.pagination import paginate
@@ -86,9 +86,15 @@ def _max_incremental_value(records: list[dict], field_name: str):
 def run_source(
     config: dict,
     lakehouse_tables_path: str = DEFAULT_LAKEHOUSE_TABLES_PATH,
+    storage_options: dict | None = None,
 ) -> RunResult:
     """Exécute l'ingestion d'une source d'après sa config. Toute erreur est
-    catchée et remontée dans RunResult, jamais levée vers l'appelant."""
+    catchée et remontée dans RunResult, jamais levée vers l'appelant.
+
+    Dans Fabric, le chemin local par défaut est automatiquement résolu vers
+    l'URI ABFSS OneLake du lakehouse par défaut (le montage local ne permet
+    pas le commit du transaction log delta-rs). storage_options est passé tel
+    quel à delta-rs pour un stockage non-Fabric ou une auth spécifique."""
     source_name = config.get("name", "<sans_nom>")
     start_ts = _utc_now()
     status = "failed"
@@ -96,10 +102,17 @@ def run_source(
     error_message = None
 
     try:
+        lakehouse_tables_path = resolve_lakehouse_tables_path(lakehouse_tables_path)
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
         incremental = config.get("incremental", {})
         params = dict(config.get("params", {}))
         if incremental.get("enabled"):
-            last_value = read_watermark(lakehouse_tables_path, source_name)
+            last_value = read_watermark(
+                lakehouse_tables_path, source_name, storage_options=storage_options
+            )
             if last_value is not None:
                 params[incremental["param_name"]] = last_value
 
@@ -112,14 +125,21 @@ def run_source(
 
         if records:
             append_records(
-                table_uri(lakehouse_tables_path, config["target_table"]), records
+                table_uri(lakehouse_tables_path, config["target_table"]),
+                records,
+                storage_options=storage_options,
             )
         rows_loaded = len(records)
 
         if incremental.get("enabled") and records:
             new_watermark = _max_incremental_value(records, incremental["field"])
             if new_watermark is not None:
-                write_watermark(lakehouse_tables_path, source_name, new_watermark)
+                write_watermark(
+                    lakehouse_tables_path,
+                    source_name,
+                    new_watermark,
+                    storage_options=storage_options,
+                )
 
         status = "success"
     except Exception as exc:  # noqa: BLE001 — contrat : ne jamais lever
@@ -145,6 +165,7 @@ def run_source(
             status=status,
             rows_loaded=rows_loaded,
             error_message=error_message,
+            storage_options=storage_options,
         )
     except Exception as exc:  # noqa: BLE001
         log_error = f"écriture log_runs impossible — {type(exc).__name__}: {exc}"

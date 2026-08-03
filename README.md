@@ -5,7 +5,7 @@ Accélérateur d'ingestion API générique pour notebooks **Microsoft Fabric Pyt
 ## Installation
 
 ```
-%pip install git+https://github.com/Y0hannH/flume-lib.git@v0.3.0
+%pip install git+https://github.com/Y0hannH/flume-lib.git@v0.4.0
 ```
 
 ## Usage
@@ -129,6 +129,18 @@ Si `incremental.enabled`, le dernier watermark est lu dans la table `watermark` 
 ### Retry
 
 Backoff exponentiel via `tenacity` sur les erreurs réseau et HTTP 429/5xx, paramétré par `retry.max_attempts` (défaut 3) et `retry.backoff_multiplier` (défaut 1). Les 4xx (hors 429) échouent immédiatement.
+
+## Écriture Delta dans Fabric (OneLake)
+
+Le montage local `/lakehouse/default/...` des notebooks Fabric ne supporte pas le rename atomique requis par le commit du transaction log delta-rs (`Operation not permitted (os error 1)`, table sans `_delta_log` valide). La lib contourne le problème automatiquement : dans Fabric, le chemin par défaut `/lakehouse/default/Tables` est résolu vers l'URI ABFSS OneLake du lakehouse par défaut du notebook, et l'écriture s'authentifie avec un token de stockage obtenu via `notebookutils` — rien à configurer.
+
+Pour cibler un autre lakehouse, passer directement son URI ABFSS :
+
+```python
+run_source(config, lakehouse_tables_path="abfss://<workspace_id>@onelake.dfs.fabric.microsoft.com/<lakehouse_id>/Tables")
+```
+
+Hors Fabric (stockage Azure ou local), `storage_options` est transmis tel quel à delta-rs : `run_source(config, lakehouse_tables_path=..., storage_options={...})`.
 
 ## Tables techniques
 
