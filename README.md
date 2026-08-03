@@ -50,6 +50,8 @@ for source_config in sources:
 
 `run_source(config, lakehouse_tables_path="/lakehouse/default/Tables")` ne lève **jamais** d'exception : toute erreur est catchée et remontée dans le `RunResult` (`status`, `rows_loaded`, `error_message`, `start_ts`, `end_ts`, `run_id`), pour que la boucle appelante continue sur la source suivante.
 
+La lib cible exclusivement des **lakehouses avec schémas** : chaque source déclare son schéma de destination (`target_schema`, requis — ex. `bronze`), et les tables techniques (`watermark`, `log_runs`) vont dans un schéma dédié, `flume` par défaut, personnalisable via `run_source(..., log_schema="...")`.
+
 ## Configuration d'une source
 
 ```json
@@ -71,7 +73,8 @@ for source_config in sources:
     "field": "updated_at",
     "param_name": "updated_since"
   },
-  "target_table": "bronze_source_exemple",
+  "target_schema": "bronze",
+  "target_table": "source_exemple",
   "retry": {
     "max_attempts": 3,
     "backoff_multiplier": 1
@@ -170,10 +173,10 @@ Hors Fabric (stockage Azure ou local), `storage_options` est transmis tel quel �
 
 ## Tables techniques
 
-Tables Delta créées automatiquement dans le lakehouse (`lakehouse_tables_path`) :
+Tables Delta créées automatiquement dans le schéma technique (`log_schema`, défaut `flume`) du lakehouse :
 
-- **`watermark`** : `source_name`, `last_value`, `updated_ts`
-- **`log_runs`** : `run_id`, `source_name`, `start_ts`, `end_ts`, `status`, `rows_loaded`, `error_message` — une ligne par appel à `run_source`, succès ou échec
+- **`flume.watermark`** : `source_name`, `last_value`, `updated_ts`
+- **`flume.log_runs`** : `run_id`, `source_name`, `start_ts`, `end_ts`, `status`, `rows_loaded`, `error_message` — une ligne par appel à `run_source`, succès ou échec
 
 ## Développement
 

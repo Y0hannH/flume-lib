@@ -11,8 +11,9 @@ from deltalake.exceptions import TableNotFoundError
 ONELAKE_HOST = "onelake.dfs.fabric.microsoft.com"
 
 
-def table_uri(lakehouse_tables_path: str, table_name: str) -> str:
-    return f"{lakehouse_tables_path.rstrip('/')}/{table_name}"
+def table_uri(lakehouse_tables_path: str, schema: str, table_name: str) -> str:
+    """URI d'une table dans un lakehouse avec schémas : Tables/<schema>/<table>."""
+    return f"{lakehouse_tables_path.rstrip('/')}/{schema}/{table_name}"
 
 
 def resolve_lakehouse_tables_path(path: str) -> str:

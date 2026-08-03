@@ -20,6 +20,7 @@ from flume_lib.pagination import paginate
 from flume_lib.watermark import read_watermark, write_watermark
 
 DEFAULT_LAKEHOUSE_TABLES_PATH = "/lakehouse/default/Tables"
+DEFAULT_LOG_SCHEMA = "flume"
 DEFAULT_TIMEOUT_SECONDS = 60
 
 
@@ -87,9 +88,14 @@ def run_source(
     config: dict,
     lakehouse_tables_path: str = DEFAULT_LAKEHOUSE_TABLES_PATH,
     storage_options: dict | None = None,
+    log_schema: str = DEFAULT_LOG_SCHEMA,
 ) -> RunResult:
     """Exécute l'ingestion d'une source d'après sa config. Toute erreur est
     catchée et remontée dans RunResult, jamais levée vers l'appelant.
+
+    Cible exclusivement des lakehouses avec schémas : les données vont dans
+    config['target_schema'] (requis), les tables techniques watermark et
+    log_runs dans log_schema (défaut : 'flume').
 
     Dans Fabric, le chemin local par défaut est automatiquement résolu vers
     l'URI ABFSS OneLake du lakehouse par défaut (le montage local ne permet
@@ -107,11 +113,21 @@ def run_source(
         pass
 
     try:
+        target_schema = config.get("target_schema")
+        if not target_schema:
+            raise ValueError(
+                "'target_schema' est requis dans la config "
+                "(lakehouse avec schémas uniquement)"
+            )
+
         incremental = config.get("incremental", {})
         params = dict(config.get("params", {}))
         if incremental.get("enabled"):
             last_value = read_watermark(
-                lakehouse_tables_path, source_name, storage_options=storage_options
+                lakehouse_tables_path,
+                source_name,
+                schema=log_schema,
+                storage_options=storage_options,
             )
             if last_value is not None:
                 params[incremental["param_name"]] = last_value
@@ -125,7 +141,7 @@ def run_source(
 
         if records:
             append_records(
-                table_uri(lakehouse_tables_path, config["target_table"]),
+                table_uri(lakehouse_tables_path, target_schema, config["target_table"]),
                 records,
                 storage_options=storage_options,
             )
@@ -138,6 +154,7 @@ def run_source(
                     lakehouse_tables_path,
                     source_name,
                     new_watermark,
+                    schema=log_schema,
                     storage_options=storage_options,
                 )
 
@@ -165,6 +182,7 @@ def run_source(
             status=status,
             rows_loaded=rows_loaded,
             error_message=error_message,
+            schema=log_schema,
             storage_options=storage_options,
         )
     except Exception as exc:  # noqa: BLE001

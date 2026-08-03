@@ -11,9 +11,10 @@ WATERMARK_TABLE = "watermark"
 def read_watermark(
     lakehouse_tables_path: str,
     source_name: str,
+    schema: str,
     storage_options: dict | None = None,
 ) -> str | None:
-    uri = table_uri(lakehouse_tables_path, WATERMARK_TABLE)
+    uri = table_uri(lakehouse_tables_path, schema, WATERMARK_TABLE)
     rows = query_table(
         uri,
         "select last_value from wm "
@@ -29,9 +30,10 @@ def write_watermark(
     lakehouse_tables_path: str,
     source_name: str,
     last_value: str,
+    schema: str,
     storage_options: dict | None = None,
 ) -> None:
-    uri = table_uri(lakehouse_tables_path, WATERMARK_TABLE)
+    uri = table_uri(lakehouse_tables_path, schema, WATERMARK_TABLE)
     append_records(
         uri,
         [

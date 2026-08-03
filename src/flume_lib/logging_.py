@@ -15,9 +15,10 @@ def write_log_run(
     status: str,
     rows_loaded: int,
     error_message: str | None,
+    schema: str = "flume",
     storage_options: dict | None = None,
 ) -> None:
-    uri = table_uri(lakehouse_tables_path, LOG_RUNS_TABLE)
+    uri = table_uri(lakehouse_tables_path, schema, LOG_RUNS_TABLE)
     append_records(
         uri,
         [

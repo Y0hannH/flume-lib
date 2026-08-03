@@ -1,8 +1,9 @@
 # Notebook Fabric Python (non-Spark) — exemple de consommation de flume-lib.
-# Prérequis : les tokens sont déjà injectés en variables d'environnement
-# (depuis Key Vault) avant l'exécution de cette boucle.
+# Prérequis : lakehouse avec schémas ; les wheels sont uploadés dans
+# Files/libs/<version>/ (voir scripts/build_fabric_wheels.py) ; chaque source
+# du JSON déclare target_schema + target_table.
 
-# %pip install git+https://github.com/Y0hannH/flume-lib.git@v0.1.0
+# %pip install --no-index --find-links=/lakehouse/default/Files/libs/0.5.0 flume-lib
 
 import json
 
