@@ -5,7 +5,7 @@ Accélérateur d'ingestion API générique pour notebooks **Microsoft Fabric Pyt
 ## Installation
 
 ```
-%pip install git+https://github.com/Y0hannH/flume-lib.git@v0.1.0
+%pip install git+https://github.com/Y0hannH/flume-lib.git@v0.2.0
 ```
 
 ## Usage
@@ -55,14 +55,49 @@ for source_config in sources:
 
 ### Auth
 
-Les credentials ne sont **jamais** en clair dans la config — uniquement des noms de variables d'environnement, résolues au runtime (à injecter depuis Key Vault avant l'appel).
+Les credentials ne sont **jamais** en clair dans la config. Chaque credential est une **référence de secret**, résolue au runtime :
+
+- `{"env_var": "NOM_VAR"}` — variable d'environnement
+- `{"keyvault_url": "https://monkv.vault.azure.net", "secret_name": "mon-secret"}` — Azure Key Vault, via `notebookutils` dans Fabric (préinstallé), ou `flume-lib[azure]` hors Fabric
+- une chaîne littérale — **uniquement** pour les valeurs non sensibles (username public, `grant_type`…)
+
+La forme historique `token_env_var` / `key_env_var` / `username_env_var` / `password_env_var` reste supportée.
 
 | Type | Clés de config | Statut |
 |---|---|---|
-| `bearer_token` | `token_env_var` | ✅ |
-| `api_key_header` | `key_env_var`, `header_name` (défaut `X-API-Key`) | ✅ |
-| `basic` | `username_env_var`, `password_env_var` | ✅ |
-| `oauth2_client_credentials` | — | stub |
+| `bearer_token` | `token` (réf. secret) | ✅ |
+| `api_key_header` | `key` (réf. secret), `header_name` (défaut `X-API-Key`) | ✅ |
+| `basic` | `username`, `password` (réf. secret) | ✅ |
+| `oauth2_client_credentials` | `tenant_id` ou `token_url`, `client_id`, `client_secret` (réf. secret), `scope` | ✅ |
+| `token_endpoint` | `token_url`, `method` (défaut `POST`), `body`, `body_format` (`json`/`form`), `headers`, `token_json_path` (défaut `access_token`), `header_name`, `value_prefix` | ✅ |
+
+**Service principal Entra ID (APIs Microsoft : Graph, Fabric, Azure Management…)** — `oauth2_client_credentials` avec `tenant_id` (le `token_url` `login.microsoftonline.com/.../oauth2/v2.0/token` est déduit) :
+
+```json
+"auth": {
+  "type": "oauth2_client_credentials",
+  "tenant_id": "00000000-0000-0000-0000-000000000000",
+  "client_id": "11111111-1111-1111-1111-111111111111",
+  "client_secret": {"keyvault_url": "https://monkv.vault.azure.net", "secret_name": "sp-flume-secret"},
+  "scope": "https://graph.microsoft.com/.default"
+}
+```
+
+**Token obtenu via un appel API de login** — `token_endpoint` ; les valeurs de `body`/`headers` sont des littéraux ou des références de secret, le token est extrait de la réponse JSON par chemin pointé :
+
+```json
+"auth": {
+  "type": "token_endpoint",
+  "token_url": "https://api.exemple.com/login",
+  "body": {
+    "username": "svc_flume",
+    "password": {"keyvault_url": "https://monkv.vault.azure.net", "secret_name": "api-exemple-pwd"}
+  },
+  "token_json_path": "data.token"
+}
+```
+
+Le token est obtenu une fois par `run_source` (pas de refresh en cours de run).
 
 ### Pagination
 
@@ -98,8 +133,7 @@ pytest
 
 Tests unitaires mockés, aucun appel réseau réel.
 
-## Hors scope (v0.1)
+## Hors scope
 
 - CLI d'installation/scaffolding côté client
-- Intégration Key Vault (VaultPulse) — les tokens sont supposés déjà en variables d'environnement
-- Auth OAuth2 client_credentials et pagination cursor (stubs)
+- Pagination cursor (stub)
