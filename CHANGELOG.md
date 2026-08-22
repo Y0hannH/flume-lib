@@ -2,6 +2,30 @@
 
 All notable changes to this project are documented here. Versions follow [semantic versioning](https://semver.org/); until 1.0.0, minor versions may contain breaking changes — these are always listed first.
 
+## [0.8.0] — 2026-08-22
+
+### Added
+
+- **`headers`**: fixed HTTP headers on every data call, for APIs that require a non-authentication header (`Prefer`, `Accept-Language`, tenant selectors). Literal strings only — a secret reference is rejected, credentials belong in `auth`. Auth headers are applied last and cannot be overridden.
+- **`oauth1` auth type**: OAuth 1.0a request signing (RFC 5849, HMAC-SHA256/SHA1), with `realm` support. Unlike the other types the signature depends on the URL and query params of each request, so it is recomputed page after page — `build_auth()` now returns a `(headers, signer)` pair and the signer is installed on the session. Implemented on the standard library, no new dependency. Covers NetSuite Token-Based Authentication and legacy OAuth 1.0a APIs.
+- **Body templating**: strings in `body` and `params` may contain `{placeholder}` markers. Combined with `incremental.inject: "body_template"`, the watermark lands inside the request body instead of the query string — required for SQL-over-REST endpoints where the filter lives in the query itself. A placeholder with no matching variable fails the run; interpolated values are rejected if they contain characters that could change the structure of the query (`'`, `"`, `;`, `--`, `/*`, backslash, newline).
+- **`incremental.initial_value`**: value used on the very first run, before any watermark exists. Applies to both injection modes.
+- **`incremental.value_format`**: `any` (default), `numeric`, `iso_date` or `iso_datetime` — validates the watermark before it is used.
+- **`Retry-After` is honored** on 429 and 5xx responses (delay in seconds or HTTP date), instead of the local exponential backoff. Capped by `retry.max_retry_after_seconds` (default 300). Retrying earlier than a server asked is what gets a client banned on APIs with strict governance.
+
+### Security
+
+- **`incremental.value_format` is required** with `inject: "body_template"`. The forbidden-character check only protects a placeholder inside quotes; a bare one (`WHERE id > {last_id}`) accepted `0 OR 1=1`, which contains none of them. An explicit `numeric` / `iso_date` / `iso_datetime` constrains the value to a shape with no room for syntax.
+- **Query strings are stripped from URLs in error messages.** `raise_for_status()` produced a message containing the full URL, which is persisted in `log_runs` — a Delta table readable by everyone with lakehouse access. `RunResult.rows_loaded` still indicates how far a run got.
+
+### Known limitations
+
+- `oauth1` and HTTP redirects do not mix: the signature covers the URL, and `requests` replays the original `Authorization` header on a same-host redirect rather than re-signing, so the API answers 401. Point `base_url` at the final URL.
+
+### Changed
+
+- `build_auth_headers()` still exists but raises on `oauth1`, which cannot be expressed as a static header; use `build_auth()`.
+
 ## [0.7.0] — 2026-08-03
 
 ### Breaking

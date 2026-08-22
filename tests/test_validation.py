@@ -152,3 +152,173 @@ class TestIncrementalAndRetry:
     def test_unknown_retry_key_raises(self):
         with pytest.raises(ConfigError, match="clé inconnue"):
             validate_config(cfg(retry={"max_attempt": 5}))
+
+
+class TestStaticHeaders:
+    def test_valid_headers(self):
+        validate_config(cfg(headers={"Prefer": "transient"}))
+
+    def test_headers_must_be_an_object(self):
+        with pytest.raises(ConfigError, match="headers"):
+            validate_config(cfg(headers="Prefer: transient"))
+
+    def test_secret_reference_in_headers_is_refused(self):
+        with pytest.raises(ConfigError, match="auth"):
+            validate_config(cfg(headers={"X-Key": {"env_var": "K"}}))
+
+
+class TestOauth1:
+    VALID = {
+        "type": "oauth1",
+        "realm": "1234567",
+        "consumer_key": {"env_var": "CK"},
+        "consumer_secret": {"env_var": "CS"},
+        "token": {"env_var": "TK"},
+        "token_secret": {"env_var": "TS"},
+    }
+
+    def test_valid_tba_config(self):
+        validate_config(cfg(auth=self.VALID))
+
+    def test_two_legged_without_token_is_valid(self):
+        auth = {k: v for k, v in self.VALID.items() if not k.startswith("token")}
+        validate_config(cfg(auth=auth))
+
+    def test_token_without_secret_raises(self):
+        auth = {k: v for k, v in self.VALID.items() if k != "token_secret"}
+        with pytest.raises(ConfigError, match="paire"):
+            validate_config(cfg(auth=auth))
+
+    def test_missing_consumer_secret_raises(self):
+        auth = {k: v for k, v in self.VALID.items() if k != "consumer_secret"}
+        with pytest.raises(ConfigError, match="consumer_secret"):
+            validate_config(cfg(auth=auth))
+
+    def test_unknown_signature_method_raises(self):
+        with pytest.raises(ConfigError, match="signature_method"):
+            validate_config(cfg(auth={**self.VALID, "signature_method": "HMAC-MD5"}))
+
+    def test_sha1_is_accepted(self):
+        validate_config(cfg(auth={**self.VALID, "signature_method": "HMAC-SHA1"}))
+
+    def test_unknown_key_raises(self):
+        with pytest.raises(ConfigError, match="clé inconnue"):
+            validate_config(cfg(auth={**self.VALID, "account_id": "1234567"}))
+
+    def test_env_var_forms_are_accepted(self):
+        validate_config(
+            cfg(
+                auth={
+                    "type": "oauth1",
+                    "consumer_key_env_var": "CK",
+                    "consumer_secret_env_var": "CS",
+                    "token_env_var": "TK",
+                    "token_secret_env_var": "TS",
+                }
+            )
+        )
+
+
+class TestIncrementalInject:
+    BODY_TEMPLATE = {
+        "enabled": True,
+        "field": "lastmodified",
+        "inject": "body_template",
+        "value_format": "iso_datetime",
+    }
+
+    def test_valid_body_template(self):
+        validate_config(
+            cfg(
+                method="POST",
+                body={"q": "WHERE d >= '{watermark}'"},
+                incremental=self.BODY_TEMPLATE,
+            )
+        )
+
+    def test_body_template_without_body_raises(self):
+        with pytest.raises(ConfigError, match="body"):
+            validate_config(cfg(incremental=self.BODY_TEMPLATE))
+
+    def test_body_template_does_not_need_param_name(self):
+        validate_config(
+            cfg(method="POST", body={"q": "{watermark}"}, incremental=self.BODY_TEMPLATE)
+        )
+
+    def test_query_param_still_needs_param_name(self):
+        with pytest.raises(ConfigError, match="param_name"):
+            validate_config(cfg(incremental={"enabled": True, "field": "d"}))
+
+    def test_unknown_inject_raises(self):
+        with pytest.raises(ConfigError, match="inject"):
+            validate_config(
+                cfg(incremental={"enabled": True, "field": "d", "inject": "header"})
+            )
+
+    def test_unknown_value_format_raises(self):
+        with pytest.raises(ConfigError, match="value_format"):
+            validate_config(
+                cfg(
+                    incremental={
+                        "enabled": True,
+                        "field": "d",
+                        "param_name": "s",
+                        "value_format": "epoch",
+                    }
+                )
+            )
+
+    def test_initial_value_is_accepted(self):
+        validate_config(
+            cfg(
+                incremental={
+                    "enabled": True,
+                    "field": "d",
+                    "param_name": "since",
+                    "initial_value": "1970-01-01",
+                }
+            )
+        )
+
+
+class TestRetryAfterConfig:
+    def test_max_retry_after_seconds_is_accepted(self):
+        validate_config(cfg(retry={"max_attempts": 5, "max_retry_after_seconds": 60}))
+
+
+class TestBodyTemplateRequiresAnExplicitFormat:
+    """Le filtrage des caractères ne protège qu'un placeholder entre quotes.
+    Un placeholder nu accepterait `0 OR 1=1` : la forme doit être déclarée."""
+
+    BASE_INC = {"enabled": True, "field": "d", "inject": "body_template"}
+
+    def test_default_any_is_refused(self):
+        with pytest.raises(ConfigError, match="value_format"):
+            validate_config(
+                cfg(method="POST", body={"q": "{watermark}"}, incremental=self.BASE_INC)
+            )
+
+    def test_explicit_any_is_refused_too(self):
+        with pytest.raises(ConfigError, match="value_format"):
+            validate_config(
+                cfg(
+                    method="POST",
+                    body={"q": "{watermark}"},
+                    incremental={**self.BASE_INC, "value_format": "any"},
+                )
+            )
+
+    @pytest.mark.parametrize("fmt", ["numeric", "iso_date", "iso_datetime"])
+    def test_declared_formats_are_accepted(self, fmt):
+        validate_config(
+            cfg(
+                method="POST",
+                body={"q": "{watermark}"},
+                incremental={**self.BASE_INC, "value_format": fmt},
+            )
+        )
+
+    def test_query_param_mode_still_defaults_to_any(self):
+        validate_config(
+            cfg(incremental={"enabled": True, "field": "d", "param_name": "since"})
+        )

@@ -63,7 +63,10 @@ def write_checksums(out_dir: Path) -> Path:
         digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
         lines.append(f"{digest}  {wheel.name}")
     checksums = out_dir / "SHA256SUMS.txt"
-    checksums.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # newline="\n" impératif : généré sous Windows, le fichier partirait en
+    # CRLF et `sha256sum -c` le rejetterait ligne par ligne côté Linux — il ne
+    # pourrait plus servir à ce pour quoi il existe.
+    checksums.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     return checksums
 
 

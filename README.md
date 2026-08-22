@@ -30,7 +30,7 @@ No code is fetched from GitHub or PyPI at runtime — the notebook installs exac
 3. In the notebook:
 
    ```python
-   %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.7.0
+   %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.8.0
    ```
 
 `--no-index` guarantees pip resolves only from that folder — nothing is fetched from PyPI or GitHub. The folder layout is entirely up to you: any path works as long as the same path is passed to `--find-links`.
@@ -129,8 +129,11 @@ Credentials are **never stored in the configuration** — every credential is a 
 | `basic` | HTTP Basic |
 | `oauth2_client_credentials` | Standard OAuth2 flow — Entra ID service principals (Microsoft APIs) via `tenant_id`, or any IdP via `token_url` |
 | `token_endpoint` | Arbitrary login call (JSON/form body, secret refs in any field, token extracted by JSON path) |
+| `oauth1` | OAuth 1.0a request signing (RFC 5849, HMAC-SHA256/SHA1, `realm`) — NetSuite TBA and legacy OAuth 1.0a APIs |
 
-The token is obtained once per `run_source` (no mid-run refresh).
+The token is obtained once per `run_source` (no mid-run refresh). `oauth1` is the exception: it signs every request individually, so nothing expires mid-run.
+
+Beyond authentication, `headers` adds fixed headers to every data call (literal strings only — a secret belongs in `auth`).
 
 ### Pagination
 
@@ -143,13 +146,19 @@ The token is obtained once per `run_source` (no mid-run refresh).
 
 Data endpoints can be `GET` (default) or `POST`/`PUT`/`PATCH` via `method` + `body`; `pagination.params_in` decides whether pagination params go to the query string or into the request payload.
 
+Some APIs cap how far an offset may go (NetSuite refuses past 100 000). Past that, split the source into bounded slices — one run per month or per id range — rather than paging further; see [examples/netsuite_suiteql.py](examples/netsuite_suiteql.py).
+
 ### Incremental (watermark)
 
 When `incremental.enabled`, the last watermark is read from `<log_schema>.watermark` and sent as a query param (`param_name`). After a **successful** run only, the max of `incremental.field` over the loaded records becomes the new watermark.
 
+With `"inject": "body_template"` the watermark is substituted into the `{placeholder}` markers of `body` instead — for APIs whose filter lives inside the request payload, such as an SQL-over-REST endpoint. `initial_value` provides the floor used on the very first run, and `value_format` validates the watermark before it is used.
+
 ### Retry
 
 Exponential backoff via `tenacity` on network errors and HTTP 429/5xx, driven by `retry.max_attempts` (default 3) and `retry.backoff_multiplier` (default 1). Other 4xx fail immediately.
+
+A `Retry-After` header on the response overrides the backoff — retrying earlier than a server asked is what gets a client banned on APIs with strict governance. Capped by `retry.max_retry_after_seconds` (default 300).
 
 ## Delta writes in Fabric (OneLake)
 

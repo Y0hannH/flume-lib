@@ -9,6 +9,7 @@ Exhaustive reference of every option: the JSON configuration of a source (key by
   "name": "my_source",
   "base_url": "https://api.example.com/v1/items",
   "params": {"status": "active"},
+  "headers": {"Prefer": "transient"},
   "auth": { ... },
   "pagination": { ... },
   "incremental": { ... },
@@ -34,6 +35,7 @@ Exhaustive reference of every option: the JSON configuration of a source (key by
 | `method` | string | no | `GET` | HTTP method of the data calls: `GET`, `POST`, `PUT`, `PATCH`. |
 | `body` | object | no | `{}` | Request body sent on every data call. Requires a non-`GET` `method`. |
 | `body_format` | string | no | `json` | `json` or `form` encoding of `body`. |
+| `headers` | object | no | `{}` | Fixed HTTP headers added to every data call (literal strings only). Auth headers always win over these. For a credential, use `auth` — never put a secret here. |
 
 **Configuration is validated strictly**: an unknown key raises a `ConfigError` (with a "did you mean…" suggestion) instead of being ignored. This is deliberate — a typo on an optional key such as `pagintaion` used to silently disable pagination, producing a run reported as `success` with most of the data missing. Validate ahead of a long batch with:
 
@@ -63,6 +65,48 @@ Search and reporting APIs often require a POST with a JSON payload. Set `method`
 ```
 
 With `"params_in": "body"` the request payload for the second page is `{"query": …, "fields": …, "limit": 200, "offset": 200}`. With the default `"query"`, `body` stays constant and the pagination params go to the query string.
+
+### Static headers
+
+Some APIs require a header that is not authentication. `headers` adds fixed headers to every data call:
+
+```json
+{
+  "base_url": "https://1234567.suitetalk.api.netsuite.com/services/rest/query/v1/suiteql",
+  "headers": {"Prefer": "transient"},
+  "method": "POST",
+  "body": {"q": "SELECT id FROM customer"},
+  "target_schema": "bronze",
+  "target_table": "customers"
+}
+```
+
+Values must be literal strings. A secret reference (`{"env_var": …}`) is rejected by validation: credentials belong in `auth`, which also keeps them out of the config file. Headers produced by `auth` are applied last and cannot be overridden from `headers`.
+
+### Body templating
+
+Some APIs carry their filter inside the request body rather than in a query param — an SQL-over-REST endpoint is the canonical case. Any string in `body` (or `params`) may contain `{placeholder}` markers, substituted at run start:
+
+```json
+{
+  "method": "POST",
+  "body": {"q": "SELECT id, updated FROM t WHERE updated >= '{watermark}' ORDER BY id"},
+  "incremental": {
+    "enabled": true,
+    "field": "updated",
+    "inject": "body_template",
+    "initial_value": "1970-01-01 00:00:00",
+    "value_format": "iso_datetime"
+  }
+}
+```
+
+Rules:
+
+- Only known placeholders are substituted. A `{name}` with no matching variable fails the run — same reasoning as strict config validation: a typo must not reach the API silently.
+- When no variable is in play (no `inject: "body_template"`), strings are left untouched, braces included.
+- Interpolated values are checked: a value containing `'`, `"`, `;`, `--`, `/*`, a backslash or a newline is rejected, so a value can never change the structure of the query it lands in.
+- **An explicit `value_format` is required** with `inject: "body_template"`. Character filtering only protects a placeholder that sits inside quotes; a bare one (`WHERE id > {last_id}`) would happily accept `0 OR 1=1`, which contains no forbidden character. Declaring `numeric`, `iso_date` or `iso_datetime` closes that — and a legitimate watermark is always a number or a date.
 
 ## `run_source` parameters
 
@@ -242,6 +286,32 @@ Form-encoded variant with a custom output header:
 }
 ```
 
+### `oauth1` — OAuth 1.0a request signing (NetSuite TBA, legacy APIs)
+
+Unlike every other type, OAuth 1.0a cannot be reduced to a fixed header: the signature covers the method, the URL and the query params of **each** request, so it is recomputed page after page.
+
+```json
+{
+  "type": "oauth1",
+  "realm": "1234567",
+  "consumer_key": {"keyvault_url": "https://kv.vault.azure.net", "secret_name": "ns-consumer-key"},
+  "consumer_secret": {"keyvault_url": "https://kv.vault.azure.net", "secret_name": "ns-consumer-secret"},
+  "token": {"keyvault_url": "https://kv.vault.azure.net", "secret_name": "ns-token-id"},
+  "token_secret": {"keyvault_url": "https://kv.vault.azure.net", "secret_name": "ns-token-secret"}
+}
+```
+
+| Key | Required | Description |
+|---|---|---|
+| `consumer_key` / `consumer_secret` | **yes** | Application credentials (secret references). |
+| `token` / `token_secret` | no, but together | Access token credentials. Omitting both gives two-legged OAuth 1.0a. |
+| `realm` | no | Sent in the header, outside the signature. NetSuite requires the account id here (`1234567`, `1234567_SB1`). |
+| `signature_method` | no (default `HMAC-SHA256`) | `HMAC-SHA256` or `HMAC-SHA1`. |
+
+Implemented on the standard library only — no extra wheel to freeze for Fabric. A JSON request body is never signed (RFC 5849 §3.4.1.3.1); a `form` body is.
+
+> **Redirects.** The signature covers the request URL, and `requests` replays the original `Authorization` header on a same-host redirect instead of re-signing — the API then sees an invalid signature and answers 401. Point `base_url` at the final URL. NetSuite's SuiteQL endpoint does not redirect.
+
 ### `none` / absent
 
 No auth header. `{"type": "none"}`, `{}` or no `auth` key.
@@ -305,15 +375,21 @@ Raises `NotImplementedError` (the run ends `failed` with that message).
 
 A single HTTP call, no loop.
 
+> **Offset ceilings.** Some APIs refuse an offset beyond a hard limit (NetSuite stops at 100 000). Past that point, split the source into bounded slices — one run per month or per id range, with the bounds in the query — rather than paging further.
+
 ## Incremental (watermark)
 
 | Key | Required | Description |
 |---|---|---|
 | `enabled` | no (default `false`) | Enables incremental mode. |
 | `field` | yes if enabled | Record field whose **max** becomes the new watermark. |
-| `param_name` | yes if enabled | Query param sent to the API with the last watermark (e.g. `updated_since`). |
+| `param_name` | yes if enabled and `inject` is `query_param` | Query param sent to the API with the last watermark (e.g. `updated_since`). |
+| `inject` | no (default `query_param`) | Where the watermark goes: `query_param` (a query string param) or `body_template` (substituted into the `{placeholder}` markers of `body`). |
+| `placeholder` | no (default `watermark`) | With `inject: "body_template"`, the variable name to substitute. |
+| `initial_value` | no | Value used on the very first run, before any watermark exists. Required in practice with `body_template`, otherwise the placeholder would have nothing to resolve to. |
+| `value_format` | **yes** with `body_template`, otherwise no (default `any`) | Validation applied to the watermark before it is used: `any`, `numeric`, `iso_date`, `iso_datetime`. |
 
-Behavior: the last watermark is read from `<log_schema>.watermark` at run start (no param sent on the very first run); the new watermark is written **only if the run succeeded** and at least one record was loaded. Comparison uses Python `max()` — works for ISO 8601 timestamps and numerics; beware of date formats that don't sort lexicographically.
+Behavior: the last watermark is read from `<log_schema>.watermark` at run start (`initial_value` is used on the very first run, and no param is sent if neither exists); the new watermark is written **only if the run succeeded** and at least one record was loaded. Comparison uses Python `max()` — works for ISO 8601 timestamps and numerics; beware of date formats that don't sort lexicographically.
 
 ## Retry
 
@@ -321,8 +397,11 @@ Behavior: the last watermark is read from `<log_schema>.watermark` at run start 
 |---|---|---|
 | `max_attempts` | `3` | Total attempts per request. |
 | `backoff_multiplier` | `1` | Exponential backoff multiplier (tenacity `wait_exponential`). |
+| `max_retry_after_seconds` | `300` | Ceiling on a server-provided `Retry-After` delay. |
 
 Retried: network errors (connection, timeout), HTTP 429 and 5xx. **Not retried**: other 4xx (401, 403, 404…) fail immediately. Applies to data calls; the token call (`oauth2_client_credentials`/`token_endpoint`) is not retried.
+
+When the response carries a `Retry-After` header (seconds or an HTTP date), that delay is used instead of the exponential backoff — APIs with strict governance ban clients that retry earlier than they were told to. The delay is capped at `max_retry_after_seconds`; beyond the cap the wait is truncated and the next attempt will most likely fail, which surfaces as a `failed` run in `log_runs` rather than a notebook hanging for an hour.
 
 ## Technical tables
 

@@ -7,11 +7,14 @@ données seraient perdues sans aucun signal."""
 
 import difflib
 
+from flume_lib.oauth1 import SIGNATURE_METHODS
+from flume_lib.templating import VALUE_FORMATS
+
 # Clés top-level
 _REQUIRED = ("base_url", "target_schema", "target_table")
 _OPTIONAL = (
     "name", "params", "auth", "pagination", "incremental", "retry",
-    "timeout_seconds", "method", "body", "body_format",
+    "timeout_seconds", "method", "body", "body_format", "headers",
 )
 
 # Clés autorisées par type d'auth. Les formes historiques *_env_var sont
@@ -31,6 +34,12 @@ _AUTH_KEYS = {
         "token_url", "method", "body", "body_format", "headers",
         "token_json_path", "header_name", "value_prefix", "timeout_seconds",
     ),
+    "oauth1": (
+        "consumer_key", "consumer_secret", "token", "token_secret",
+        "consumer_key_env_var", "consumer_secret_env_var",
+        "token_env_var", "token_secret_env_var",
+        "realm", "signature_method",
+    ),
 }
 
 # Groupes de clés dont au moins une doit être présente
@@ -47,6 +56,10 @@ _AUTH_REQUIRED = {
         ("client_secret", "client_secret_env_var"),
     ),
     "token_endpoint": (("token_url",),),
+    "oauth1": (
+        ("consumer_key", "consumer_key_env_var"),
+        ("consumer_secret", "consumer_secret_env_var"),
+    ),
 }
 
 # Clés acceptées par toutes les stratégies de pagination
@@ -62,8 +75,12 @@ _PAGINATION_KEYS = {
     "cursor": ("cursor_param", "cursor_field"),
 }
 
-_INCREMENTAL_KEYS = ("enabled", "field", "param_name")
-_RETRY_KEYS = ("max_attempts", "backoff_multiplier")
+_INCREMENTAL_KEYS = (
+    "enabled", "field", "param_name", "inject", "placeholder",
+    "initial_value", "value_format",
+)
+_INCREMENTAL_INJECTS = ("query_param", "body_template")
+_RETRY_KEYS = ("max_attempts", "backoff_multiplier", "max_retry_after_seconds")
 
 
 class ConfigError(Exception):
@@ -117,11 +134,37 @@ def validate_config(config: dict) -> None:
             "config : 'body' est ignoré en GET — préciser \"method\": \"POST\""
         )
 
+    headers = config.get("headers")
+    if headers is not None:
+        if not isinstance(headers, dict):
+            raise ConfigError("headers : doit être un objet")
+        for key, value in headers.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise ConfigError(
+                    f"headers : '{key}' doit être une chaîne littérale — pour un "
+                    "credential, utiliser 'auth' (api_key_header, bearer_token…)"
+                )
+
     auth = config.get("auth")
     if auth is not None:
         auth_type = _check_type("auth", auth, _AUTH_KEYS, "none")
         _check_unknown("auth", auth, ("type",) + _AUTH_KEYS[auth_type])
         _check_required_groups("auth", auth, _AUTH_REQUIRED.get(auth_type, ()))
+        if auth_type == "oauth1":
+            signature_method = auth.get("signature_method", "HMAC-SHA256")
+            if signature_method not in SIGNATURE_METHODS:
+                known = ", ".join(sorted(SIGNATURE_METHODS))
+                raise ConfigError(
+                    f"auth : 'signature_method' inconnue '{signature_method}' — "
+                    f"attendu l'une de : {known}"
+                )
+            has_token = "token" in auth or "token_env_var" in auth
+            has_secret = "token_secret" in auth or "token_secret_env_var" in auth
+            if has_token != has_secret:
+                raise ConfigError(
+                    "auth : 'token' et 'token_secret' vont par paire — "
+                    "les omettre tous les deux donne un OAuth 1.0a two-legged"
+                )
         if auth_type == "token_endpoint":
             token_method = str(auth.get("method", "POST")).upper()
             if token_method == "GET" and any(
@@ -157,12 +200,44 @@ def validate_config(config: dict) -> None:
         if not isinstance(incremental, dict):
             raise ConfigError("incremental : doit être un objet")
         _check_unknown("incremental", incremental, _INCREMENTAL_KEYS)
+        inject = incremental.get("inject", "query_param")
+        if inject not in _INCREMENTAL_INJECTS:
+            known = ", ".join(_INCREMENTAL_INJECTS)
+            raise ConfigError(
+                f"incremental : 'inject' inconnu '{inject}' — attendu l'un de : {known}"
+            )
+        value_format = incremental.get("value_format", "any")
+        if value_format not in VALUE_FORMATS:
+            known = ", ".join(VALUE_FORMATS)
+            raise ConfigError(
+                f"incremental : 'value_format' inconnu '{value_format}' — "
+                f"attendu l'un de : {known}"
+            )
         if incremental.get("enabled"):
-            for key in ("field", "param_name"):
-                if not incremental.get(key):
+            if not incremental.get("field"):
+                raise ConfigError(
+                    "incremental : 'field' requis quand 'enabled' est vrai"
+                )
+            if inject == "body_template":
+                if not config.get("body"):
                     raise ConfigError(
-                        f"incremental : '{key}' requis quand 'enabled' est vrai"
+                        "incremental : \"inject\": \"body_template\" nécessite un "
+                        "'body' contenant le placeholder à substituer"
                     )
+                if value_format == "any":
+                    known = ", ".join(f for f in VALUE_FORMATS if f != "any")
+                    raise ConfigError(
+                        "incremental : 'value_format' explicite requis avec "
+                        "\"inject\": \"body_template\" — attendu l'un de : "
+                        f"{known}. Le filtrage des caractères ne protège qu'un "
+                        "placeholder entre quotes ; un placeholder nu "
+                        "(WHERE id > {last_id}) accepterait '0 OR 1=1'"
+                    )
+            elif not incremental.get("param_name"):
+                raise ConfigError(
+                    "incremental : 'param_name' requis quand 'enabled' est vrai "
+                    "(ou \"inject\": \"body_template\" pour injecter dans le corps)"
+                )
 
     retry = config.get("retry")
     if retry is not None:

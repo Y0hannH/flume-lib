@@ -6,6 +6,7 @@ import base64
 
 import requests
 
+from flume_lib.oauth1 import OAuth1Signer
 from flume_lib.secrets_ import SecretResolutionError, resolve_secret
 
 DEFAULT_TOKEN_TIMEOUT_SECONDS = 30
@@ -119,12 +120,46 @@ def _fetch_token_endpoint(auth_config: dict) -> str:
     return token
 
 
+def _build_oauth1(auth_config: dict) -> OAuth1Signer:
+    """Construit le signataire OAuth 1.0a. Les quatre credentials (consumer +
+    token) sont des références de secret comme partout ailleurs."""
+    kwargs = {
+        "consumer_key": _resolve(auth_config, "consumer_key"),
+        "consumer_secret": _resolve(auth_config, "consumer_secret"),
+        "realm": auth_config.get("realm"),
+        "signature_method": auth_config.get("signature_method", "HMAC-SHA256"),
+    }
+    # Le token est optionnel : OAuth 1.0a « two-legged » n'en a pas. NetSuite
+    # (TBA) en fournit toujours un.
+    if "token" in auth_config or "token_env_var" in auth_config:
+        kwargs["token"] = _resolve(auth_config, "token")
+        kwargs["token_secret"] = _resolve(auth_config, "token_secret")
+    try:
+        return OAuth1Signer(**kwargs)
+    except ValueError as exc:
+        raise AuthError(str(exc)) from exc
+
+
+def build_auth(auth_config: dict | None) -> tuple[dict[str, str], object | None]:
+    """Point d'entrée : retourne (headers statiques, signataire par requête).
+
+    Le signataire — un `requests.auth.AuthBase` — vaut None pour toutes les
+    stratégies dont l'auth tient dans un header fixe ; il n'est renseigné que
+    pour oauth1, dont la signature dépend de l'URL et des paramètres de chaque
+    requête et doit donc être recalculée page après page.
+    """
+    if auth_config and auth_config.get("type") == "oauth1":
+        return {}, _build_oauth1(auth_config)
+    return build_auth_headers(auth_config), None
+
+
 def build_auth_headers(auth_config: dict | None) -> dict[str, str]:
     """Construit les headers HTTP d'authentification à partir de la config.
 
     Types supportés : bearer_token, api_key_header, basic,
     oauth2_client_credentials (service principal Entra ID ou IdP standard),
-    token_endpoint (login API arbitraire).
+    token_endpoint (login API arbitraire). oauth1 n'entre pas dans ce cadre :
+    passer par build_auth().
 
     Le token est obtenu une fois par run — pour les runs très longs dépassant
     l'expiration du token, prévoir un découpage des sources.
@@ -160,5 +195,11 @@ def build_auth_headers(auth_config: dict | None) -> dict[str, str]:
         header_name = auth_config.get("header_name", "Authorization")
         value_prefix = auth_config.get("value_prefix", "Bearer ")
         return {header_name: f"{value_prefix}{token}"}
+
+    if auth_type == "oauth1":
+        raise AuthError(
+            "oauth1 signe chaque requête et ne tient pas dans un header fixe — "
+            "utiliser build_auth()"
+        )
 
     raise AuthError(f"Type d'auth inconnu : '{auth_type}'")
