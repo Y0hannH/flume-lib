@@ -1,0 +1,14 @@
+# Fins de ligne normalisées en LF dans le dépôt ET dans la copie de travail.
+#
+# Sans ceci, un fichier créé sous Windows reste en CRLF dans la copie de
+# travail : la wheel construite sous Windows embarque alors des modules en
+# CRLF, celle construite sous Linux les mêmes en LF, et le lot de wheels n'est
+# pas reproductible d'une machine à l'autre. Même cause que le SHA256SUMS.txt
+# en CRLF que `sha256sum -c` refusait côté Linux.
+#
+# Les kernels Fabric sont sous Linux : LF est la cible.
+* text=auto eol=lf
+
+# Artefacts binaires : jamais de conversion, ils sont vérifiés par empreinte.
+*.whl binary
+*.zip binary

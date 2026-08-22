@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here. Versions follow [semantic versioning](https://semver.org/); until 1.0.0, minor versions may contain breaking changes — these are always listed first.
 
+## [0.8.1] — 2026-08-22
+
+Aucun changement fonctionnel : la bibliothèque installée est identique à la
+0.8.0. Hygiène de release uniquement — inutile de redéployer en urgence.
+
+### Fixed
+
+- **`.gitattributes` normalise les fins de ligne en LF** dans le dépôt et dans la copie de travail. Sans lui, un fichier créé sous Windows restait en CRLF : la wheel construite sous Windows embarquait des modules en CRLF, celle construite sous Linux les mêmes en LF, et le lot de wheels n'était pas reproductible d'une machine à l'autre (vérifié sur la 0.8.0 : 4 modules sur 11 en CRLF). Sans effet à l'exécution — Python lit en universal newlines — mais le lot livré n'était pas comparable à sa source.
+- **Procédure de release du README complétée** : mise à jour du CHANGELOG, ordre tag / commit du SHA explicité (un commit ne peut pas contenir son propre SHA), immuabilité des tags rappelée, et vérification du lot par `sha256sum -c` avant dépôt dans le lakehouse.
+
 ## [0.8.0] — 2026-08-22
 
 ### Added

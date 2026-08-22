@@ -198,10 +198,16 @@ Unit tests are fully mocked — no network calls. Python ≥ 3.10 required local
 ### Release procedure
 
 1. Bump the version in `pyproject.toml` and `src/flume_lib/__init__.py`
-2. `pytest`
-3. Commit, tag (`git tag vX.Y.Z`), push branch and tag
-4. Add the new tag's SHA to the table above (`git rev-parse vX.Y.Z`)
-5. `python scripts/build_fabric_wheels.py` and upload `fabric-wheels/` to the wheels folder of the target lakehouses (`Files/libs/` by convention)
+2. Add the version's section to [CHANGELOG.md](CHANGELOG.md), breaking changes first
+3. `pytest`
+4. Commit the release, then tag that commit: `git tag -a vX.Y.Z`
+5. Add the tagged SHA to the table above (`git rev-list -n1 vX.Y.Z`) in a **separate** commit — a commit cannot contain its own SHA, so this one always lands after the tag
+6. Push branch and tag. Tags are protected against update and deletion: review the tag before pushing, it cannot be moved afterwards
+7. `python scripts/build_fabric_wheels.py`, then verify the bundle before uploading it to `Files/libs/` in the target lakehouses:
+
+```bash
+cd fabric-wheels && sha256sum -c SHA256SUMS.txt
+```
 
 Version history: [CHANGELOG.md](CHANGELOG.md).
 
