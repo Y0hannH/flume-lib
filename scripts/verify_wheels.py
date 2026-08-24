@@ -29,10 +29,17 @@ import hashlib
 import json
 import pathlib
 import sys
+import time
 import urllib.request
 
 PYPI_TIMEOUT_SECONDS = 30
+PYPI_ATTEMPTS = 3
 CHECKSUMS_FILE = "SHA256SUMS.txt"
+
+# PyPI est derrière un CDN qui filtre plus volontiers le User-Agent par défaut
+# d'urllib, surtout depuis des plages d'IP partagées comme celles des runners
+# CI. Un agent explicite est aussi ce que PyPI demande à ses clients.
+USER_AGENT = "flume-lib-verify-wheels (+https://github.com/Y0hannH/flume-lib)"
 
 # Construit ici, jamais publié : aucune empreinte de référence côté PyPI.
 LOCAL_PACKAGE = "flume-lib"
@@ -85,14 +92,29 @@ def check_local_digests(folder: pathlib.Path) -> list[str]:
 
 def published_digests(name: str, version: str) -> dict[str, str]:
     url = f"https://pypi.org/pypi/{name}/{version}/json"
-    with urllib.request.urlopen(url, timeout=PYPI_TIMEOUT_SECONDS) as response:
-        payload = json.load(response)
-    return {f["filename"]: f["digests"]["sha256"] for f in payload["urls"]}
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    last_error: Exception | None = None
+    for attempt in range(PYPI_ATTEMPTS):
+        try:
+            with urllib.request.urlopen(request, timeout=PYPI_TIMEOUT_SECONDS) as response:
+                payload = json.load(response)
+            return {f["filename"]: f["digests"]["sha256"] for f in payload["urls"]}
+        except Exception as exc:  # noqa: BLE001 — réseau, CDN, throttling
+            last_error = exc
+            if attempt < PYPI_ATTEMPTS - 1:
+                time.sleep(2 ** attempt)
+    raise last_error
 
 
-def check_against_pypi(folder: pathlib.Path) -> list[str]:
-    """Chaque wheel correspond-il au fichier que PyPI sert sous ce nom ?"""
+def check_against_pypi(folder: pathlib.Path) -> tuple[list[str], list[str]]:
+    """Chaque wheel correspond-il au fichier que PyPI sert sous ce nom ?
+
+    Retourne (divergences, échecs d'interrogation). Les deux empêchent de
+    conclure, mais pas pour la même raison : une divergence est un verdict, un
+    échec réseau est une absence de verdict.
+    """
     problems = []
+    unreachable = []
     for path in sorted(folder.glob("*.whl")):
         name, version = wheel_identity(path.name)
         if name == LOCAL_PACKAGE:
@@ -101,7 +123,7 @@ def check_against_pypi(folder: pathlib.Path) -> list[str]:
         try:
             published = published_digests(name, version)
         except Exception as exc:  # noqa: BLE001 — réseau, 404, PyPI indisponible
-            problems.append(f"{path.name} : interrogation de PyPI impossible ({exc})")
+            unreachable.append(f"{path.name} : interrogation de PyPI impossible ({exc})")
             continue
         if path.name not in published:
             problems.append(f"{path.name} : ce fichier n'existe pas sur PyPI")
@@ -109,7 +131,7 @@ def check_against_pypi(folder: pathlib.Path) -> list[str]:
             problems.append(f"{path.name} : EMPREINTE DIFFÉRENTE de celle publiée")
         else:
             print(f"  {path.name}")
-    return problems
+    return problems, unreachable
 
 
 def main() -> int:
@@ -139,17 +161,32 @@ def main() -> int:
     print(f"1. Empreintes locales ({CHECKSUMS_FILE})")
     problems = check_local_digests(folder)
 
+    unreachable: list[str] = []
     if not args.offline:
         print("\n2. Empreintes publiées par PyPI")
-        problems += check_against_pypi(folder)
+        mismatches, unreachable = check_against_pypi(folder)
+        problems += mismatches
     else:
         print("\n2. Empreintes publiées par PyPI — ignoré (--offline)")
 
     if problems:
-        print(f"\n{len(problems)} problème(s) :")
+        print(f"\n{len(problems)} divergence(s) :")
         for problem in problems:
             print(f"  - {problem}")
+        if unreachable:
+            print(f"  ... et {len(unreachable)} interrogation(s) impossible(s)")
         return 1
+
+    if unreachable:
+        print(f"\n{len(unreachable)} interrogation(s) de PyPI impossible(s) :")
+        for problem in unreachable:
+            print(f"  - {problem}")
+        print(
+            "\nLes empreintes locales sont conformes, mais la comparaison à PyPI "
+            "n'a pas pu être menée — ce n'est pas un contrôle réussi.\n"
+            "Relancer, ou --offline pour se limiter au contrôle local."
+        )
+        return 2
 
     print("\nLot conforme.")
     return 0
