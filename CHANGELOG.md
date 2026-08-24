@@ -2,6 +2,47 @@
 
 All notable changes to this project are documented here. Versions follow [semantic versioning](https://semver.org/); until 1.0.0, minor versions may contain breaking changes — these are always listed first.
 
+## [0.10.0] — 2026-08-24
+
+Robustness pass on long runs. A source of a few million rows used to be an all-or-nothing bet: everything was accumulated in memory for a single write, the token expired mid-way, and nothing bounded a pagination that stopped progressing. The five changes below address that, and the type inference that silently turned a column of amounts into a column of text.
+
+### Breaking
+
+- **Ingestion is now at-least-once.** Records are written in batches of `batch_size` rows (default 50 000) instead of one write at the end of the run, so a failed run can leave partial data behind — where it previously left none. Rows of a run all carry the same `_flume_run_id`, so a failed run is identifiable and removable (`DELETE FROM … WHERE _flume_run_id = '…'`). This is the price of a run's memory no longer depending on the size of its source, and of a run that breaks on page 900 keeping the first 899.
+- **`RunResult.rows_loaded` counts the rows actually written**, not the rows read. On a failed run it is no longer 0 but however far the run got — which is what makes it usable as a resumption point.
+- **`append_records()` returns `(types, fallbacks)`** instead of `None`, and **`records_to_table()` returns `(table, fallbacks)`**. Internal helpers; `run_source` is unaffected.
+
+### Added
+
+- **`batch_size`**: rows buffered before each Delta write. A source smaller than one batch still produces a single commit, as before.
+- **`incremental.checkpoint`**: commits the watermark after each batch instead of once at the end, so an interrupted run resumes where it stopped rather than replaying the whole window. Only correct on a source sorted by `incremental.field` — the library checks it, and a batch that goes backwards fails the run **before writing**, rather than advancing a watermark that would silently skip rows.
+- **Mid-run token renewal** for `oauth2_client_credentials` and `token_endpoint`. Proactively when the endpoint announces a lifetime (`expires_in`, or the path given in the new `expires_in_json_path`), 60 seconds before expiry; reactively on a 401 otherwise, replaying the page immediately without backoff. Once per page: a freshly issued token refused again is not an expiry, and the run fails with the 401. Static credentials and `oauth1` are never renewed — their 401 is a configuration error.
+- **`keyset` pagination**: each page is filtered by the key of the last record of the previous one (`id > last`). The cost of a page does not grow with its depth and nothing caps it — the only strategy that reaches the bottom of a table on APIs that bound the offset, NetSuite refusing past 100 000. Requires a source sorted by the key, with unique values; the library verifies the key advances and stops instead of looping.
+- **`pagination.params_in: "body_template"`**: pagination params substituted into the `{placeholder}` markers of `body`, for SQL-over-REST endpoints where the key belongs inside the query. `value_format` is mandatory there — the key comes back from the API, same rule and same reason as the incremental watermark. The combination forbids top-level `params` and a `query_param` watermark, since no query string is sent at all.
+- **`pagination.max_pages` / `pagination.max_rows`**: bounds on a run. Reaching one is an **error**, not a clean stop — truncating silently would produce a `success` run short of part of its data.
+- **`RunResult.warnings`**: degradations a run survived. A `success` run can carry them; that is the point.
+- **`py.typed`**: the library is typed, consumers can now use it.
+
+### Fixed
+
+- **Column types are inferred from all the values of a column**, not from the first non-null one. A column of amounts starting with an integer (`[10, 10.5]`) was inferred `bigint`, the Arrow build failed, and the fallback wrote the **whole column as text** — with no signal whatsoever. Integers mixed with floats now give a `double`.
+- **The remaining text fallback is reported** in `RunResult.warnings` instead of being silent.
+- **The types chosen by the first batch apply to the following ones.** Without this, batched writing could produce two incompatible schemas for the same table within a single run.
+- **The max of the incremental field is computed before the batch is written.** A field with mixed types used to fail `max()` *after* the append, leaving rows behind a `failed` run with no watermark to cover them.
+- **A page identical to the previous one stops the run.** An API that clamps an out-of-range page number and re-serves the first page has no natural stop condition; `offset` and `page` looped until the notebook timed out, memory climbing.
+
+### Packaging
+
+- **`arro3-core` is now a declared dependency.** `_delta.py` imports it directly; it only arrived through `deltalake`. The Fabric wheel set is unchanged — it already contained it.
+- **CI** ([.github/workflows/ci.yml](.github/workflows/ci.yml)): lint and test suite on Python 3.10, 3.11 and 3.12 — the three Fabric kernel versions — on every push and pull request, then a wheel build checked for every module and the `py.typed` marker. A wheel installed offline from the lakehouse only reveals a missing module when a notebook imports it.
+- **ruff** (E, F, W, I, UP, B) and pytest configured in `pyproject.toml`.
+
+### Known limitations
+
+- The no-regression check on `incremental.checkpoint` compares against the maximum seen **during the current run**, not the watermark stored at its start. An API that returns rows older than the stored watermark can therefore move it backwards — pre-existing behavior, unchanged.
+- Warnings live in `RunResult` only; `log_runs` does not carry them.
+- A column that changes type from one run to the next is still a `SchemaMismatchError` at commit time. Only within a run is the type stabilized.
+
 ## [0.9.0] — 2026-08-24
 
 GraphQL APIs are now reachable without any endpoint-specific library code. The four additions below are generic; together they cover Relay connections, of which the Shopify Admin API is one — see [examples/shopify_graphql.py](examples/shopify_graphql.py).

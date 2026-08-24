@@ -253,7 +253,7 @@ Unit tests are fully mocked — no network calls. Python ≥ 3.10 required local
 2. Add the version's section to [CHANGELOG.md](CHANGELOG.md), breaking changes first
 3. `pytest`
 4. Commit the release, then tag that commit: `git tag -a vX.Y.Z`
-5. Add the tagged SHA to the table above (`git rev-list -n1 vX.Y.Z`) in a **separate** commit — a commit cannot contain its own SHA, so this one always lands after the tag
+5. Add the tagged SHA to the table above (`git rev-list -n1 vX.Y.Z`) in a **separate** commit — a commit cannot contain its own SHA, so this one always lands after the tag, together with the pinned version of the `%pip install` lines in this README and in `examples/` (`grep -rn "flume-lib==" README.md examples/`)
 6. Push branch and tag. Tags are protected against update and deletion: review the tag before pushing, it cannot be moved afterwards
 7. `python scripts/build_fabric_wheels.py`, then verify the bundle before uploading it to `Files/libs/` in the target lakehouses:
 
