@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Versions des kernels Fabric Python notebook
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        run: pytest
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install build
+
+      - name: Build the wheel
+        run: python -m build --wheel
+
+      # Le lot de wheels Fabric est installé hors ligne depuis le lakehouse :
+      # un wheel qui ne porte pas py.typed ou qui oublie un module ne se voit
+      # qu'au moment où le notebook l'importe.
+      - name: Check the wheel contents
+        run: |
+          python - <<'PY'
+          import pathlib, zipfile
+          wheel = next(pathlib.Path("dist").glob("flume_lib-*.whl"))
+          names = set(zipfile.ZipFile(wheel).namelist())
+          modules = {p.name for p in pathlib.Path("src/flume_lib").glob("*.py")}
+          missing = {m for m in modules if f"flume_lib/{m}" not in names}
+          assert not missing, f"modules absents du wheel : {missing}"
+          assert "flume_lib/py.typed" in names, "py.typed absent du wheel"
+          print(f"{wheel.name} : {len(modules)} modules + py.typed")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel
+          path: dist/*.whl

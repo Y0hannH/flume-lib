@@ -9,7 +9,7 @@
 #
 # %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.9.0
 
-from flume_lib import run_source, validate_config, ConfigError
+from flume_lib import ConfigError, run_source, validate_config
 
 API = "https://api.example.com/v1"
 KEYVAULT = "https://mykv.vault.azure.net"

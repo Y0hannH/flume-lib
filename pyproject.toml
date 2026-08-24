@@ -13,12 +13,28 @@ dependencies = [
     "requests>=2.31",
     "tenacity>=8.2",
     "deltalake>=1.0",
+    # Importé directement par _delta.py. deltalake le tire déjà, mais une
+    # dépendance qu'on importe se déclare : le jour où deltalake change de
+    # backend Arrow, l'install passerait et l'import casserait.
+    "arro3-core>=0.5",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "build>=1.0"]
+dev = ["pytest>=8.0", "build>=1.0", "ruff>=0.6"]
 # Accès Key Vault hors Fabric (dans Fabric, notebookutils est préinstallé)
 azure = ["azure-identity>=1.15", "azure-keyvault-secrets>=4.8"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/flume_lib"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["fabric-wheels", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]

@@ -11,3 +11,4 @@ venv/
 .coverage
 .vscode/
 .idea/
+.ruff_cache/

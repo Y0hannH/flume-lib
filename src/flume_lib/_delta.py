@@ -8,7 +8,6 @@ import arro3.core as ac
 from deltalake import DeltaTable, QueryBuilder, write_deltalake
 from deltalake.exceptions import TableNotFoundError
 
-
 ONELAKE_HOST = "onelake.dfs.fabric.microsoft.com"
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")

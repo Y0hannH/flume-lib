@@ -74,7 +74,11 @@ class TestApiKeyHeader:
     def test_custom_header_name(self, monkeypatch):
         monkeypatch.setenv("MY_KEY", "k1")
         headers = build_auth_headers(
-            {"type": "api_key_header", "key_env_var": "MY_KEY", "header_name": "Ocp-Apim-Subscription-Key"}
+            {
+                "type": "api_key_header",
+                "key_env_var": "MY_KEY",
+                "header_name": "Ocp-Apim-Subscription-Key",
+            }
         )
         assert headers == {"Ocp-Apim-Subscription-Key": "k1"}
 

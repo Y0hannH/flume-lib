@@ -3,9 +3,9 @@ d'exception vers l'appelant."""
 
 import uuid
 from dataclasses import dataclass, field
-from urllib.parse import urlsplit, urlunsplit
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 from tenacity import (

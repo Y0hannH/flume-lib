@@ -82,7 +82,11 @@ class TestAuthSection:
     def test_oauth2_without_tenant_or_url_raises(self):
         with pytest.raises(ConfigError, match="token_url"):
             validate_config(
-                cfg(auth={"type": "oauth2_client_credentials", "client_id": "c", "client_secret": "s"})
+                cfg(auth={
+                    "type": "oauth2_client_credentials",
+                    "client_id": "c",
+                    "client_secret": "s",
+                })
             )
 
     def test_secret_ref_in_get_body_raises(self):
@@ -147,7 +151,9 @@ class TestIncrementalAndRetry:
 
     def test_unknown_incremental_key_raises(self):
         with pytest.raises(ConfigError, match="clé inconnue"):
-            validate_config(cfg(incremental={"enabled": True, "field": "f", "param_name": "p", "extra": 1}))
+            validate_config(cfg(incremental={
+                "enabled": True, "field": "f", "param_name": "p", "extra": 1,
+            }))
 
     def test_unknown_retry_key_raises(self):
         with pytest.raises(ConfigError, match="clé inconnue"):

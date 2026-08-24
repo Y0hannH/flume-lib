@@ -236,10 +236,13 @@ See [docs/security.md](docs/security.md) — threat model, supply-chain posture,
 git clone https://github.com/Y0hannH/flume-lib.git
 cd flume-lib
 pip install -e ".[dev]"
+ruff check .
 pytest
 ```
 
 Unit tests are fully mocked — no network calls. Python ≥ 3.10 required locally.
+
+[CI](.github/workflows/ci.yml) runs the lint and the suite on 3.10, 3.11 and 3.12 — the three Fabric kernel versions — on every push and pull request, then builds the wheel and checks it carries every module and the `py.typed` marker. A wheel installed offline from the lakehouse only reveals a missing module when a notebook imports it.
 
 ### Release procedure
 
