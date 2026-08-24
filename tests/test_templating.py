@@ -3,7 +3,13 @@ orphelins et contrôle des valeurs interpolées."""
 
 import pytest
 
-from flume_lib.templating import TemplateError, check_value, render
+from flume_lib.templating import (
+    TemplateError,
+    check_value,
+    placeholders,
+    render,
+    templated_placeholders,
+)
 
 
 class TestRender:
@@ -82,3 +88,40 @@ class TestCheckValue:
     def test_label_appears_in_the_message(self):
         with pytest.raises(TemplateError, match="mon_champ"):
             check_value("a;b", label="mon_champ")
+
+
+class TestPlaceholders:
+    def test_finds_names_in_a_string(self):
+        assert placeholders("id > {last_id} and ts > {watermark}") == {
+            "last_id", "watermark",
+        }
+
+    def test_walks_dicts_and_lists(self):
+        assert placeholders({"q": "{a}", "v": {"b": ["{c}", 1]}}) == {"a", "c"}
+
+    def test_empty_containers_and_scalars(self):
+        for value in ({}, [], None, 42, True):
+            assert placeholders(value) == set()
+
+    def test_a_brace_that_is_not_a_placeholder_is_ignored(self):
+        # une requête GraphQL compacte n'est pas un gisement de placeholders
+        assert placeholders("{orders{edges{node{id}}}}") == {"id"}
+
+
+class TestTemplatedPlaceholders:
+    BODY = {"q": "id > {key}", "variables": {"after": "{cursor}"}}
+
+    def test_without_template_paths_the_whole_value_is_scanned(self):
+        assert templated_placeholders(self.BODY) == {"key", "cursor"}
+
+    def test_template_paths_restrict_the_scan(self):
+        assert templated_placeholders(self.BODY, ["variables"]) == {"cursor"}
+        assert templated_placeholders(self.BODY, ["q"]) == {"key"}
+
+    def test_several_paths_are_unioned(self):
+        assert templated_placeholders(self.BODY, ["q", "variables"]) == {
+            "key", "cursor",
+        }
+
+    def test_an_absent_path_contributes_nothing(self):
+        assert templated_placeholders(self.BODY, ["nope"]) == set()

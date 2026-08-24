@@ -20,6 +20,7 @@ Exhaustive reference of every option: the JSON configuration of a source (key by
   "errors": { ... },
   "target_schema": "bronze",
   "target_table": "my_source",
+  "batch_size": 50000,
   "retry": { ... },
   "timeout_seconds": 60
 }
@@ -35,6 +36,7 @@ Exhaustive reference of every option: the JSON configuration of a source (key by
 | `incremental` | object | no | disabled | See [Incremental](#incremental-watermark). |
 | `target_schema` | string | **yes** | — | Destination schema for the data (schema-enabled lakehouse required). Letters/digits/underscore only. |
 | `target_table` | string | **yes** | — | Destination table. Written in `append` mode with `schema_mode=merge`. Letters/digits/underscore only. |
+| `batch_size` | integer | no | `50000` | Rows buffered before each Delta write. Bounds the memory of a run. See [Batched writes](#batched-writes). |
 | `retry` | object | no | see [Retry](#retry) | HTTP retry policy. |
 | `timeout_seconds` | number | no | `60` | Timeout of each data HTTP request. |
 | `method` | string | no | `GET` | HTTP method of the data calls: `GET`, `POST`, `PUT`, `PATCH`. |
@@ -259,6 +261,8 @@ A GraphQL selection is a tree; a Delta table is flat. Objects and lists (`custom
 - Query them downstream with the JSON functions of whatever reads the table; the library does not flatten.
 - To get real columns, ask for scalars in the query (`customer { id }` → still one JSON column, but a shallow one), or split the connection into its own source.
 
+How scalars themselves are typed: [Column types in Delta](#column-types-in-delta).
+
 ### Common failure modes
 
 | Symptom | Cause |
@@ -328,6 +332,20 @@ Legacy form still supported: `token_env_var`, `key_env_var`, `username_env_var`,
 ## Auth
 
 The type is selected by `auth.type`. The token is obtained **once per run** (no mid-run refresh).
+
+All of them side by side in one runnable notebook, with a probe loop that checks credentials without writing anything: [examples/rest_api_auth_variants.py](../examples/rest_api_auth_variants.py).
+
+### Token expiry on long runs
+
+The token of an `oauth2_client_credentials` or `token_endpoint` auth expires — 60 minutes is common. A run longer than that used to see its last pages answered with 401, a status that is never retried: the whole run failed. Both types are now renewed mid-run, in two ways.
+
+**Proactively**, when the token endpoint announces a lifetime: `expires_in` for `oauth2_client_credentials` (standard OAuth2, read automatically), or the path declared in `expires_in_json_path` for `token_endpoint`. The token is renewed 60 seconds before the announced expiry, so the API never sees an expired credential.
+
+**Reactively**, on a 401, for endpoints that announce nothing. The token is renewed and the page replayed immediately, without backoff — nothing is saturated, the credential was simply stale. This happens **once per page**: if a freshly issued token is refused again, the run fails with the 401, because that is no longer an expiry and replaying would only delay the diagnosis.
+
+The other types carry a static credential (`bearer_token`, `api_key_header`, `basic`) or sign each request individually (`oauth1`). They are never renewed: a 401 there is a configuration error, and it fails immediately.
+
+Renewal costs one extra token call, and only when needed. It is bounded by `retry.max_attempts` like every other retry cause.
 
 ### `bearer_token` — static token
 
@@ -418,6 +436,7 @@ For any API where the token comes from a non-standard preliminary call: login/pa
 | `body_format` | no | `json` | `json` (JSON body) or `form` (form-encoded). |
 | `headers` | no | `{}` | Headers of the token call; same rules as `body`. |
 | `token_json_path` | no | `access_token` | Dotted path of the token in the JSON response (e.g. `data.token`, `result.auth.jwt`). |
+| `expires_in_json_path` | no | — | Dotted path of the token lifetime, in seconds, in the same response. Enables proactive refresh — see [Token expiry on long runs](#token-expiry-on-long-runs). |
 | `header_name` | no | `Authorization` | Header used on subsequent data calls. |
 | `value_prefix` | no | `Bearer ` | Token prefix in that header. |
 | `timeout_seconds` | no | `30` | Token call timeout. |
@@ -488,8 +507,10 @@ The type is selected by `pagination.type`. All strategies accept:
 |---|---|---|
 | `items_field` | auto | Response field containing the record list, as a **dotted path** (`data.orders.edges`). Left out, the probing order is: a response that is already a list is used as-is, otherwise `data`, `items`, `results`, `value`. Explicit error if none is found, or if the configured path is absent or resolves to something other than a list. A response that is already a top-level list short-circuits this key — `items_field` is not applied to it. |
 | `record_field` | absent | Dotted path unwrapped from **each item** of that list. Relay connections (GraphQL) wrap every record in a `{cursor, node}` — `"record_field": "node"` keeps the record. Missing from any item ⇒ explicit error. |
-| `params_in` | `query` | Where pagination and incremental params are sent: `query` (query string) or `body` (merged into the request payload). `body` requires a non-`GET` `method`. |
+| `params_in` | `query` | Where pagination and incremental params are sent: `query` (query string), `body` (merged into the request payload as JSON values), or `body_template` (each param whose `{placeholder}` appears in `body` is substituted there, the rest go to the query string). The last two require a non-`GET` `method`. |
 | `params_path` | root | With `"params_in": "body"`, dotted path inside `body` under which those params are merged (GraphQL: `variables`). The branch is created if absent. |
+| `max_pages` | none | Stops the run with an error past that many pages. See [Safety bounds](#safety-bounds). |
+| `max_rows` | none | Same, on the number of rows read. |
 
 ### `offset` — offset/limit
 
@@ -504,6 +525,8 @@ Stops on: empty page, or partial page (`< limit`).
 ```json
 {"type": "offset", "limit": 500, "limit_param": "top", "offset_param": "skip"}
 ```
+
+Runnable source: [examples/rest_api_paginated.py](../examples/rest_api_paginated.py).
 
 ### `page` — page number (header-provided total supported)
 
@@ -521,6 +544,74 @@ Stops after: `total_pages` pages when `total_pages_header` is set; otherwise emp
 {"type": "page", "page_param": "page", "size_param": "per_page", "page_size": 100, "total_pages_header": "X-Total-Pages"}
 ```
 
+Runnable source: [examples/rest_api_paginated.py](../examples/rest_api_paginated.py).
+
+### `keyset` — filter by the last key seen (seek method)
+
+Each page is filtered by the value of `key_field` taken from the **last record of the previous page**, sent back in `key_param`. Unlike `offset`, the cost of a page does not grow with its depth and nothing caps it: this is the only strategy that reaches the bottom of a multi-million-row table on APIs that bound the offset — NetSuite stops at 100 000, which is what forces month-by-month slicing.
+
+| Key | Required | Default | Description |
+|---|---|---|---|
+| `key_field` | **yes** | — | Dotted path of the key inside a record (`id`, `meta.cursor_id`). |
+| `key_param` | **yes** | — | Param carrying the key on the next request — or the `{placeholder}` name with `"params_in": "body_template"`. |
+| `initial_value` | no | none | Key used on the very first request. Required with `body_template`, otherwise the placeholder has nothing to resolve to. |
+| `value_format` | **yes** with `body_template`, otherwise no (default `any`) | `any` | Validation applied to the key before it is sent: `any`, `numeric`, `iso_date`, `iso_datetime`. |
+| `limit` | no | none | Page size. |
+| `limit_param` | no | `limit` | Param carrying it. |
+
+**The source must be sorted by `key_field`, with unique values.** That is inherent to the method, not a limitation of the library: a key that goes backwards would re-read pages forever, and a duplicated key would skip everything sharing it. The library checks that the key advances from page to page and stops with an explicit error if it does not — it never loops.
+
+Stop conditions: an empty page, a page shorter than `limit`, or `key_field` missing from the last record (an error — the next page cannot be built).
+
+Query-string form (`since_id`, `starting_after`…):
+
+```json
+{
+  "type": "keyset",
+  "key_field": "id",
+  "key_param": "since_id",
+  "limit": 250
+}
+```
+
+SQL-over-REST form, where the key belongs inside the query itself:
+
+```json
+{
+  "method": "POST",
+  "body": {"q": "select id, amount from transactions where id > {since_id} order by id"},
+  "pagination": {
+    "type": "keyset",
+    "key_field": "id",
+    "key_param": "since_id",
+    "params_in": "body_template",
+    "value_format": "numeric",
+    "initial_value": 0,
+    "limit": 1000,
+    "limit_param": "rows"
+  }
+}
+```
+
+The key comes back from the API, so with `body_template` it is interpolated into a query and `value_format` is **required** — same rule, and the same reason, as the incremental watermark.
+
+`body_template` routes **per param**, not per request: a param whose `{placeholder}` appears in `body` is substituted there, every other one goes to the query string. Both channels of a request stay available, which is what the shape above needs — SuiteQL takes the key inside the SQL and `limit` as a query param:
+
+```
+POST /suiteql?limit=1000
+Body: {"q": "select id, amount from transactions where id > 2000 order by id"}
+```
+
+Nothing is silently dropped: a param always lands in whichever channel can carry it. The placeholder named by `key_param` must exist in `body` — with `template_paths`, inside one of the declared branches — or the config is rejected, since the key would have nowhere to go.
+
+Top-level `params` and a `query_param` watermark are both fine here; they take the query string while the key takes the body.
+
+The watermark and the key can share one body — the watermark bounds the window, the key walks it:
+
+```json
+{"q": "select id, ts from t where ts > '{watermark}' and id > {since_id} order by id"}
+```
+
 ### `next_link` — next-page URL in the response
 
 | Key | Default | Description |
@@ -532,6 +623,10 @@ The `params`/`incremental` query params are sent on the first call only — the 
 ```json
 {"type": "next_link", "next_field": "@odata.nextLink", "items_field": "value"}
 ```
+
+`next_field` is a top-level response key, not a dotted path — `@odata.nextLink` works because that is the key, dot included, whereas a URL nested under `links.next` is out of reach.
+
+Runnable sources: [examples/rest_api_paginated.py](../examples/rest_api_paginated.py), and OData end to end (Microsoft Graph, Business Central) in [examples/microsoft_graph_odata.py](../examples/microsoft_graph_odata.py).
 
 ### `cursor` — opaque cursor (Relay/GraphQL connections)
 
@@ -564,7 +659,7 @@ A cursor that does not advance between two requests also raises, instead of loop
 }
 ```
 
-Full GraphQL source, auth to Delta: [examples/shopify_graphql.py](../examples/shopify_graphql.py).
+Full GraphQL source, auth to Delta: [examples/shopify_graphql.py](../examples/shopify_graphql.py). The same strategy against a flat REST response, cursor in the query string: [examples/rest_api_paginated.py](../examples/rest_api_paginated.py).
 
 ### `none` / absent
 
@@ -575,6 +670,36 @@ A single HTTP call, no loop. The common keys still apply: `items_field` and `rec
 ```
 
 > **Offset ceilings.** Some APIs refuse an offset beyond a hard limit (NetSuite stops at 100 000). Past that point, split the source into bounded slices — one run per month or per id range, with the bounds in the query — rather than paging further.
+
+### Safety bounds
+
+`max_pages` and `max_rows` bound a run whose order of magnitude is known. Reaching one is an **error**, not a clean stop: truncating silently would produce a `success` run short of part of its data, which is the failure mode this library exists to avoid. Rows already written stay written, and the message says what happened. The bound fires on the count alone — a source that happens to end exactly on it still fails, because the run stopped before observing the end.
+
+Independently of any configuration, a page **identical to the one before it** stops the run. An API that clamps an out-of-range page number and serves the first page again has no natural stop condition — the notebook used to run until its timeout, memory climbing. The strategies that read a cursor, a next link or a keyset key have their own no-progress checks on top.
+
+## Batched writes
+
+Records are written to Delta in batches of `batch_size` rows (default 50 000) instead of being accumulated for a single write at the end of the run. The memory of a run no longer depends on the size of the source, and a run that breaks on page 900 leaves the first 899 pages in the table rather than losing everything. A source smaller than `batch_size` still produces exactly one commit.
+
+`RunResult.rows_loaded` — and the `rows_loaded` column of `log_runs` — count the rows **actually written**, including on a failed run.
+
+**This makes ingestion at-least-once.** A failed run can leave partial data behind. Rows of a given run all carry the same `_flume_run_id`, so a failed run is identifiable and removable:
+
+```sql
+DELETE FROM bronze.my_table WHERE _flume_run_id = '<the failed run_id>'
+```
+
+Sizing `batch_size` is a trade-off: smaller means less memory and finer-grained resumption, but more Delta commits and more small files. Leave it alone unless a run runs out of memory (lower it) or a source is small and frequent (raise it above its row count to keep one commit per run).
+
+### Resuming with `incremental.checkpoint`
+
+Without `checkpoint`, the watermark is committed once, at the end of a successful run: a failed run never advances it, and the next run replays the whole window — the rows already written become duplicates.
+
+With `"checkpoint": true`, the watermark is committed after each batch. An interrupted run resumes where it stopped, and only the last incomplete batch is replayed.
+
+This is only correct if **the source returns its rows sorted by `incremental.field`**. Otherwise a batch could carry a value lower than an already-committed watermark, and resuming would skip rows that were never written. The library checks this: a batch that goes backwards fails the run with an explicit message, before writing anything, rather than advancing a watermark that would silently lose data. Add an `ORDER BY` to the query, or leave `checkpoint` off.
+
+Data is always committed **before** its watermark. If the watermark commit fails after the data commit, the next run replays the window and duplicates — recoverable through `_flume_run_id`. The opposite order would lose the rows for good.
 
 ## Incremental (watermark)
 
@@ -587,8 +712,15 @@ A single HTTP call, no loop. The common keys still apply: `items_field` and `rec
 | `placeholder` | no (default `watermark`) | With `inject: "body_template"`, the variable name to substitute. |
 | `initial_value` | no | Value used on the very first run, before any watermark exists. Required in practice with `body_template`, otherwise the placeholder would have nothing to resolve to. |
 | `value_format` | **yes** with `body_template`, otherwise no (default `any`) | Validation applied to the watermark before it is used: `any`, `numeric`, `iso_date`, `iso_datetime`. |
+| `checkpoint` | no (default `false`) | Commits the watermark after **each batch** instead of once at the end, making an interrupted run resumable. Requires the source to return its rows sorted by `field`. See [Batched writes](#batched-writes). |
 
-Behavior: the last watermark is read from `<log_schema>.watermark` at run start (`initial_value` is used on the very first run, and no param is sent if neither exists); the new watermark is written **only if the run succeeded** and at least one record was loaded. Comparison uses Python `max()` — works for ISO 8601 timestamps and numerics; beware of date formats that don't sort lexicographically.
+Behavior: the last watermark is read from `<log_schema>.watermark` at run start (`initial_value` is used on the very first run, and no param is sent if neither exists); the new watermark is written **only if the run succeeded** and at least one record was loaded — unless [`checkpoint`](#resuming-with-incrementalcheckpoint) is on, in which case it advances batch by batch.
+
+The max of each batch is computed **before** that batch is written, so a `field` whose values cannot be compared (mixed types) fails the run without leaving rows behind an unadvanced watermark. Comparison uses Python `max()` — works for ISO 8601 timestamps and numerics; beware of date formats that don't sort lexicographically.
+
+`inject: "query_param"` sends the watermark as the **entire value** of one param: it produces `?updated_since=2026-08-01T00:00:00Z`, and cannot build an expression around it. An API whose filter is a composed string — OData's `$filter=lastModifiedDateTime ge 2026-08-01T00:00:00Z`, a SQL `WHERE` clause — needs the value *inside* a string, which is `inject: "body_template"` and therefore a non-`GET` `method`. For a GET endpoint that only accepts a composed filter, the bound has to be computed in the notebook and written into `params` there; [examples/microsoft_graph_odata.py](../examples/microsoft_graph_odata.py) shows that form, and what it costs (re-read overlap, deduplicated downstream on the lineage columns).
+
+Runnable incremental sources: query param in [examples/rest_api_paginated.py](../examples/rest_api_paginated.py), `body_template` into a SQL `WHERE` in [examples/netsuite_suiteql.py](../examples/netsuite_suiteql.py), and into GraphQL `variables` in [examples/shopify_graphql.py](../examples/shopify_graphql.py).
 
 ## Retry
 
@@ -603,6 +735,23 @@ Retried: network errors (connection, timeout), HTTP 429 and 5xx, and application
 `max_attempts` bounds every one of those causes alike, so an API answering "transient" forever costs at most `max_attempts` calls per page, not an unbounded loop.
 
 When the response carries a `Retry-After` header (seconds or an HTTP date), that delay is used instead of the exponential backoff — APIs with strict governance ban clients that retry earlier than they were told to. The delay is capped at `max_retry_after_seconds`; beyond the cap the wait is truncated and the next attempt will most likely fail, which surfaces as a `failed` run in `log_runs` rather than a notebook hanging for an hour.
+
+## Column types in Delta
+
+Each column is typed from **all** the values of the batch being written, not from the first non-null one:
+
+| Values seen in the column | Delta type |
+|---|---|
+| integers only | `bigint` |
+| floats, or integers **and** floats | `double` |
+| booleans only | `boolean` |
+| anything else — strings, mixed scalars, objects, lists | `string` |
+
+Objects and lists are serialized to a JSON string. Dates and timestamps arrive as strings and stay strings: the library does not parse them, so downstream casting is the consumer's job.
+
+A column whose values fit none of those types — an integer beyond `bigint`, say — is still written, as text, and the degradation is reported in `RunResult.warnings`. A run can be `success` and carry warnings; that is the point. It used to be silent, which is how a column of amounts became a column of text without anyone noticing.
+
+Within a run, the types chosen by the first batch are applied to the following ones, so a source whose later rows look different cannot produce two incompatible schemas for the same table. Across runs, Delta's `schema_mode=merge` handles new columns, but not a column that changes type from one run to the next — that is a `SchemaMismatchError` at commit time.
 
 ## Technical tables
 

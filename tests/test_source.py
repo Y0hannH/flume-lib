@@ -75,13 +75,20 @@ def delta(monkeypatch):
     """Mocke les écritures/lectures Delta et enregistre les appels."""
     # 'watermark_value' est ce que renverra read_watermark : None simule un
     # premier run, un test peut le remplacer pour simuler un run incremental.
+    # 'append_result' est ce que renverra append_records : (types Arrow
+    # retenus, dégradations subies). Un test peut le remplacer pour simuler
+    # une colonne repliée sur du texte.
     calls = {
         "append": [], "log": [], "watermark_write": [], "watermark_read": [],
-        "watermark_value": None,
+        "watermark_value": None, "append_result": ({}, []),
     }
 
-    def fake_append(uri, records, **kwargs):
-        calls["append"].append({"uri": uri, "records": records})
+    def fake_append(uri, records, known_types=None, **kwargs):
+        # copie : l'appelant réutilise et mute le même dict d'un lot à l'autre
+        calls["append"].append(
+            {"uri": uri, "records": records, "known_types": dict(known_types or {})}
+        )
+        return calls["append_result"]
 
     def fake_log(path, **kwargs):
         calls["log"].append(kwargs)
@@ -755,7 +762,8 @@ class TestErrorMessagesLeakNothing:
             def request(self, method, url, **kwargs):
                 self.calls.append({"method": method, "url": url})
                 if len(self.calls) <= 2:
-                    return FakeResponse([{"id": 1}, {"id": 2}])
+                    start = 2 * len(self.calls) - 1
+                    return FakeResponse([{"id": start}, {"id": start + 1}])
                 return FakeResponse({}, status_code=403)
 
         import flume_lib.source as source_module
@@ -768,5 +776,548 @@ class TestErrorMessagesLeakNothing:
             source_module.requests.Session = FakeSession
 
         assert result.status == "failed"
-        # 2 pages complètes avant l'échec : la position du run reste lisible
+        # 2 pages complètes avant l'échec, mais sous le batch_size par défaut :
+        # rien n'a été commité, rows_loaded le dit
         assert delta["log"][0]["rows_loaded"] == 0
+
+
+class TestBatchedWrites:
+    """Écriture par lots : la mémoire est bornée, et un run interrompu laisse
+    derrière lui ce qu'il a réellement écrit."""
+
+    def test_a_small_source_still_produces_a_single_commit(self, http, delta):
+        http.next_payloads = [[{"id": 1}, {"id": 2}, {"id": 3}]]
+        result = run_source(BASE_CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert len(delta["append"]) == 1
+        assert result.rows_loaded == 3
+
+    def test_records_are_flushed_every_batch_size_rows(self, http, delta):
+        config = {**BASE_CONFIG, "batch_size": 2}
+        http.next_payloads = [[{"id": i} for i in range(5)]]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert [len(c["records"]) for c in delta["append"]] == [2, 2, 1]
+        assert result.rows_loaded == 5
+
+    def test_a_batch_spanning_several_pages_is_written_once(self, http, delta):
+        config = {
+            **BASE_CONFIG,
+            "batch_size": 4,
+            "pagination": {"type": "offset", "limit": 2},
+        }
+        http.next_payloads = [
+            [{"id": 1}, {"id": 2}],
+            [{"id": 3}, {"id": 4}],
+            [{"id": 5}],
+        ]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert [len(c["records"]) for c in delta["append"]] == [4, 1]
+
+    def test_rows_loaded_reports_what_was_really_written(self, http, delta):
+        config = {
+            **BASE_CONFIG,
+            "batch_size": 2,
+            "pagination": {"type": "offset", "limit": 2},
+        }
+
+        class HalfWay(FakeSession):
+            def request(self, method, url, **kwargs):
+                self.calls.append({"method": method, "url": url})
+                if len(self.calls) <= 2:
+                    start = 2 * len(self.calls) - 1
+                    return FakeResponse([{"id": start}, {"id": start + 1}])
+                return FakeResponse({}, status_code=403)
+
+        import flume_lib.source as source_module
+
+        source_module.requests.Session = HalfWay
+        HalfWay.next_payloads = []
+        try:
+            result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+        finally:
+            source_module.requests.Session = FakeSession
+
+        assert result.status == "failed"
+        # les deux premières pages sont dans la table : le run est repris
+        # depuis là, pas depuis zéro
+        assert result.rows_loaded == 4
+        assert delta["log"][0]["rows_loaded"] == 4
+
+
+class TestWatermarkCoherence:
+    CONFIG = {
+        **BASE_CONFIG,
+        "batch_size": 2,
+        "incremental": {
+            "enabled": True,
+            "field": "ts",
+            "param_name": "since",
+        },
+    }
+
+    def test_watermark_is_written_once_at_the_end_by_default(self, http, delta):
+        http.next_payloads = [[{"ts": i} for i in (1, 2, 3, 4)]]
+        result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert len(delta["append"]) == 2
+        assert delta["watermark_write"] == [("s1", 4)]
+
+    def test_checkpoint_commits_the_watermark_after_each_batch(self, http, delta):
+        config = {
+            **self.CONFIG,
+            "incremental": {**self.CONFIG["incremental"], "checkpoint": True},
+        }
+        http.next_payloads = [[{"ts": i} for i in (1, 2, 3, 4)]]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert delta["watermark_write"] == [("s1", 2), ("s1", 4)]
+
+    def test_checkpoint_survives_an_interrupted_run(self, http, delta):
+        config = {
+            **self.CONFIG,
+            "pagination": {"type": "offset", "limit": 2},
+            "incremental": {**self.CONFIG["incremental"], "checkpoint": True},
+        }
+
+        class HalfWay(FakeSession):
+            def request(self, method, url, **kwargs):
+                self.calls.append({"method": method, "url": url})
+                if len(self.calls) == 1:
+                    return FakeResponse([{"ts": 1}, {"ts": 2}])
+                return FakeResponse({}, status_code=403)
+
+        import flume_lib.source as source_module
+
+        source_module.requests.Session = HalfWay
+        HalfWay.next_payloads = []
+        try:
+            result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+        finally:
+            source_module.requests.Session = FakeSession
+
+        assert result.status == "failed"
+        assert result.rows_loaded == 2
+        # le watermark reflète exactement les lignes commitées
+        assert delta["watermark_write"] == [("s1", 2)]
+
+    def test_an_unsorted_source_stops_instead_of_skipping_rows(self, http, delta):
+        config = {
+            **self.CONFIG,
+            "incremental": {**self.CONFIG["incremental"], "checkpoint": True},
+        }
+        http.next_payloads = [[{"ts": 5}, {"ts": 6}, {"ts": 3}, {"ts": 4}]]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "failed"
+        assert "trié" in result.error_message
+        # le lot fautif n'est pas écrit : le watermark reste cohérent
+        assert len(delta["append"]) == 1
+        assert delta["watermark_write"] == [("s1", 6)]
+
+    def test_an_unsorted_source_is_fine_without_checkpoint(self, http, delta):
+        http.next_payloads = [[{"ts": 5}, {"ts": 6}, {"ts": 3}, {"ts": 4}]]
+        result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert delta["watermark_write"] == [("s1", 6)]
+
+    def test_a_mixed_type_field_fails_before_anything_is_written(self, http, delta):
+        http.next_payloads = [[{"ts": 1}, {"ts": "hier"}]]
+        result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "failed"
+        assert "mélange des types" in result.error_message
+        # l'ancien comportement écrivait le lot puis échouait sur le max()
+        assert delta["append"] == []
+        assert delta["watermark_write"] == []
+
+    def test_rows_without_the_field_do_not_block_the_watermark(self, http, delta):
+        http.next_payloads = [[{"ts": 1}, {"other": 2}]]
+        result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert delta["watermark_write"] == [("s1", 1)]
+
+    def test_no_row_at_all_writes_no_watermark(self, http, delta):
+        http.next_payloads = [[]]
+        result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert delta["append"] == []
+        assert delta["watermark_write"] == []
+
+
+class TestTokenRefresh:
+    """Un run plus long que la durée de vie du token voyait ses dernières
+    pages répondre 401 — statut non rejouable, run perdu en entier."""
+
+    SP_CONFIG = {
+        **BASE_CONFIG,
+        "auth": {
+            "type": "oauth2_client_credentials",
+            "token_url": "https://idp.test/token",
+            "client_id": "id",
+            "client_secret": "sec",
+        },
+    }
+    STATIC_CONFIG = {
+        **BASE_CONFIG,
+        "auth": {"type": "bearer_token", "token": "static-tok"},
+    }
+
+    @pytest.fixture
+    def token_endpoint(self, monkeypatch):
+        """Compte les appels au token endpoint et sert un token différent à
+        chaque fois, pour distinguer l'original du renouvelé."""
+        issued = []
+
+        def fake_post(url, **kwargs):
+            issued.append(url)
+            response = MagicMock()
+            response.status_code = 200
+            response.json.return_value = {"access_token": f"tok-{len(issued)}"}
+            return response
+
+        monkeypatch.setattr("flume_lib.source.requests.Session", FakeSession)
+        monkeypatch.setattr("flume_lib.auth.requests.post", fake_post)
+        return issued
+
+    @staticmethod
+    def _session_class(statuses):
+        """Session factice qui rejoue une suite de statuts HTTP et retient le
+        header d'auth de chaque appel."""
+
+        class Recording(FakeSession):
+            def request(self, method, url, **kwargs):
+                index = len(self.calls)
+                self.calls.append(
+                    {"url": url, "auth": self.headers.get("Authorization")}
+                )
+                status = statuses[min(index, len(statuses) - 1)]
+                if status == 200:
+                    return FakeResponse([{"id": index}])
+                return FakeResponse({}, status_code=status)
+
+        return Recording
+
+    def _run(self, monkeypatch, config, statuses):
+        # FakeSession.__init__ enregistre chaque instance sur la classe de
+        # base ; la fixture `http` a remis la liste à zéro.
+        monkeypatch.setattr(
+            "flume_lib.source.requests.Session", self._session_class(statuses)
+        )
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+        return result, FakeSession.instances[-1]
+
+    def test_a_401_renews_the_token_and_replays_the_page(
+        self, http, delta, token_endpoint, monkeypatch
+    ):
+        result, session = self._run(monkeypatch, self.SP_CONFIG, [401, 200])
+
+        assert result.status == "success", result.error_message
+        assert result.rows_loaded == 1
+        # un token à l'ouverture de la session, un second après le 401
+        assert len(token_endpoint) == 2
+        assert [c["auth"] for c in session.calls] == [
+            "Bearer tok-1",
+            "Bearer tok-2",
+        ]
+
+    def test_a_persistent_401_is_not_replayed_forever(
+        self, http, delta, token_endpoint, monkeypatch
+    ):
+        result, session = self._run(monkeypatch, self.SP_CONFIG, [401])
+
+        assert result.status == "failed"
+        assert "401" in result.error_message
+        # une seule tentative de renouvellement : un token neuf refusé n'est
+        # pas une expiration
+        assert len(token_endpoint) == 2
+        assert len(session.calls) == 2
+
+    def test_a_static_credential_is_never_renewed(self, http, delta, monkeypatch):
+        result, session = self._run(monkeypatch, self.STATIC_CONFIG, [401])
+
+        assert result.status == "failed"
+        assert "401" in result.error_message
+        # échec immédiat : rejouer un credential statique ne le corrigerait pas
+        assert len(session.calls) == 1
+
+    def test_the_query_string_is_still_stripped_from_the_401(
+        self, http, delta, token_endpoint, monkeypatch
+    ):
+        config = {**self.SP_CONFIG, "params": {"api_key": "SECRET"}}
+        result, _ = self._run(monkeypatch, config, [401])
+
+        assert result.status == "failed"
+        assert "SECRET" not in result.error_message
+
+
+class TestTypeWarnings:
+    """Une colonne dégradée à l'écriture ne doit pas rester invisible sous un
+    run `success`."""
+
+    def test_a_degraded_column_surfaces_in_the_result(self, http, delta):
+        delta["append_result"] = ({}, ["colonne 'n' : écrite en texte"])
+        http.next_payloads = [[{"n": 1}]]
+        result = run_source(BASE_CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert result.warnings == ["colonne 'n' : écrite en texte"]
+
+    def test_the_same_degradation_is_reported_once_per_run(self, http, delta):
+        delta["append_result"] = ({}, ["colonne 'n' : écrite en texte"])
+        config = {**BASE_CONFIG, "batch_size": 1}
+        http.next_payloads = [[{"n": 1}, {"n": 2}, {"n": 3}]]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert len(delta["append"]) == 3
+        assert result.warnings == ["colonne 'n' : écrite en texte"]
+
+    def test_a_clean_run_carries_no_warning(self, http, delta):
+        http.next_payloads = [[{"n": 1}]]
+        result = run_source(BASE_CONFIG, lakehouse_tables_path=TABLES_PATH)
+        assert result.warnings == []
+
+    def test_the_types_of_the_first_batch_are_passed_to_the_next(self, http, delta):
+        import arro3.core as ac
+
+        delta["append_result"] = ({"n": ac.DataType.int64()}, [])
+        config = {**BASE_CONFIG, "batch_size": 1}
+        http.next_payloads = [[{"n": 1}, {"n": 2}]]
+        run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert delta["append"][0]["known_types"] == {}
+        assert delta["append"][1]["known_types"] == {"n": ac.DataType.int64()}
+
+    def test_warnings_survive_a_failed_run(self, http, delta):
+        delta["append_result"] = ({}, ["colonne 'n' : écrite en texte"])
+        config = {
+            **BASE_CONFIG,
+            "batch_size": 1,
+            "pagination": {"type": "offset", "limit": 1},
+        }
+
+        class HalfWay(FakeSession):
+            def request(self, method, url, **kwargs):
+                self.calls.append({"method": method, "url": url})
+                if len(self.calls) == 1:
+                    return FakeResponse([{"n": 1}])
+                return FakeResponse({}, status_code=403)
+
+        import flume_lib.source as source_module
+
+        source_module.requests.Session = HalfWay
+        try:
+            result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+        finally:
+            source_module.requests.Session = FakeSession
+
+        assert result.status == "failed"
+        assert result.warnings == ["colonne 'n' : écrite en texte"]
+
+
+class TestKeysetInBody:
+    """Le cas SQL-over-REST : la clé de pagination vit dans la requête
+    elle-même, pas en query string. C'est ce qui permet de dépasser le
+    plafond d'offset des APIs qui en imposent un."""
+
+    CONFIG = {
+        **BASE_CONFIG,
+        "method": "POST",
+        "body": {
+            "q": "select id, amount from transactions "
+                 "where id > {since_id} order by id"
+        },
+        "pagination": {
+            "type": "keyset",
+            "key_field": "id",
+            "key_param": "since_id",
+            "params_in": "body_template",
+            "value_format": "numeric",
+            "initial_value": 0,
+            "limit": 2,
+            "limit_param": "rows",
+            "items_field": "items",
+        },
+    }
+
+    def test_the_key_is_substituted_into_the_query(self, http, delta):
+        http.next_payloads = [
+            {"items": [{"id": 1}, {"id": 2}]},
+            {"items": [{"id": 3}]},
+        ]
+        result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert result.rows_loaded == 3
+        queries = [c["json"]["q"] for c in http.instances[0].calls]
+        assert queries[0].endswith("where id > 0 order by id")
+        assert queries[1].endswith("where id > 2 order by id")
+
+    def test_the_key_stays_out_of_the_query_string(self, http, delta):
+        http.next_payloads = [{"items": [{"id": 1}]}]
+        run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+        call = http.instances[0].calls[0]
+        # la clé est dans le SQL, pas dans l'URL
+        assert "since_id" not in call.get("params", {})
+        assert "since_id" not in call["url"]
+
+    def test_the_page_size_does_reach_the_api(self, http, delta):
+        """Le placeholder de la clé est dans le corps, celui de `limit_param`
+        n'y est pas : il part donc en query string. Sans cette répartition, la
+        taille de page était silencieusement perdue."""
+        http.next_payloads = [{"items": [{"id": 1}]}]
+        run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+        assert http.instances[0].calls[0]["params"] == {"rows": 2}
+
+    def test_fixed_params_reach_the_api_too(self, http, delta):
+        config = {**self.CONFIG, "params": {"status": "open"}}
+        http.next_payloads = [{"items": [{"id": 1}]}]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert http.instances[0].calls[0]["params"] == {"status": "open", "rows": 2}
+
+    def test_the_watermark_can_take_the_query_string(self, http, delta):
+        """La clé dans le SQL et le watermark en query string : les deux
+        canaux sont utilisables en même temps."""
+        config = {
+            **self.CONFIG,
+            "incremental": {
+                "enabled": True, "field": "ts", "param_name": "since",
+                "initial_value": "2026-01-01",
+            },
+        }
+        http.next_payloads = [{"items": [{"id": 1, "ts": "2026-02-01"}]}]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        params = http.instances[0].calls[0]["params"]
+        assert params["since"] == "2026-01-01"
+        assert "since_id" not in params
+        assert "id > 0" in http.instances[0].calls[0]["json"]["q"]
+
+    def test_a_page_shorter_than_the_limit_ends_the_run(self, http, delta):
+        """Conséquence directe : la lib connaît la vraie taille de page, donc
+        elle reconnaît la dernière page au lieu de rappeler l'API."""
+        http.next_payloads = [
+            {"items": [{"id": 1}, {"id": 2}]},
+            {"items": [{"id": 3}]},
+        ]
+        result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert result.rows_loaded == 3
+        assert len(http.instances[0].calls) == 2
+
+    def test_a_hostile_key_fails_the_run(self, http, delta):
+        http.next_payloads = [{"items": [{"id": 1}, {"id": "0 OR 1=1"}]}]
+        result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "failed"
+        assert "numeric" in result.error_message
+        # la clé hostile n'a jamais été envoyée
+        assert len(http.instances[0].calls) == 1
+
+    def test_the_watermark_and_the_key_share_the_body(self, http, delta):
+        config = {
+            **self.CONFIG,
+            "body": {
+                "q": "select id from t where ts > '{watermark}' "
+                     "and id > {since_id} order by id"
+            },
+            "incremental": {
+                "enabled": True,
+                "field": "ts",
+                "inject": "body_template",
+                "value_format": "iso_datetime",
+                "initial_value": "2026-01-01T00:00:00Z",
+            },
+        }
+        http.next_payloads = [{"items": [{"id": 1, "ts": "2026-02-01T00:00:00Z"}]}]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        query = http.instances[0].calls[0]["json"]["q"]
+        assert "ts > '2026-01-01T00:00:00Z'" in query
+        assert "id > 0" in query
+        assert delta["watermark_write"] == [("s1", "2026-02-01T00:00:00Z")]
+
+    def test_a_typo_in_a_placeholder_fails_the_run(self, http, delta):
+        config = {
+            **self.CONFIG,
+            "body": {"q": "select id from t where id > {sinceid}"},
+        }
+        http.next_payloads = [{"items": [{"id": 1}]}]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "failed"
+        assert "sinceid" in result.error_message
+
+
+class TestPageSizeIsNotLost:
+    """Régression : en mode body_template, la taille de page déclarée n'était
+    jamais envoyée. L'API servait la sienne, la lib croyait dicter la sienne,
+    et la première page « partielle » arrêtait le run — statut success, une
+    fraction des données."""
+
+    CONFIG = {
+        **BASE_CONFIG,
+        "method": "POST",
+        "body": {"q": "select id from t where id > {last_id} order by id"},
+        "pagination": {
+            "type": "keyset",
+            "key_field": "id",
+            "key_param": "last_id",
+            "params_in": "body_template",
+            "value_format": "numeric",
+            "initial_value": 0,
+            "items_field": "items",
+            "limit": 1000,
+            "limit_param": "limit",
+        },
+    }
+
+    def test_the_declared_page_size_is_sent(self, http, delta):
+        http.next_payloads = [{"items": [{"id": 1}]}]
+        run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+        assert http.instances[0].calls[0]["params"] == {"limit": 1000}
+
+    def test_a_full_backfill_is_not_cut_short(self, http, delta):
+        """L'API honore le `limit` reçu : les pages font 1 000 lignes et le
+        run va jusqu'au bout au lieu de s'arrêter sur la première."""
+
+        class Paged(FakeSession):
+            served = 0
+
+            def request(self, method, url, **kwargs):
+                self.calls.append({"method": method, "url": url, **kwargs})
+                size = int(kwargs["params"]["limit"])
+                if Paged.served >= 2500:
+                    return FakeResponse({"items": []})
+                start = Paged.served + 1
+                count = min(size, 2500 - Paged.served)
+                Paged.served += count
+                return FakeResponse(
+                    {"items": [{"id": i} for i in range(start, start + count)]}
+                )
+
+        Paged.served = 0
+        import flume_lib.source as source_module
+
+        source_module.requests.Session = Paged
+        try:
+            result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+        finally:
+            source_module.requests.Session = FakeSession
+
+        assert result.status == "success", result.error_message
+        assert result.rows_loaded == 2500

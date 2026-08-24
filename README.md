@@ -2,7 +2,7 @@
 
 Generic API ingestion accelerator for **Microsoft Fabric Python notebooks** (non-Spark). Pure Python: Delta writes via [delta-rs](https://github.com/delta-io/delta-rs) (`deltalake`), no PySpark dependency.
 
-Point it at a JSON list of API sources; it handles authentication (Key Vault-backed secrets, OAuth2 service principals, OAuth 1.0a signing, custom login endpoints), pagination (offset, page, next-link, cursor), incremental loading with watermarks, bounded retries, and writes everything — data and run logs — as Delta tables in a schema-enabled lakehouse. REST and GraphQL endpoints are both covered by the same generic options — no per-API code.
+Point it at a JSON list of API sources; it handles authentication (Key Vault-backed secrets, OAuth2 service principals, OAuth 1.0a signing, custom login endpoints), pagination (offset, page, next-link, cursor, keyset), incremental loading with watermarks, bounded retries, and writes everything — data and run logs — as Delta tables in a schema-enabled lakehouse. REST and GraphQL endpoints are both covered by the same generic options — no per-API code.
 
 ## Requirements
 
@@ -110,6 +110,7 @@ Configurations are **strictly validated**: an unknown key is an error with a "di
   },
   "target_schema": "bronze",
   "target_table": "example_source",
+  "batch_size": 50000,
   "retry": {
     "max_attempts": 3,
     "backoff_multiplier": 1
@@ -134,7 +135,7 @@ Credentials are **never stored in the configuration** — every credential is a 
 | `token_endpoint` | Arbitrary login call (JSON/form body, secret refs in any field, token extracted by JSON path) |
 | `oauth1` | OAuth 1.0a request signing (RFC 5849, HMAC-SHA256/SHA1, `realm`) — NetSuite TBA and legacy OAuth 1.0a APIs |
 
-The token is obtained once per `run_source` (no mid-run refresh). `oauth1` is the exception: it signs every request individually, so nothing expires mid-run.
+`oauth2_client_credentials` and `token_endpoint` tokens are **renewed mid-run**: proactively when the endpoint announces an `expires_in`, and reactively on a 401 otherwise (once per page — a freshly issued token refused again fails the run). A run longer than the token's lifetime no longer dies on its last pages. The other types carry a static credential and are never renewed; `oauth1` signs every request individually, so nothing expires mid-run.
 
 Beyond authentication, `headers` adds fixed headers to every data call (literal strings only — a secret belongs in `auth`).
 
@@ -146,18 +147,29 @@ Beyond authentication, `headers` adds fixed headers to every data call (literal 
 | `page` | Page number; total page count read from a response header (`total_pages_header`) or stop on empty/partial page |
 | `next_link` | Follows a next-page URL from the response body (e.g. `@odata.nextLink`) |
 | `cursor` | Opaque cursor read from the response; `has_more_field` covers Relay/GraphQL connections |
+| `keyset` | Filters each page by the key of the last record seen (`id > last`); the only strategy that gets past an offset cap |
 
 Records are located with `items_field` (a dotted path — `data.orders.edges`) and, where each item is a wrapper, unwrapped with `record_field` (`node`).
 
-Data endpoints can be `GET` (default) or `POST`/`PUT`/`PATCH` via `method` + `body`; `pagination.params_in` decides whether pagination params go to the query string or into the request payload, and `params_path` where inside that payload (GraphQL: `variables`).
+Data endpoints can be `GET` (default) or `POST`/`PUT`/`PATCH` via `method` + `body`; `pagination.params_in` decides whether pagination params go to the query string, are merged into the request payload as JSON values, or — with `body_template`, for SQL-over-REST endpoints — are routed per param: those whose `{placeholder}` appears in `body` are substituted there, the others take the query string. `params_path` says where inside that payload (GraphQL: `variables`).
 
-Some APIs cap how far an offset may go (NetSuite refuses past 100 000). Past that, split the source into bounded slices — one run per month or per id range — rather than paging further; see [examples/netsuite_suiteql.py](examples/netsuite_suiteql.py).
+Some APIs cap how far an offset may go (NetSuite refuses past 100 000). `keyset` is the answer: it filters on the last key seen instead of counting rows, so depth costs nothing and no cap applies — at the price of a source sorted by that key. Slicing the source into bounded windows remains an option; see [examples/netsuite_suiteql.py](examples/netsuite_suiteql.py).
+
+`max_pages` and `max_rows` bound a run. Reaching one **fails** the run rather than truncating it silently. Independently of them, a page identical to the one before it stops the run — an API that clamps an out-of-range page number and re-serves the first one has no natural stop condition.
 
 ### Incremental (watermark)
 
 When `incremental.enabled`, the last watermark is read from `<log_schema>.watermark` and sent as a query param (`param_name`). After a **successful** run only, the max of `incremental.field` over the loaded records becomes the new watermark.
 
 With `"inject": "body_template"` the watermark is substituted into the `{placeholder}` markers of `body` instead — for APIs whose filter lives inside the request payload, such as an SQL-over-REST endpoint. `initial_value` provides the floor used on the very first run, and `value_format` validates the watermark before it is used.
+
+`"checkpoint": true` commits the watermark after each batch instead of at the end of the run, so an interrupted run resumes where it stopped — see [Batched writes](#batched-writes).
+
+### Batched writes
+
+Rows are written by batches of `batch_size` (default 50 000) instead of being accumulated for one write at the end. A run's memory no longer depends on the size of the source, and a run that breaks half-way keeps what it already wrote — `RunResult.rows_loaded` counts the rows actually committed. A source smaller than one batch still produces a single commit.
+
+The trade-off is at-least-once ingestion: a failed run can leave partial data. Every row carries `_flume_run_id`, so a failed run's rows are identifiable and removable. Pair with `incremental.checkpoint` to make the next run resume instead of replay.
 
 ### Retry
 
@@ -183,6 +195,19 @@ There is no GraphQL source type — a GraphQL endpoint is a POST of `{query, var
 
 Full walkthrough with the request bodies it produces, how to write the query, how nested selections land in Delta, and a table of common failure modes: [docs/configuration.md#graphql-endpoints](docs/configuration.md#graphql-endpoints). Working notebook: [examples/shopify_graphql.py](examples/shopify_graphql.py).
 
+## Examples
+
+Every file in [`examples/`](examples/) is a complete Fabric notebook, runnable as-is once the URLs and secret names are yours. Start with the first one — the other five assume it.
+
+| Example | What it covers |
+|---|---|
+| [rest_api_paginated.py](examples/rest_api_paginated.py) | **The ordinary REST API.** One fictional endpoint read with each of the five pagination shapes (`offset`, `page`, `next_link`, `cursor`, `none`), incremental by query param, config validation and dry run. The reference file. |
+| [rest_api_auth_variants.py](examples/rest_api_auth_variants.py) | **The six auth blocks side by side** — static token, API key header, Basic, vendor login endpoint, OAuth2 client credentials, none — plus a probe loop that checks credentials without writing anything. |
+| [microsoft_graph_odata.py](examples/microsoft_graph_odata.py) | **OData v4**: Microsoft Graph and Business Central through the same three options, an Entra ID service principal, `$select`/`$filter`/`$top`, and why an OData `$filter` cannot carry a watermark. |
+| [netsuite_suiteql.py](examples/netsuite_suiteql.py) | **SQL over REST**: OAuth 1.0a signing (NetSuite TBA), the watermark templated into a `WHERE` clause, and monthly backfill slices under an offset ceiling. |
+| [shopify_graphql.py](examples/shopify_graphql.py) | **GraphQL**: Relay cursor, pagination params inside `variables`, `template_paths` against the braces of the query, and errors returned with an HTTP 200. |
+| [notebook_ingest_example.py](examples/notebook_ingest_example.py) | **Config-driven run**: a JSON source list read from `Files/conf/`, one loop, a failure summary. |
+
 ## Delta writes in Fabric (OneLake)
 
 The local `/lakehouse/default/...` mount in Fabric notebooks does not support the atomic rename that the delta-rs transaction log commit requires (`Operation not permitted (os error 1)`, table left without a valid `_delta_log`). The library works around this automatically: in Fabric, the default path is resolved to the OneLake ABFSS URI of the notebook's default lakehouse, and writes authenticate with a storage token obtained via `notebookutils` — nothing to configure.
@@ -202,6 +227,8 @@ Delta tables created automatically in the technical schema (`log_schema`, defaul
 - **`flume.watermark`**: `source_name`, `last_value`, `updated_ts`
 - **`flume.log_runs`**: `run_id`, `source_name`, `start_ts`, `end_ts`, `status`, `rows_loaded`, `error_message` — one row per `run_source` call, success or failure
 
+Data columns are typed from all the values of a batch — integers and floats mixed give a `double`, not a text column — and a column that cannot be typed is written as text with the degradation reported in `RunResult.warnings`. See [Column types in Delta](docs/configuration.md#column-types-in-delta).
+
 ## Security
 
 See [docs/security.md](docs/security.md) — threat model, supply-chain posture, secret handling, and how to report a vulnerability. Key point for operators: **the source configuration decides where tokens are sent** — protect `Files/conf/` like code.
@@ -212,10 +239,13 @@ See [docs/security.md](docs/security.md) — threat model, supply-chain posture,
 git clone https://github.com/Y0hannH/flume-lib.git
 cd flume-lib
 pip install -e ".[dev]"
+ruff check .
 pytest
 ```
 
 Unit tests are fully mocked — no network calls. Python ≥ 3.10 required locally.
+
+[CI](.github/workflows/ci.yml) runs the lint and the suite on 3.10, 3.11 and 3.12 — the three Fabric kernel versions — on every push and pull request, then builds the wheel and checks it carries every module and the `py.typed` marker. A wheel installed offline from the lakehouse only reveals a missing module when a notebook imports it.
 
 ### Release procedure
 
@@ -223,7 +253,7 @@ Unit tests are fully mocked — no network calls. Python ≥ 3.10 required local
 2. Add the version's section to [CHANGELOG.md](CHANGELOG.md), breaking changes first
 3. `pytest`
 4. Commit the release, then tag that commit: `git tag -a vX.Y.Z`
-5. Add the tagged SHA to the table above (`git rev-list -n1 vX.Y.Z`) in a **separate** commit — a commit cannot contain its own SHA, so this one always lands after the tag
+5. Add the tagged SHA to the table above (`git rev-list -n1 vX.Y.Z`) in a **separate** commit — a commit cannot contain its own SHA, so this one always lands after the tag, together with the pinned version of the `%pip install` lines in this README and in `examples/` (`grep -rn "flume-lib==" README.md examples/`)
 6. Push branch and tag. Tags are protected against update and deletion: review the tag before pushing, it cannot be moved afterwards
 7. `python scripts/build_fabric_wheels.py`, then verify the bundle before uploading it to `Files/libs/` in the target lakehouses:
 
@@ -237,7 +267,7 @@ Version history: [CHANGELOG.md](CHANGELOG.md).
 
 - Client-side scaffolding/installation CLI
 - Asynchronous bulk-export APIs (submit a job, poll it, download a JSONL/CSV artifact — Shopify Bulk Operations, NetSuite saved-search exports). The whole library assumes one HTTP call returns one page of JSON.
-- Streaming to Delta: every page of a run is accumulated in memory before a single write. Split large loads into bounded slices.
+- Exactly-once ingestion: writes are `append` batches, so a failed or replayed run can leave duplicates. They are identifiable by `_flume_run_id`; de-duplication is the consumer's job.
 
 ## License
 

@@ -33,15 +33,16 @@ Threat model and security posture of flume-lib. Audience: anyone deploying the l
 
 ## Values that come back from a response
 
-Three values read from an API response are used to build the next request. They are the only paths by which an API influences what the library does next.
+Four values read from an API response are used to build the next request. They are the only paths by which an API influences what the library does next.
 
 | Value | Where it goes | What bounds it |
 |---|---|---|
 | **Watermark** (`incremental.field`) | Interpolated into `body`/`params` | Character filter + mandatory `value_format` — see [Request bodies](#request-bodies). |
 | **Cursor** (`pagination.cursor_field`) | Sent back as a query param or a JSON value under `params_path` | Never concatenated into a string: it is passed as a discrete parameter value, URL-encoded by `requests` or serialized as JSON, so it cannot alter the structure of the request. A cursor that does not advance, or that is missing while the API announces another page, raises instead of looping or truncating. |
+| **Keyset key** (`pagination.key_field`) | Sent back as a query param, or substituted into `body` with `"params_in": "body_template"` | As a query param, the same as a cursor: a discrete, encoded value. Substituted into the body, it is interpolated into a query, so `value_format` is mandatory there — `numeric`, `iso_date` or `iso_datetime` leave no room for syntax. The character filter applies in both cases. |
 | **Next-page URL** (`pagination.next_field`) | Fetched directly, with the session's auth headers | ⚠️ **Only the API's own honesty.** See below. |
 
-**`next_link` follows a URL chosen by the API.** The `next_link` strategy requests whatever URL the response puts in `next_field`, on the same authenticated session — so a compromised or hostile endpoint can point the next page at a host it controls and receive the `Authorization` header with it. There is currently no host allowlist. This is inherent to the strategy, not new, and it does not apply to `offset`, `page`, `cursor` or `none`, which only ever call `base_url`. If the API is not fully trusted, prefer a strategy that keeps the URL under your control.
+**`next_link` follows a URL chosen by the API.** The `next_link` strategy requests whatever URL the response puts in `next_field`, on the same authenticated session — so a compromised or hostile endpoint can point the next page at a host it controls and receive the `Authorization` header with it. There is currently no host allowlist. This is inherent to the strategy, not new, and it does not apply to `offset`, `page`, `cursor`, `keyset` or `none`, which only ever call `base_url`. If the API is not fully trusted, prefer a strategy that keeps the URL under your control.
 
 ## Application errors in log_runs
 

@@ -8,14 +8,14 @@ données seraient perdues sans aucun signal."""
 import difflib
 
 from flume_lib.oauth1 import SIGNATURE_METHODS
-from flume_lib.templating import VALUE_FORMATS
+from flume_lib.templating import VALUE_FORMATS, templated_placeholders
 
 # Clés top-level
 _REQUIRED = ("base_url", "target_schema", "target_table")
 _OPTIONAL = (
     "name", "params", "auth", "pagination", "incremental", "retry",
     "timeout_seconds", "method", "body", "body_format", "headers",
-    "errors", "template_paths",
+    "errors", "template_paths", "batch_size",
 )
 
 # Clés autorisées par type d'auth. Les formes historiques *_env_var sont
@@ -33,7 +33,8 @@ _AUTH_KEYS = {
     ),
     "token_endpoint": (
         "token_url", "method", "body", "body_format", "headers",
-        "token_json_path", "header_name", "value_prefix", "timeout_seconds",
+        "token_json_path", "expires_in_json_path", "header_name",
+        "value_prefix", "timeout_seconds",
     ),
     "oauth1": (
         "consumer_key", "consumer_secret", "token", "token_secret",
@@ -64,7 +65,10 @@ _AUTH_REQUIRED = {
 }
 
 # Clés acceptées par toutes les stratégies de pagination
-_PAGINATION_COMMON = ("items_field", "record_field", "params_in", "params_path")
+_PAGINATION_COMMON = (
+    "items_field", "record_field", "params_in", "params_path",
+    "max_pages", "max_rows",
+)
 _PAGINATION_KEYS = {
     "none": (),
     "offset": ("limit", "limit_param", "offset_param"),
@@ -76,13 +80,19 @@ _PAGINATION_KEYS = {
     "cursor": (
         "cursor_param", "cursor_field", "has_more_field", "limit", "limit_param",
     ),
+    "keyset": (
+        "key_field", "key_param", "initial_value", "value_format",
+        "limit", "limit_param",
+    ),
 }
+
+_PARAMS_IN = ("query", "body", "body_template")
 
 _ERRORS_KEYS = ("path", "code_field", "message_field", "retryable_codes")
 
 _INCREMENTAL_KEYS = (
     "enabled", "field", "param_name", "inject", "placeholder",
-    "initial_value", "value_format",
+    "initial_value", "value_format", "checkpoint",
 )
 _INCREMENTAL_INJECTS = ("query_param", "body_template")
 _RETRY_KEYS = ("max_attempts", "backoff_multiplier", "max_retry_after_seconds")
@@ -161,6 +171,14 @@ def validate_config(config: dict) -> None:
         raise ConfigError(
             "config : 'body' est ignoré en GET — préciser \"method\": \"POST\""
         )
+
+    if "batch_size" in config:
+        batch_size = config["batch_size"]
+        # bool est un int en Python : le laisser passer donnerait batch_size=1
+        if not isinstance(batch_size, int) or isinstance(batch_size, bool):
+            raise ConfigError("config : 'batch_size' doit être un entier")
+        if batch_size < 1:
+            raise ConfigError("config : 'batch_size' doit être supérieur à 0")
 
     headers = config.get("headers")
     if headers is not None:
@@ -244,14 +262,31 @@ def validate_config(config: dict) -> None:
             ("type",) + _PAGINATION_COMMON + _PAGINATION_KEYS[pagination_type],
         )
         params_in = pagination.get("params_in", "query")
-        if params_in not in ("query", "body"):
+        if params_in not in _PARAMS_IN:
+            known = ", ".join(f"'{v}'" for v in _PARAMS_IN)
             raise ConfigError(
-                f"pagination : 'params_in' doit valoir 'query' ou 'body', pas '{params_in}'"
+                f"pagination : 'params_in' doit valoir l'un de {known}, "
+                f"pas '{params_in}'"
             )
-        if params_in == "body" and method == "GET":
+        if params_in in ("body", "body_template") and method == "GET":
             raise ConfigError(
-                "pagination : \"params_in\": \"body\" nécessite une méthode POST"
+                f'pagination : "params_in": "{params_in}" nécessite une méthode POST'
             )
+        if params_in == "body_template":
+            if not isinstance(config.get("body"), dict) or not config["body"]:
+                raise ConfigError(
+                    'pagination : "params_in": "body_template" substitue les '
+                    "paramètres dans 'body', absent de la config"
+                )
+
+        for key in ("max_pages", "max_rows"):
+            if key not in pagination:
+                continue
+            value = pagination[key]
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ConfigError(f"pagination : '{key}' doit être un entier")
+            if value < 1:
+                raise ConfigError(f"pagination : '{key}' doit être supérieur à 0")
 
         params_path = pagination.get("params_path")
         if params_path is not None:
@@ -280,6 +315,42 @@ def validate_config(config: dict) -> None:
                         f"pagination : '{key}' requis avec \"type\": \"cursor\""
                     )
 
+        if pagination_type == "keyset":
+            for key in ("key_field", "key_param"):
+                if not pagination.get(key):
+                    raise ConfigError(
+                        f"pagination : '{key}' requis avec \"type\": \"keyset\""
+                    )
+            value_format = pagination.get("value_format", "any")
+            if value_format not in VALUE_FORMATS:
+                known = ", ".join(VALUE_FORMATS)
+                raise ConfigError(
+                    f"pagination : 'value_format' inconnu '{value_format}' — "
+                    f"attendu l'un de : {known}"
+                )
+            if params_in == "body_template":
+                key_param = pagination["key_param"]
+                available = templated_placeholders(
+                    config.get("body") or {}, config.get("template_paths")
+                )
+                if key_param not in available:
+                    known = ", ".join(sorted(available)) or "aucun"
+                    raise ConfigError(
+                        f"pagination : le placeholder '{{{key_param}}}' est "
+                        "absent de 'body' — la clé de pagination n'aurait nulle "
+                        f"part où être substituée (placeholders trouvés : {known})"
+                    )
+            if params_in == "body_template" and value_format == "any":
+                known = ", ".join(f for f in VALUE_FORMATS if f != "any")
+                raise ConfigError(
+                    "pagination : 'value_format' explicite requis quand la clé "
+                    "est interpolée dans le corps — attendu l'un de : "
+                    f"{known}. La clé vient de la réponse de l'API ; le "
+                    "filtrage des caractères ne protège qu'un placeholder "
+                    "entre quotes, un placeholder nu (WHERE id > {last_key}) "
+                    "accepterait '0 OR 1=1'"
+                )
+
     incremental = config.get("incremental")
     if incremental is not None:
         if not isinstance(incremental, dict):
@@ -297,6 +368,11 @@ def validate_config(config: dict) -> None:
             raise ConfigError(
                 f"incremental : 'value_format' inconnu '{value_format}' — "
                 f"attendu l'un de : {known}"
+            )
+        if incremental.get("checkpoint") and not incremental.get("enabled"):
+            raise ConfigError(
+                "incremental : 'checkpoint' commite le watermark lot par lot "
+                "et n'a de sens qu'avec \"enabled\": true"
             )
         if incremental.get("enabled"):
             if not incremental.get("field"):

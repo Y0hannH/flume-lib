@@ -5,6 +5,8 @@ l'auth sont gérés par l'appelant."""
 
 from collections.abc import Callable, Iterator
 
+from flume_lib.templating import check_value
+
 _DEFAULT_ITEMS_FIELDS = ("data", "items", "results", "value")
 
 # Distingue « chemin absent » de « chemin présent valant None » : hasNextPage
@@ -229,12 +231,141 @@ def paginate_cursor(
         cursor = next_cursor
 
 
+def _advances(new_key, previous_key) -> bool:
+    """Vrai si la clé progresse. Deux clés incomparables — l'API a changé de
+    type en cours de route — sont considérées comme progressant si elles
+    diffèrent : c'est le blocage qu'on cherche à détecter, pas le désordre."""
+    try:
+        return new_key > previous_key
+    except TypeError:
+        return new_key != previous_key
+
+
+def paginate_keyset(
+    fetch_page: Callable, base_url: str, params: dict, pagination_config: dict
+) -> Iterator[list]:
+    """Pagination par clé (keyset / seek). Chaque page est filtrée par la
+    valeur de `key_field` du dernier enregistrement de la page précédente,
+    renvoyée dans `key_param`.
+
+    Contrairement à `offset`, le coût d'une page ne croît pas avec sa
+    profondeur et rien ne plafonne : c'est la seule stratégie qui atteint le
+    fond d'une table de plusieurs millions de lignes sur les APIs qui bornent
+    l'offset (NetSuite s'arrête à 100 000). En contrepartie, elle exige une
+    source **triée par `key_field`**, avec des valeurs uniques : la lib
+    vérifie que la clé progresse et s'arrête plutôt que de boucler.
+
+    La clé vient de la réponse de l'API. Avec `"params_in": "body_template"`
+    elle est interpolée dans le corps de la requête, donc `value_format` la
+    contraint à une forme sans place pour de la syntaxe — même règle que le
+    watermark incrémental.
+    """
+    key_field = pagination_config.get("key_field")
+    key_param = pagination_config.get("key_param")
+    if not key_field or not key_param:
+        raise PaginationError(
+            "pagination 'keyset' : 'key_field' et 'key_param' requis"
+        )
+    value_format = pagination_config.get("value_format", "any")
+    limit = pagination_config.get("limit")
+    limit_param = pagination_config.get("limit_param", "limit")
+    items_field = pagination_config.get("items_field")
+    record_field = pagination_config.get("record_field")
+    label = f"pagination keyset : clé '{key_field}'"
+
+    key = pagination_config.get("initial_value")
+    while True:
+        page_params = dict(params)
+        if limit is not None:
+            page_params[limit_param] = limit
+        if key is not None:
+            page_params[key_param] = check_value(key, value_format, label=label)
+        payload, _ = fetch_page(base_url, page_params)
+        records = extract_records(payload, items_field, record_field)
+        if not records:
+            return
+        yield records
+
+        last = records[-1]
+        next_key = get_path(last, key_field) if isinstance(last, dict) else _MISSING
+        if next_key is _MISSING or next_key is None:
+            raise PaginationError(
+                f"pagination 'keyset' : champ '{key_field}' absent du dernier "
+                "enregistrement — la page suivante ne peut pas être construite"
+            )
+        if key is not None and not _advances(next_key, key):
+            raise PaginationError(
+                f"pagination 'keyset' : la clé n'avance pas ({key!r} -> "
+                f"{next_key!r}) — la source n'est pas triée par '{key_field}', "
+                "ou ses valeurs ne sont pas uniques"
+            )
+        # une page incomplète est la dernière, comme en offset
+        if limit is not None and len(records) < limit:
+            return
+        key = next_key
+
+
 _STRATEGIES = {
     "offset": paginate_offset,
     "page": paginate_page,
     "next_link": paginate_next_link,
     "cursor": paginate_cursor,
+    "keyset": paginate_keyset,
 }
+
+
+def _fingerprint(page: list):
+    """Empreinte bon marché d'une page, calculée avant qu'elle ne soit livrée
+    (l'appelant y ajoute ensuite les colonnes de traçabilité)."""
+    return len(page), repr(page[0])[:200], repr(page[-1])[:200]
+
+
+def _bounded(pages: Iterator[list], pagination_config: dict) -> Iterator[list]:
+    """Garde-fous communs à toutes les stratégies.
+
+    `max_pages` et `max_rows` bornent un run dont on connaît l'ordre de
+    grandeur. La détection de page répétée, elle, s'applique toujours : une
+    API qui reclampe un numéro de page hors limite et resert indéfiniment la
+    première n'a aucune condition d'arrêt naturelle, et le notebook tournait
+    jusqu'à son timeout, mémoire en hausse.
+
+    Atteindre une borne est une **erreur**, pas un arrêt propre : tronquer en
+    silence donnerait un run `success` amputé d'une partie des données. Les
+    lignes déjà écrites le restent, et le message dit ce qui s'est passé.
+    """
+    max_pages = pagination_config.get("max_pages")
+    max_rows = pagination_config.get("max_rows")
+    pages_seen = 0
+    rows_seen = 0
+    previous = None
+
+    for page in pages:
+        current = _fingerprint(page) if page else None
+        if current is not None and current == previous:
+            raise PaginationError(
+                f"pagination : la page {pages_seen + 1} est identique à la "
+                "précédente — la source ne progresse pas, arrêt pour éviter "
+                "une boucle infinie"
+            )
+        previous = current
+        pages_seen += 1
+        rows_seen += len(page)
+        yield page
+
+        if max_pages is not None and pages_seen >= max_pages:
+            raise PaginationError(
+                f"pagination : plafond 'max_pages' de {max_pages} atteint "
+                f"({rows_seen} lignes lues) — run interrompu avant d'avoir "
+                "constaté la fin de la source. Relever la borne, ou "
+                "restreindre la fenêtre de la source."
+            )
+        if max_rows is not None and rows_seen >= max_rows:
+            raise PaginationError(
+                f"pagination : plafond 'max_rows' de {max_rows} atteint "
+                f"({pages_seen} pages lues) — run interrompu avant d'avoir "
+                "constaté la fin de la source. Relever la borne, ou "
+                "restreindre la fenêtre de la source."
+            )
 
 
 def paginate(
@@ -261,4 +392,7 @@ def paginate(
         raise PaginationError(
             f"Type de pagination inconnu : '{pagination_config['type']}'"
         )
-    yield from strategy(fetch_page, base_url, params, pagination_config)
+    yield from _bounded(
+        strategy(fetch_page, base_url, params, pagination_config),
+        pagination_config,
+    )
