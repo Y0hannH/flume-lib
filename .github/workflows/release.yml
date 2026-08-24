@@ -33,6 +33,24 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
 
+      # Le workflow est lu depuis la branche par défaut, mais c'est le tag qui
+      # est extrait. Un tag antérieur à l'introduction de ces scripts échouait
+      # sur un « No such file or directory » qui ne disait pas pourquoi.
+      - name: Preflight — release tooling present at this ref
+        run: |
+          missing=""
+          for script in scripts/build_fabric_wheels.py scripts/verify_wheels.py                         scripts/audit_dependencies.py scripts/release_notes.py; do
+            [ -f "$script" ] || missing="$missing $script"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Ce tag ne porte pas l'outillage de release :$missing"
+            echo "Le job extrait le tag demandé, pas la branche par défaut : un tag"
+            echo "antérieur à ces scripts ne peut pas être publié par cette"
+            echo "automatisation. Publier depuis un tag qui les contient."
+            exit 1
+          fi
+          echo "Outillage complet à ce ref."
+
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
