@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here. Versions follow [semantic versioning](https://semver.org/); until 1.0.0, minor versions may contain breaking changes — these are always listed first.
 
+## [Unreleased]
+
+### Added
+
+- **`scripts/verify_wheels.py`**: verifies a wheel batch twice over — every file matches `SHA256SUMS.txt` (catches a truncated or corrupted transfer, no network required, so it runs on the lakehouse side) and every file matches the digest **PyPI publishes** for that name and version (catches an altered mirror or a substituted file). A wheel present but missing from `SHA256SUMS.txt` is reported too — it would be covered by no digest at all.
+- **`scripts/audit_dependencies.py`**: queries [OSV.dev](https://osv.dev) for known vulnerabilities, either over the installed runtime closure or over a specific wheel batch. Exits non-zero when a vulnerability is known **and** when the check could not run — a check that did not execute is not a check that passed.
+- **`audit` CI job**, on every push and pull request, and **every Monday morning**. The weekly run is the reason it exists: an offline install freezes its versions, so a CVE published after a release surfaces nowhere. Nothing in a deployed lakehouse announces that its `urllib3` became vulnerable last week.
+- **[docs/security.md](docs/security.md) gains "Verifying a batch"** and "What these checks do not prove" — including that PyPI stopped signing packages in 2023, so a digest match proves the file equals what PyPI serves and nothing about whether what PyPI serves is sound.
+
+### Documentation
+
+- The release procedure now runs both checks before upload, and the offline one again after upload — the transfer is where a file gets truncated.
+
 ## [0.10.0] — 2026-08-24
 
 Robustness pass on long runs. A source of a few million rows used to be an all-or-nothing bet: everything was accumulated in memory for a single write, the token expired mid-way, and nothing bounded a pagination that stopped progressing. The five changes below address that, and the type inference that silently turned a column of amounts into a column of text.

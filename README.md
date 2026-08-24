@@ -248,6 +248,8 @@ Unit tests are fully mocked — no network calls. Python ≥ 3.10 required local
 
 [CI](.github/workflows/ci.yml) runs the lint and the suite on 3.10, 3.11 and 3.12 — the three Fabric kernel versions — on every push and pull request, then builds the wheel and checks it carries every module and the `py.typed` marker. A wheel installed offline from the lakehouse only reveals a missing module when a notebook imports it.
 
+An `audit` job queries [OSV.dev](https://osv.dev) for known vulnerabilities in the runtime dependencies, on every push **and every Monday**. The weekly run is the point: an offline install freezes its versions, so a CVE published after a release would surface nowhere otherwise. See [Verifying a batch](docs/security.md#verifying-a-batch) for the two scripts and what they do — and do not — prove.
+
 ### Release procedure
 
 1. Bump the version in `pyproject.toml` and `src/flume_lib/__init__.py`
@@ -256,11 +258,20 @@ Unit tests are fully mocked — no network calls. Python ≥ 3.10 required local
 4. Commit the release, then tag that commit: `git tag -a vX.Y.Z`
 5. Add the tagged SHA to the table above (`git rev-list -n1 vX.Y.Z`) in a **separate** commit — a commit cannot contain its own SHA, so this one always lands after the tag, together with the pinned version of the `%pip install` lines in this README and in `examples/` (`grep -rn "flume-lib==" README.md examples/`)
 6. Push branch and tag. Tags are protected against update and deletion: review the tag before pushing, it cannot be moved afterwards
-7. `python scripts/build_fabric_wheels.py`, then verify the bundle before uploading it to `Files/libs/` in the target lakehouses:
+7. `python scripts/build_fabric_wheels.py`, then verify the batch before uploading it to `Files/libs/` in the target lakehouses:
 
 ```bash
-cd fabric-wheels && sha256sum -c SHA256SUMS.txt
+python scripts/verify_wheels.py          # digests match SHA256SUMS.txt *and* PyPI
+python scripts/audit_dependencies.py --wheels fabric-wheels   # known vulnerabilities
 ```
+
+8. After uploading, verify again on the lakehouse side — the transfer is where a file gets truncated:
+
+```bash
+python scripts/verify_wheels.py /lakehouse/default/Files/libs --offline
+```
+
+`--offline` skips the PyPI comparison, so this one needs no network. The script is standard-library only and can be pasted straight into a notebook cell when a shell is not available.
 
 Version history: [CHANGELOG.md](CHANGELOG.md).
 

@@ -5,6 +5,13 @@ on:
     branches: ["**"]
     tags: ["v*"]
   pull_request:
+  # L'installation recommandée est hors ligne : un lot déposé dans un lakehouse
+  # fige ses versions et ne se met à jour que si quelqu'un en redépose un. Une
+  # CVE publiée après la release ne se signalerait donc nulle part. Ce passage
+  # hebdomadaire est le seul mécanisme qui la fasse remonter.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -33,6 +40,23 @@ jobs:
 
       - name: Test
         run: pytest
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # sans [dev] : on audite ce qui part chez le client, pas l'outillage
+      - name: Install the runtime dependencies
+        run: pip install .
+
+      - name: Known vulnerabilities (OSV.dev)
+        run: python scripts/audit_dependencies.py
 
   build:
     runs-on: ubuntu-latest

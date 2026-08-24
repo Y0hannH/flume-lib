@@ -22,6 +22,41 @@ Threat model and security posture of flume-lib. Audience: anyone deploying the l
 - **Git installs must pin a full commit SHA**, never a tag: tags are mutable, SHAs are not.
 - **Repository hardening**: rulesets forbid force-pushes and deletion on `main`, and forbid update/deletion of `v*` tags. Modifying a ruleset requires web-authenticated admin access (2FA), not just a git credential.
 
+### Verifying a batch
+
+Two scripts, two different questions. Both are standard-library only, so either can be pasted into a Fabric notebook cell.
+
+**Integrity** — is this the file it claims to be?
+
+```bash
+python scripts/verify_wheels.py                    # fabric-wheels/, both checks
+python scripts/verify_wheels.py --offline          # local digests only, no network
+python scripts/verify_wheels.py /path/to/libs      # another folder
+```
+
+It runs two independent checks. Every wheel matches `SHA256SUMS.txt` — which catches a file truncated, corrupted or missing after a transfer, and needs no network, so it is the one to run on the lakehouse side after upload. And every wheel matches the digest **PyPI publishes** for that filename and version — which catches an altered mirror or a file substituted between PyPI and the batch. A wheel present but absent from `SHA256SUMS.txt` is reported too: it would be covered by no digest at all.
+
+**Known vulnerabilities** — is anything in the batch publicly known to be broken?
+
+```bash
+python scripts/audit_dependencies.py                       # installed runtime closure
+python scripts/audit_dependencies.py --wheels fabric-wheels  # a specific batch
+```
+
+Queries [OSV.dev](https://osv.dev), the public database aggregating the GitHub Advisory Database, PyPA advisories and NVD. Exits non-zero if a vulnerability is known, **and also if the check could not run** — a check that did not execute is not a check that passed.
+
+The `audit` job of [CI](../.github/workflows/ci.yml) runs it on every push and pull request, and **every Monday morning**. The weekly run is the one that matters: an offline install freezes its versions, so a CVE published after a release would otherwise surface nowhere. Nothing in a deployed lakehouse tells you its `urllib3` became vulnerable last week.
+
+### What these checks do not prove
+
+Stated plainly, because the gap is real.
+
+- **Neither proves the code is safe.** Nobody has read delta-rs's 50 MB of Rust. What they establish is that you got the artifact the ecosystem believes it published, and that nothing about it is publicly known to be broken.
+- **PyPI stopped signing packages in 2023.** A SHA-256 match proves the file equals what PyPI serves; it says nothing about whether what PyPI serves is sound. A compromised maintainer publishing a poisoned release would produce a batch that verifies perfectly.
+- **An unknown vulnerability stays unknown.** The audit reports the state of public knowledge on the day it runs — hence the weekly schedule rather than a one-off check at release time.
+
+What genuinely limits the blast radius is the offline install: nothing is fetched at runtime, so a compromise of PyPI or GitHub *after* a release cannot reach a running notebook. The trade-off is that versions freeze, which is exactly what the weekly audit exists to watch.
+
 ## Secrets
 
 - Secrets are **never stored in the configuration** — only references: `{"env_var": ...}` or `{"keyvault_url": ..., "secret_name": ...}`. Literal strings are for non-sensitive values only.
