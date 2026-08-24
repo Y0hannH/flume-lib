@@ -19,7 +19,7 @@ from flume_lib._delta import append_records, resolve_lakehouse_tables_path, tabl
 from flume_lib.auth import AuthProvider
 from flume_lib.logging_ import write_log_run
 from flume_lib.pagination import _MISSING, get_path, paginate
-from flume_lib.templating import check_value, render
+from flume_lib.templating import check_value, render, templated_placeholders
 from flume_lib.validation import ConfigError, validate_config
 from flume_lib.watermark import read_watermark, write_watermark
 
@@ -279,10 +279,12 @@ def _build_fetch_page(config: dict, variables: dict | None = None):
     pagination_config = config.get("pagination") or {}
     params_in = pagination_config.get("params_in", "query")
     template_paths = config.get("template_paths")
+    templated_names: set[str] = set()
     if params_in == "body_template":
         # Le corps change à chaque page : le rendre ici échouerait sur les
         # placeholders que seule la pagination sait remplir.
         base_body = config.get("body", {})
+        templated_names = templated_placeholders(base_body, template_paths)
     else:
         base_body = _render_body(config.get("body", {}), variables or {}, template_paths)
     params_path = pagination_config.get("params_path")
@@ -311,8 +313,22 @@ def _build_fetch_page(config: dict, variables: dict | None = None):
         elif params_in == "body":
             kwargs[body_key] = _merge_params_into_body(base_body, params, params_path)
         elif params_in == "body_template":
+            # Un paramètre dont le placeholder figure dans le corps y est
+            # substitué ; les autres — `limit` d'un endpoint SQL-over-REST,
+            # les filtres fixes de `params` — partent en query string comme
+            # avec toute autre stratégie. Sans cette répartition, ils étaient
+            # simplement perdus : l'API servait sa page par défaut pendant
+            # que la lib croyait dicter la sienne, et un backfill s'arrêtait
+            # sur une « page partielle » après quelques centaines de lignes,
+            # run marqué success.
+            body_params = {k: v for k, v in params.items() if k in templated_names}
+            query_params = {
+                k: v for k, v in params.items() if k not in templated_names
+            }
+            if query_params:
+                kwargs["params"] = query_params
             kwargs[body_key] = _render_body(
-                base_body, {**(variables or {}), **params}, template_paths
+                base_body, {**(variables or {}), **body_params}, template_paths
             )
         else:
             kwargs["params"] = params

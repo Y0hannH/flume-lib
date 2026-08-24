@@ -507,7 +507,7 @@ The type is selected by `pagination.type`. All strategies accept:
 |---|---|---|
 | `items_field` | auto | Response field containing the record list, as a **dotted path** (`data.orders.edges`). Left out, the probing order is: a response that is already a list is used as-is, otherwise `data`, `items`, `results`, `value`. Explicit error if none is found, or if the configured path is absent or resolves to something other than a list. A response that is already a top-level list short-circuits this key — `items_field` is not applied to it. |
 | `record_field` | absent | Dotted path unwrapped from **each item** of that list. Relay connections (GraphQL) wrap every record in a `{cursor, node}` — `"record_field": "node"` keeps the record. Missing from any item ⇒ explicit error. |
-| `params_in` | `query` | Where pagination and incremental params are sent: `query` (query string), `body` (merged into the request payload as JSON values), or `body_template` (substituted into the `{placeholder}` markers of `body`). The last two require a non-`GET` `method`. |
+| `params_in` | `query` | Where pagination and incremental params are sent: `query` (query string), `body` (merged into the request payload as JSON values), or `body_template` (each param whose `{placeholder}` appears in `body` is substituted there, the rest go to the query string). The last two require a non-`GET` `method`. |
 | `params_path` | root | With `"params_in": "body"`, dotted path inside `body` under which those params are merged (GraphQL: `variables`). The branch is created if absent. |
 | `max_pages` | none | Stops the run with an error past that many pages. See [Safety bounds](#safety-bounds). |
 | `max_rows` | none | Same, on the number of rows read. |
@@ -593,7 +593,18 @@ SQL-over-REST form, where the key belongs inside the query itself:
 }
 ```
 
-The key comes back from the API, so with `body_template` it is interpolated into a query and `value_format` is **required** — same rule, and the same reason, as the incremental watermark. `"params_in": "body_template"` also forbids top-level `params` and a `query_param` watermark: no query string is sent at all, so anything put there would go nowhere.
+The key comes back from the API, so with `body_template` it is interpolated into a query and `value_format` is **required** — same rule, and the same reason, as the incremental watermark.
+
+`body_template` routes **per param**, not per request: a param whose `{placeholder}` appears in `body` is substituted there, every other one goes to the query string. Both channels of a request stay available, which is what the shape above needs — SuiteQL takes the key inside the SQL and `limit` as a query param:
+
+```
+POST /suiteql?limit=1000
+Body: {"q": "select id, amount from transactions where id > 2000 order by id"}
+```
+
+Nothing is silently dropped: a param always lands in whichever channel can carry it. The placeholder named by `key_param` must exist in `body` — with `template_paths`, inside one of the declared branches — or the config is rejected, since the key would have nowhere to go.
+
+Top-level `params` and a `query_param` watermark are both fine here; they take the query string while the key takes the body.
 
 The watermark and the key can share one body — the watermark bounds the window, the key walks it:
 

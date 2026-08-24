@@ -1162,10 +1162,61 @@ class TestKeysetInBody:
         assert queries[0].endswith("where id > 0 order by id")
         assert queries[1].endswith("where id > 2 order by id")
 
-    def test_nothing_goes_to_the_query_string(self, http, delta):
+    def test_the_key_stays_out_of_the_query_string(self, http, delta):
         http.next_payloads = [{"items": [{"id": 1}]}]
         run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
-        assert all("params" not in c for c in http.instances[0].calls)
+        call = http.instances[0].calls[0]
+        # la clé est dans le SQL, pas dans l'URL
+        assert "since_id" not in call.get("params", {})
+        assert "since_id" not in call["url"]
+
+    def test_the_page_size_does_reach_the_api(self, http, delta):
+        """Le placeholder de la clé est dans le corps, celui de `limit_param`
+        n'y est pas : il part donc en query string. Sans cette répartition, la
+        taille de page était silencieusement perdue."""
+        http.next_payloads = [{"items": [{"id": 1}]}]
+        run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+        assert http.instances[0].calls[0]["params"] == {"rows": 2}
+
+    def test_fixed_params_reach_the_api_too(self, http, delta):
+        config = {**self.CONFIG, "params": {"status": "open"}}
+        http.next_payloads = [{"items": [{"id": 1}]}]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert http.instances[0].calls[0]["params"] == {"status": "open", "rows": 2}
+
+    def test_the_watermark_can_take_the_query_string(self, http, delta):
+        """La clé dans le SQL et le watermark en query string : les deux
+        canaux sont utilisables en même temps."""
+        config = {
+            **self.CONFIG,
+            "incremental": {
+                "enabled": True, "field": "ts", "param_name": "since",
+                "initial_value": "2026-01-01",
+            },
+        }
+        http.next_payloads = [{"items": [{"id": 1, "ts": "2026-02-01"}]}]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        params = http.instances[0].calls[0]["params"]
+        assert params["since"] == "2026-01-01"
+        assert "since_id" not in params
+        assert "id > 0" in http.instances[0].calls[0]["json"]["q"]
+
+    def test_a_page_shorter_than_the_limit_ends_the_run(self, http, delta):
+        """Conséquence directe : la lib connaît la vraie taille de page, donc
+        elle reconnaît la dernière page au lieu de rappeler l'API."""
+        http.next_payloads = [
+            {"items": [{"id": 1}, {"id": 2}]},
+            {"items": [{"id": 3}]},
+        ]
+        result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert result.rows_loaded == 3
+        assert len(http.instances[0].calls) == 2
 
     def test_a_hostile_key_fails_the_run(self, http, delta):
         http.next_payloads = [{"items": [{"id": 1}, {"id": "0 OR 1=1"}]}]
@@ -1210,3 +1261,63 @@ class TestKeysetInBody:
 
         assert result.status == "failed"
         assert "sinceid" in result.error_message
+
+
+class TestPageSizeIsNotLost:
+    """Régression : en mode body_template, la taille de page déclarée n'était
+    jamais envoyée. L'API servait la sienne, la lib croyait dicter la sienne,
+    et la première page « partielle » arrêtait le run — statut success, une
+    fraction des données."""
+
+    CONFIG = {
+        **BASE_CONFIG,
+        "method": "POST",
+        "body": {"q": "select id from t where id > {last_id} order by id"},
+        "pagination": {
+            "type": "keyset",
+            "key_field": "id",
+            "key_param": "last_id",
+            "params_in": "body_template",
+            "value_format": "numeric",
+            "initial_value": 0,
+            "items_field": "items",
+            "limit": 1000,
+            "limit_param": "limit",
+        },
+    }
+
+    def test_the_declared_page_size_is_sent(self, http, delta):
+        http.next_payloads = [{"items": [{"id": 1}]}]
+        run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+        assert http.instances[0].calls[0]["params"] == {"limit": 1000}
+
+    def test_a_full_backfill_is_not_cut_short(self, http, delta):
+        """L'API honore le `limit` reçu : les pages font 1 000 lignes et le
+        run va jusqu'au bout au lieu de s'arrêter sur la première."""
+
+        class Paged(FakeSession):
+            served = 0
+
+            def request(self, method, url, **kwargs):
+                self.calls.append({"method": method, "url": url, **kwargs})
+                size = int(kwargs["params"]["limit"])
+                if Paged.served >= 2500:
+                    return FakeResponse({"items": []})
+                start = Paged.served + 1
+                count = min(size, 2500 - Paged.served)
+                Paged.served += count
+                return FakeResponse(
+                    {"items": [{"id": i} for i in range(start, start + count)]}
+                )
+
+        Paged.served = 0
+        import flume_lib.source as source_module
+
+        source_module.requests.Session = Paged
+        try:
+            result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+        finally:
+            source_module.requests.Session = FakeSession
+
+        assert result.status == "success", result.error_message
+        assert result.rows_loaded == 2500

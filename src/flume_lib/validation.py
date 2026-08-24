@@ -8,7 +8,7 @@ données seraient perdues sans aucun signal."""
 import difflib
 
 from flume_lib.oauth1 import SIGNATURE_METHODS
-from flume_lib.templating import VALUE_FORMATS
+from flume_lib.templating import VALUE_FORMATS, templated_placeholders
 
 # Clés top-level
 _REQUIRED = ("base_url", "target_schema", "target_table")
@@ -278,23 +278,6 @@ def validate_config(config: dict) -> None:
                     'pagination : "params_in": "body_template" substitue les '
                     "paramètres dans 'body', absent de la config"
                 )
-            if config.get("params"):
-                raise ConfigError(
-                    "pagination : \"params_in\": \"body_template\" n'envoie "
-                    "aucune "
-                    "query string — 'params' ne partirait nulle part"
-                )
-            incremental_config = config.get("incremental") or {}
-            if (
-                incremental_config.get("enabled")
-                and incremental_config.get("inject", "query_param") == "query_param"
-            ):
-                raise ConfigError(
-                    "pagination : \"params_in\": \"body_template\" n'envoie "
-                    "aucune "
-                    "query string — le watermark doit lui aussi passer par "
-                    '"inject": "body_template"'
-                )
 
         for key in ("max_pages", "max_rows"):
             if key not in pagination:
@@ -345,6 +328,18 @@ def validate_config(config: dict) -> None:
                     f"pagination : 'value_format' inconnu '{value_format}' — "
                     f"attendu l'un de : {known}"
                 )
+            if params_in == "body_template":
+                key_param = pagination["key_param"]
+                available = templated_placeholders(
+                    config.get("body") or {}, config.get("template_paths")
+                )
+                if key_param not in available:
+                    known = ", ".join(sorted(available)) or "aucun"
+                    raise ConfigError(
+                        f"pagination : le placeholder '{{{key_param}}}' est "
+                        "absent de 'body' — la clé de pagination n'aurait nulle "
+                        f"part où être substituée (placeholders trouvés : {known})"
+                    )
             if params_in == "body_template" and value_format == "any":
                 known = ", ".join(f for f in VALUE_FORMATS if f != "any")
                 raise ConfigError(

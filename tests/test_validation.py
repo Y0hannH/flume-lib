@@ -529,23 +529,50 @@ class TestParamsInBodyTemplate:
         with pytest.raises(ConfigError, match="body"):
             validate_config(cfg(method="POST", pagination=self.BASE_KEYSET))
 
-    def test_rejects_top_level_params(self):
-        with pytest.raises(ConfigError, match="params"):
+    def test_top_level_params_are_allowed(self):
+        """Ils partent en query string : seule la clé va dans le corps."""
+        validate_config(cfg(
+            method="POST",
+            body={"q": "{since_id}"},
+            params={"status": "active"},
+            pagination=self.BASE_KEYSET,
+        ))
+
+    def test_a_watermark_as_a_query_param_is_allowed(self):
+        """La clé dans le SQL, le watermark en query string : les deux canaux
+        sont disponibles."""
+        validate_config(cfg(
+            method="POST",
+            body={"q": "{since_id}"},
+            incremental={
+                "enabled": True, "field": "ts", "param_name": "since",
+            },
+            pagination=self.BASE_KEYSET,
+        ))
+
+    def test_a_missing_key_placeholder_raises(self):
+        with pytest.raises(ConfigError, match="placeholder"):
             validate_config(cfg(
                 method="POST",
-                body={"q": "{since_id}"},
-                params={"status": "active"},
+                body={"q": "select id from t order by id"},
                 pagination=self.BASE_KEYSET,
             ))
 
-    def test_rejects_a_watermark_sent_as_a_query_param(self):
-        with pytest.raises(ConfigError, match="inject"):
+    def test_a_typo_in_the_key_placeholder_raises(self):
+        with pytest.raises(ConfigError, match="sinceid"):
             validate_config(cfg(
                 method="POST",
-                body={"q": "{since_id}"},
-                incremental={
-                    "enabled": True, "field": "ts", "param_name": "since",
-                },
+                body={"q": "select id from t where id > {sinceid}"},
+                pagination=self.BASE_KEYSET,
+            ))
+
+    def test_the_placeholder_must_sit_in_a_declared_template_path(self):
+        """Hors des branches de template_paths, il ne serait jamais substitué."""
+        with pytest.raises(ConfigError, match="placeholder"):
+            validate_config(cfg(
+                method="POST",
+                body={"q": "id > {since_id}", "vars": {"x": 1}},
+                template_paths=["vars"],
                 pagination=self.BASE_KEYSET,
             ))
 

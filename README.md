@@ -151,7 +151,7 @@ Beyond authentication, `headers` adds fixed headers to every data call (literal 
 
 Records are located with `items_field` (a dotted path — `data.orders.edges`) and, where each item is a wrapper, unwrapped with `record_field` (`node`).
 
-Data endpoints can be `GET` (default) or `POST`/`PUT`/`PATCH` via `method` + `body`; `pagination.params_in` decides whether pagination params go to the query string, are merged into the request payload as JSON values, or are substituted into the `{placeholder}` markers of `body` (`body_template`, for SQL-over-REST endpoints), and `params_path` where inside that payload (GraphQL: `variables`).
+Data endpoints can be `GET` (default) or `POST`/`PUT`/`PATCH` via `method` + `body`; `pagination.params_in` decides whether pagination params go to the query string, are merged into the request payload as JSON values, or — with `body_template`, for SQL-over-REST endpoints — are routed per param: those whose `{placeholder}` appears in `body` are substituted there, the others take the query string. `params_path` says where inside that payload (GraphQL: `variables`).
 
 Some APIs cap how far an offset may go (NetSuite refuses past 100 000). `keyset` is the answer: it filters on the last key seen instead of counting rows, so depth costs nothing and no cap applies — at the price of a source sorted by that key. Slicing the source into bounded windows remains an option; see [examples/netsuite_suiteql.py](examples/netsuite_suiteql.py).
 

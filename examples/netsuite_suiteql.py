@@ -149,16 +149,11 @@ def backfill_transactions(first_year: int, last_year: int):
 #   - the key comes back from the API, so "value_format": "numeric" constrains
 #     it to a shape with no room for syntax — mandatory in this mode.
 #
-# One caveat, and it is a real one: `params_in: "body_template"` sends **no
-# query string at all**, and SuiteQL takes `limit` there (see BASE above). So
-# this source cannot set the page size — NetSuite applies its own default
-# (1 000, which is also its maximum, so nothing is lost here). The library
-# therefore cannot recognise a short last page and ends the run on one extra
-# call returning an empty page. One request per backfill, not per page.
-#
-# Mixing the two — key in the body, `limit` in the query string — is not
-# expressible today. Track it before using this shape on an API whose default
-# page size is small.
+# The two channels of a SuiteQL request are used at once: `{last_id}` is
+# substituted into the body because its placeholder is there, while `limit` —
+# whose placeholder is not — goes to the query string where SuiteQL expects it
+# (see BASE above). A param is never dropped: it lands in whichever channel can
+# carry it.
 # ---------------------------------------------------------------------------
 
 BACKFILL_KEYSET = {
@@ -175,6 +170,11 @@ BACKFILL_KEYSET = {
         # first page: every id is greater than 0
         "initial_value": 0,
         "items_field": "items",
+        # 1 000 is SuiteQL's maximum as well as its default; sent as a query
+        # param, so the library knows the real page size and recognises the
+        # last, shorter page instead of calling once more to find it empty.
+        "limit": 1000,
+        "limit_param": "limit",
         # A safety net, not a target: 2.77 M rows in 1 000-row pages is ~2 800
         # calls. Reaching this bound fails the run rather than truncating it.
         "max_pages": 5000,

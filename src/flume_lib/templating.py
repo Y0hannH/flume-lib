@@ -61,6 +61,44 @@ def check_value(value, value_format: str = "any", label: str = "valeur") -> str:
     return text
 
 
+def placeholders(value) -> set[str]:
+    """Noms des `{placeholders}` présents dans les chaînes de `value`.
+
+    Sert à répartir les paramètres de pagination entre le corps et la query
+    string : un paramètre dont le placeholder figure dans le corps y est
+    substitué, les autres partent en query string. Aucun paramètre ne peut
+    donc être perdu en route.
+    """
+    if isinstance(value, str):
+        return set(_PLACEHOLDER_RE.findall(value))
+    if isinstance(value, dict):
+        return set().union(*(placeholders(v) for v in value.values()), set())
+    if isinstance(value, list):
+        return set().union(*(placeholders(v) for v in value), set())
+    return set()
+
+
+def templated_placeholders(value, template_paths=None) -> set[str]:
+    """Placeholders que `value` sait accueillir, restreints aux branches de
+    `template_paths` quand elles sont déclarées — le même périmètre que le
+    rendu. Utilisé au runtime pour répartir les paramètres entre corps et query
+    string, et à la validation pour vérifier que la clé de pagination a bien
+    une place où atterrir. Une seule implémentation : deux versions qui
+    divergeraient laisseraient passer une config que le runtime saboterait."""
+    if not template_paths:
+        return placeholders(value)
+    names: set[str] = set()
+    for path in template_paths:
+        node = value
+        for part in path.split("."):
+            if not isinstance(node, dict) or part not in node:
+                node = None
+                break
+            node = node[part]
+        names |= placeholders(node)
+    return names
+
+
 def render(value, variables: dict):
     """Remplace récursivement les `{nom}` dans les chaînes de `value`.
     Sans variables, la valeur est renvoyée telle quelle — aucun contrôle de
