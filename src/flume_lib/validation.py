@@ -15,7 +15,7 @@ _REQUIRED = ("base_url", "target_schema", "target_table")
 _OPTIONAL = (
     "name", "params", "auth", "pagination", "incremental", "retry",
     "timeout_seconds", "method", "body", "body_format", "headers",
-    "errors", "template_paths",
+    "errors", "template_paths", "batch_size",
 )
 
 # Clés autorisées par type d'auth. Les formes historiques *_env_var sont
@@ -82,7 +82,7 @@ _ERRORS_KEYS = ("path", "code_field", "message_field", "retryable_codes")
 
 _INCREMENTAL_KEYS = (
     "enabled", "field", "param_name", "inject", "placeholder",
-    "initial_value", "value_format",
+    "initial_value", "value_format", "checkpoint",
 )
 _INCREMENTAL_INJECTS = ("query_param", "body_template")
 _RETRY_KEYS = ("max_attempts", "backoff_multiplier", "max_retry_after_seconds")
@@ -161,6 +161,14 @@ def validate_config(config: dict) -> None:
         raise ConfigError(
             "config : 'body' est ignoré en GET — préciser \"method\": \"POST\""
         )
+
+    if "batch_size" in config:
+        batch_size = config["batch_size"]
+        # bool est un int en Python : le laisser passer donnerait batch_size=1
+        if not isinstance(batch_size, int) or isinstance(batch_size, bool):
+            raise ConfigError("config : 'batch_size' doit être un entier")
+        if batch_size < 1:
+            raise ConfigError("config : 'batch_size' doit être supérieur à 0")
 
     headers = config.get("headers")
     if headers is not None:
@@ -297,6 +305,11 @@ def validate_config(config: dict) -> None:
             raise ConfigError(
                 f"incremental : 'value_format' inconnu '{value_format}' — "
                 f"attendu l'un de : {known}"
+            )
+        if incremental.get("checkpoint") and not incremental.get("enabled"):
+            raise ConfigError(
+                "incremental : 'checkpoint' commite le watermark lot par lot "
+                "et n'a de sens qu'avec \"enabled\": true"
             )
         if incremental.get("enabled"):
             if not incremental.get("field"):

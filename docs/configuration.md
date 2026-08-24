@@ -20,6 +20,7 @@ Exhaustive reference of every option: the JSON configuration of a source (key by
   "errors": { ... },
   "target_schema": "bronze",
   "target_table": "my_source",
+  "batch_size": 50000,
   "retry": { ... },
   "timeout_seconds": 60
 }
@@ -35,6 +36,7 @@ Exhaustive reference of every option: the JSON configuration of a source (key by
 | `incremental` | object | no | disabled | See [Incremental](#incremental-watermark). |
 | `target_schema` | string | **yes** | — | Destination schema for the data (schema-enabled lakehouse required). Letters/digits/underscore only. |
 | `target_table` | string | **yes** | — | Destination table. Written in `append` mode with `schema_mode=merge`. Letters/digits/underscore only. |
+| `batch_size` | integer | no | `50000` | Rows buffered before each Delta write. Bounds the memory of a run. See [Batched writes](#batched-writes). |
 | `retry` | object | no | see [Retry](#retry) | HTTP retry policy. |
 | `timeout_seconds` | number | no | `60` | Timeout of each data HTTP request. |
 | `method` | string | no | `GET` | HTTP method of the data calls: `GET`, `POST`, `PUT`, `PATCH`. |
@@ -576,6 +578,30 @@ A single HTTP call, no loop. The common keys still apply: `items_field` and `rec
 
 > **Offset ceilings.** Some APIs refuse an offset beyond a hard limit (NetSuite stops at 100 000). Past that point, split the source into bounded slices — one run per month or per id range, with the bounds in the query — rather than paging further.
 
+## Batched writes
+
+Records are written to Delta in batches of `batch_size` rows (default 50 000) instead of being accumulated for a single write at the end of the run. The memory of a run no longer depends on the size of the source, and a run that breaks on page 900 leaves the first 899 pages in the table rather than losing everything. A source smaller than `batch_size` still produces exactly one commit.
+
+`RunResult.rows_loaded` — and the `rows_loaded` column of `log_runs` — count the rows **actually written**, including on a failed run.
+
+**This makes ingestion at-least-once.** A failed run can leave partial data behind. Rows of a given run all carry the same `_flume_run_id`, so a failed run is identifiable and removable:
+
+```sql
+DELETE FROM bronze.my_table WHERE _flume_run_id = '<the failed run_id>'
+```
+
+Sizing `batch_size` is a trade-off: smaller means less memory and finer-grained resumption, but more Delta commits and more small files. Leave it alone unless a run runs out of memory (lower it) or a source is small and frequent (raise it above its row count to keep one commit per run).
+
+### Resuming with `incremental.checkpoint`
+
+Without `checkpoint`, the watermark is committed once, at the end of a successful run: a failed run never advances it, and the next run replays the whole window — the rows already written become duplicates.
+
+With `"checkpoint": true`, the watermark is committed after each batch. An interrupted run resumes where it stopped, and only the last incomplete batch is replayed.
+
+This is only correct if **the source returns its rows sorted by `incremental.field`**. Otherwise a batch could carry a value lower than an already-committed watermark, and resuming would skip rows that were never written. The library checks this: a batch that goes backwards fails the run with an explicit message, before writing anything, rather than advancing a watermark that would silently lose data. Add an `ORDER BY` to the query, or leave `checkpoint` off.
+
+Data is always committed **before** its watermark. If the watermark commit fails after the data commit, the next run replays the window and duplicates — recoverable through `_flume_run_id`. The opposite order would lose the rows for good.
+
 ## Incremental (watermark)
 
 | Key | Required | Description |
@@ -587,8 +613,11 @@ A single HTTP call, no loop. The common keys still apply: `items_field` and `rec
 | `placeholder` | no (default `watermark`) | With `inject: "body_template"`, the variable name to substitute. |
 | `initial_value` | no | Value used on the very first run, before any watermark exists. Required in practice with `body_template`, otherwise the placeholder would have nothing to resolve to. |
 | `value_format` | **yes** with `body_template`, otherwise no (default `any`) | Validation applied to the watermark before it is used: `any`, `numeric`, `iso_date`, `iso_datetime`. |
+| `checkpoint` | no (default `false`) | Commits the watermark after **each batch** instead of once at the end, making an interrupted run resumable. Requires the source to return its rows sorted by `field`. See [Batched writes](#batched-writes). |
 
-Behavior: the last watermark is read from `<log_schema>.watermark` at run start (`initial_value` is used on the very first run, and no param is sent if neither exists); the new watermark is written **only if the run succeeded** and at least one record was loaded. Comparison uses Python `max()` — works for ISO 8601 timestamps and numerics; beware of date formats that don't sort lexicographically.
+Behavior: the last watermark is read from `<log_schema>.watermark` at run start (`initial_value` is used on the very first run, and no param is sent if neither exists); the new watermark is written **only if the run succeeded** and at least one record was loaded — unless [`checkpoint`](#resuming-with-incrementalcheckpoint) is on, in which case it advances batch by batch.
+
+The max of each batch is computed **before** that batch is written, so a `field` whose values cannot be compared (mixed types) fails the run without leaving rows behind an unadvanced watermark. Comparison uses Python `max()` — works for ISO 8601 timestamps and numerics; beware of date formats that don't sort lexicographically.
 
 ## Retry
 

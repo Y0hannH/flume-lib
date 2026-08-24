@@ -431,3 +431,36 @@ class TestCursorPaginationConfig:
         validate_config(
             cfg(pagination={"type": "offset", "record_field": "node"})
         )
+
+
+class TestBatchSize:
+    def test_default_is_implicit(self):
+        validate_config(cfg())
+
+    def test_positive_integer_is_valid(self):
+        validate_config(cfg(batch_size=1))
+        validate_config(cfg(batch_size=100_000))
+
+    @pytest.mark.parametrize("value", [0, -1])
+    def test_non_positive_raises(self, value):
+        with pytest.raises(ConfigError, match="supérieur à 0"):
+            validate_config(cfg(batch_size=value))
+
+    @pytest.mark.parametrize("value", ["1000", 1000.0, None, True])
+    def test_non_integer_raises(self, value):
+        with pytest.raises(ConfigError, match="entier"):
+            validate_config(cfg(batch_size=value))
+
+
+class TestIncrementalCheckpoint:
+    def test_checkpoint_with_incremental_is_valid(self):
+        validate_config(
+            cfg(incremental={
+                "enabled": True, "field": "ts", "param_name": "since",
+                "checkpoint": True,
+            })
+        )
+
+    def test_checkpoint_without_enabled_raises(self):
+        with pytest.raises(ConfigError, match="checkpoint"):
+            validate_config(cfg(incremental={"checkpoint": True}))

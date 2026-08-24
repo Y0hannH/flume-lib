@@ -110,6 +110,7 @@ Configurations are **strictly validated**: an unknown key is an error with a "di
   },
   "target_schema": "bronze",
   "target_table": "example_source",
+  "batch_size": 50000,
   "retry": {
     "max_attempts": 3,
     "backoff_multiplier": 1
@@ -158,6 +159,14 @@ Some APIs cap how far an offset may go (NetSuite refuses past 100 000). Past tha
 When `incremental.enabled`, the last watermark is read from `<log_schema>.watermark` and sent as a query param (`param_name`). After a **successful** run only, the max of `incremental.field` over the loaded records becomes the new watermark.
 
 With `"inject": "body_template"` the watermark is substituted into the `{placeholder}` markers of `body` instead — for APIs whose filter lives inside the request payload, such as an SQL-over-REST endpoint. `initial_value` provides the floor used on the very first run, and `value_format` validates the watermark before it is used.
+
+`"checkpoint": true` commits the watermark after each batch instead of at the end of the run, so an interrupted run resumes where it stopped — see [Batched writes](#batched-writes).
+
+### Batched writes
+
+Rows are written by batches of `batch_size` (default 50 000) instead of being accumulated for one write at the end. A run's memory no longer depends on the size of the source, and a run that breaks half-way keeps what it already wrote — `RunResult.rows_loaded` counts the rows actually committed. A source smaller than one batch still produces a single commit.
+
+The trade-off is at-least-once ingestion: a failed run can leave partial data. Every row carries `_flume_run_id`, so a failed run's rows are identifiable and removable. Pair with `incremental.checkpoint` to make the next run resume instead of replay.
 
 ### Retry
 
@@ -237,7 +246,7 @@ Version history: [CHANGELOG.md](CHANGELOG.md).
 
 - Client-side scaffolding/installation CLI
 - Asynchronous bulk-export APIs (submit a job, poll it, download a JSONL/CSV artifact — Shopify Bulk Operations, NetSuite saved-search exports). The whole library assumes one HTTP call returns one page of JSON.
-- Streaming to Delta: every page of a run is accumulated in memory before a single write. Split large loads into bounded slices.
+- Exactly-once ingestion: writes are `append` batches, so a failed or replayed run can leave duplicates. They are identifiable by `_flume_run_id`; de-duplication is the consumer's job.
 
 ## License
 

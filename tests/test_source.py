@@ -768,5 +768,178 @@ class TestErrorMessagesLeakNothing:
             source_module.requests.Session = FakeSession
 
         assert result.status == "failed"
-        # 2 pages complètes avant l'échec : la position du run reste lisible
+        # 2 pages complètes avant l'échec, mais sous le batch_size par défaut :
+        # rien n'a été commité, rows_loaded le dit
         assert delta["log"][0]["rows_loaded"] == 0
+
+
+class TestBatchedWrites:
+    """Écriture par lots : la mémoire est bornée, et un run interrompu laisse
+    derrière lui ce qu'il a réellement écrit."""
+
+    def test_a_small_source_still_produces_a_single_commit(self, http, delta):
+        http.next_payloads = [[{"id": 1}, {"id": 2}, {"id": 3}]]
+        result = run_source(BASE_CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert len(delta["append"]) == 1
+        assert result.rows_loaded == 3
+
+    def test_records_are_flushed_every_batch_size_rows(self, http, delta):
+        config = {**BASE_CONFIG, "batch_size": 2}
+        http.next_payloads = [[{"id": i} for i in range(5)]]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert [len(c["records"]) for c in delta["append"]] == [2, 2, 1]
+        assert result.rows_loaded == 5
+
+    def test_a_batch_spanning_several_pages_is_written_once(self, http, delta):
+        config = {
+            **BASE_CONFIG,
+            "batch_size": 4,
+            "pagination": {"type": "offset", "limit": 2},
+        }
+        http.next_payloads = [
+            [{"id": 1}, {"id": 2}],
+            [{"id": 3}, {"id": 4}],
+            [{"id": 5}],
+        ]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert [len(c["records"]) for c in delta["append"]] == [4, 1]
+
+    def test_rows_loaded_reports_what_was_really_written(self, http, delta):
+        config = {
+            **BASE_CONFIG,
+            "batch_size": 2,
+            "pagination": {"type": "offset", "limit": 2},
+        }
+
+        class HalfWay(FakeSession):
+            def request(self, method, url, **kwargs):
+                self.calls.append({"method": method, "url": url})
+                if len(self.calls) <= 2:
+                    return FakeResponse([{"id": 1}, {"id": 2}])
+                return FakeResponse({}, status_code=403)
+
+        import flume_lib.source as source_module
+
+        source_module.requests.Session = HalfWay
+        HalfWay.next_payloads = []
+        try:
+            result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+        finally:
+            source_module.requests.Session = FakeSession
+
+        assert result.status == "failed"
+        # les deux premières pages sont dans la table : le run est repris
+        # depuis là, pas depuis zéro
+        assert result.rows_loaded == 4
+        assert delta["log"][0]["rows_loaded"] == 4
+
+
+class TestWatermarkCoherence:
+    CONFIG = {
+        **BASE_CONFIG,
+        "batch_size": 2,
+        "incremental": {
+            "enabled": True,
+            "field": "ts",
+            "param_name": "since",
+        },
+    }
+
+    def test_watermark_is_written_once_at_the_end_by_default(self, http, delta):
+        http.next_payloads = [[{"ts": i} for i in (1, 2, 3, 4)]]
+        result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert len(delta["append"]) == 2
+        assert delta["watermark_write"] == [("s1", 4)]
+
+    def test_checkpoint_commits_the_watermark_after_each_batch(self, http, delta):
+        config = {
+            **self.CONFIG,
+            "incremental": {**self.CONFIG["incremental"], "checkpoint": True},
+        }
+        http.next_payloads = [[{"ts": i} for i in (1, 2, 3, 4)]]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert delta["watermark_write"] == [("s1", 2), ("s1", 4)]
+
+    def test_checkpoint_survives_an_interrupted_run(self, http, delta):
+        config = {
+            **self.CONFIG,
+            "pagination": {"type": "offset", "limit": 2},
+            "incremental": {**self.CONFIG["incremental"], "checkpoint": True},
+        }
+
+        class HalfWay(FakeSession):
+            def request(self, method, url, **kwargs):
+                self.calls.append({"method": method, "url": url})
+                if len(self.calls) == 1:
+                    return FakeResponse([{"ts": 1}, {"ts": 2}])
+                return FakeResponse({}, status_code=403)
+
+        import flume_lib.source as source_module
+
+        source_module.requests.Session = HalfWay
+        HalfWay.next_payloads = []
+        try:
+            result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+        finally:
+            source_module.requests.Session = FakeSession
+
+        assert result.status == "failed"
+        assert result.rows_loaded == 2
+        # le watermark reflète exactement les lignes commitées
+        assert delta["watermark_write"] == [("s1", 2)]
+
+    def test_an_unsorted_source_stops_instead_of_skipping_rows(self, http, delta):
+        config = {
+            **self.CONFIG,
+            "incremental": {**self.CONFIG["incremental"], "checkpoint": True},
+        }
+        http.next_payloads = [[{"ts": 5}, {"ts": 6}, {"ts": 3}, {"ts": 4}]]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "failed"
+        assert "trié" in result.error_message
+        # le lot fautif n'est pas écrit : le watermark reste cohérent
+        assert len(delta["append"]) == 1
+        assert delta["watermark_write"] == [("s1", 6)]
+
+    def test_an_unsorted_source_is_fine_without_checkpoint(self, http, delta):
+        http.next_payloads = [[{"ts": 5}, {"ts": 6}, {"ts": 3}, {"ts": 4}]]
+        result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert delta["watermark_write"] == [("s1", 6)]
+
+    def test_a_mixed_type_field_fails_before_anything_is_written(self, http, delta):
+        http.next_payloads = [[{"ts": 1}, {"ts": "hier"}]]
+        result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "failed"
+        assert "mélange des types" in result.error_message
+        # l'ancien comportement écrivait le lot puis échouait sur le max()
+        assert delta["append"] == []
+        assert delta["watermark_write"] == []
+
+    def test_rows_without_the_field_do_not_block_the_watermark(self, http, delta):
+        http.next_payloads = [[{"ts": 1}, {"other": 2}]]
+        result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert delta["watermark_write"] == [("s1", 1)]
+
+    def test_no_row_at_all_writes_no_watermark(self, http, delta):
+        http.next_payloads = [[]]
+        result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert delta["append"] == []
+        assert delta["watermark_write"] == []

@@ -42,6 +42,11 @@ LINEAGE_INGESTED_AT = "_flume_ingested_at"
 
 DRY_RUN_SAMPLE_SIZE = 3
 
+# Nombre de lignes tamponnées avant écriture. Borne la mémoire d'un run : elle
+# ne dépend plus du volume de la source. Une source qui tient sous ce seuil
+# produit un unique commit Delta, comme avant l'introduction des lots.
+DEFAULT_BATCH_SIZE = 50_000
+
 # Erreurs applicatives : bornes de ce qui part dans log_runs. Le message vient
 # de l'API et peut être volumineux (une erreur GraphQL recopie souvent la
 # requête et sa position) — inutile de le stocker en entier ligne après ligne.
@@ -69,6 +74,10 @@ class RetryableHTTPError(RetryableError):
         detail = f" (Retry-After: {retry_after:g}s)" if retry_after is not None else ""
         super().__init__(f"HTTP {status_code} sur {url}{detail}", retry_after)
         self.status_code = status_code
+
+
+class IncrementalError(Exception):
+    """Le watermark ne peut pas être calculé ou avancé sans risque."""
 
 
 class APIError(Exception):
@@ -301,8 +310,37 @@ def _build_fetch_page(config: dict, variables: dict | None = None):
 
 
 def _max_incremental_value(records: list[dict], field_name: str):
-    values = [r[field_name] for r in records if r.get(field_name) is not None]
-    return max(values) if values else None
+    """Plus grande valeur du champ incrémental d'un lot. Calculé *avant*
+    l'écriture du lot : un champ aux types hétérogènes ferait échouer `max()`,
+    et le faire après l'append laisserait des lignes écrites derrière un run
+    marqué `failed`, sans watermark pour les recouvrir."""
+    values = [
+        r[field_name]
+        for r in records
+        if isinstance(r, dict) and r.get(field_name) is not None
+    ]
+    if not values:
+        return None
+    try:
+        return max(values)
+    except TypeError as exc:
+        types = ", ".join(sorted({type(v).__name__ for v in values}))
+        raise IncrementalError(
+            f"incremental : le champ '{field_name}' mélange des types ({types}) "
+            "— impossible d'en calculer le maximum"
+        ) from exc
+
+
+def _is_regression(candidate, reference) -> bool:
+    """Vrai si `candidate` est strictement inférieur à `reference`. Deux
+    valeurs incomparables ne sont pas une régression : l'hétérogénéité de type
+    est déjà signalée par `_max_incremental_value`."""
+    if reference is None:
+        return False
+    try:
+        return candidate < reference
+    except TypeError:
+        return False
 
 
 def _add_lineage(records: list[dict], run_id: str) -> None:
@@ -310,6 +348,105 @@ def _add_lineage(records: list[dict], run_id: str) -> None:
     for record in records:
         record[LINEAGE_RUN_ID] = run_id
         record[LINEAGE_INGESTED_AT] = ingested_at
+
+
+class _BatchWriter:
+    """Écrit les enregistrements par lots bornés au lieu d'accumuler tout le
+    run en mémoire pour une écriture unique.
+
+    Deux conséquences voulues. La mémoire ne dépend plus du volume de la
+    source mais de `batch_size`. Et un run qui casse à la page 900 laisse les
+    899 premières écrites au lieu de tout perdre : `rows_written` dit ce qui
+    est réellement dans la table, et le watermark — si `checkpoint` est actif
+    — dit où reprendre.
+
+    L'ordre écriture-puis-watermark est délibéré : il donne une sémantique
+    at-least-once. Si le commit du watermark échoue après celui des données,
+    le run suivant refait la fenêtre et duplique — récupérable par
+    `_flume_run_id`. L'ordre inverse perdrait les lignes, définitivement.
+    """
+
+    def __init__(
+        self,
+        uri: str,
+        run_id: str,
+        source_name: str,
+        batch_size: int,
+        incremental: dict,
+        lakehouse_tables_path: str,
+        log_schema: str,
+        storage_options: dict | None,
+    ):
+        self._uri = uri
+        self._run_id = run_id
+        self._source_name = source_name
+        self._batch_size = batch_size
+        self._lakehouse_tables_path = lakehouse_tables_path
+        self._log_schema = log_schema
+        self._storage_options = storage_options
+
+        self._enabled = bool(incremental.get("enabled"))
+        self._field = incremental.get("field")
+        self._checkpoint = bool(incremental.get("checkpoint"))
+
+        self._buffer: list[dict] = []
+        self.rows_written = 0
+        # plus grande valeur vue jusqu'ici / dernière effectivement commitée
+        self._pending = None
+        self._written = None
+
+    def add(self, records: list[dict]) -> None:
+        self._buffer.extend(records)
+        while len(self._buffer) >= self._batch_size:
+            batch = self._buffer[: self._batch_size]
+            del self._buffer[: self._batch_size]
+            self._flush(batch)
+
+    def close(self) -> None:
+        if self._buffer:
+            batch, self._buffer = self._buffer, []
+            self._flush(batch)
+        # Hors mode checkpoint le watermark n'est commité qu'ici, une fois le
+        # run complet : la reprise n'est pas offerte, mais un run interrompu
+        # ne laisse jamais un watermark avancé au-delà d'une fenêtre partielle.
+        if self._enabled and not self._checkpoint:
+            self._commit_watermark()
+
+    def _flush(self, batch: list[dict]) -> None:
+        candidate = None
+        if self._enabled:
+            # avant l'écriture : voir _max_incremental_value
+            candidate = _max_incremental_value(batch, self._field)
+            if self._checkpoint and _is_regression(candidate, self._pending):
+                raise IncrementalError(
+                    f"incremental : le lot suivant redescend à {candidate!r} "
+                    f"alors que le watermark est déjà à {self._pending!r} — la "
+                    f"source ne renvoie pas ses lignes triées par "
+                    f"'{self._field}'. Reprendre depuis ce watermark sauterait "
+                    "des lignes : trier la source, ou retirer "
+                    '"checkpoint": true.'
+                )
+
+        _add_lineage(batch, self._run_id)
+        append_records(self._uri, batch, storage_options=self._storage_options)
+        self.rows_written += len(batch)
+
+        if candidate is not None and not _is_regression(candidate, self._pending):
+            self._pending = candidate
+        if self._checkpoint:
+            self._commit_watermark()
+
+    def _commit_watermark(self) -> None:
+        if self._pending is None or self._pending == self._written:
+            return
+        write_watermark(
+            self._lakehouse_tables_path,
+            self._source_name,
+            self._pending,
+            schema=self._log_schema,
+            storage_options=self._storage_options,
+        )
+        self._written = self._pending
 
 
 def run_source(
@@ -333,6 +470,14 @@ def run_source(
     config['errors'] déclare l'enveloppe d'erreur applicative des APIs qui
     répondent 200 avec l'erreur dans le corps — sans elle, un tel run finirait
     'success' avec 0 ligne et aucun message.
+
+    Les enregistrements sont écrits par lots de config['batch_size'] lignes
+    (défaut 50 000) : la mémoire d'un run ne dépend plus du volume de la
+    source. RunResult.rows_loaded compte les lignes réellement écrites, y
+    compris quand le run échoue en cours de route. Avec
+    incremental.checkpoint, le watermark est commité après chaque lot et un
+    run interrompu reprend là où il s'est arrêté — à condition que la source
+    renvoie ses lignes triées par incremental.field, ce que la lib vérifie.
 
     Cible exclusivement des lakehouses avec schémas : les données vont dans
     config['target_schema'] (requis), les tables techniques watermark et
@@ -408,35 +553,28 @@ def run_source(
                     sample.extend(page[: DRY_RUN_SAMPLE_SIZE - len(sample)])
                 rows_loaded += len(page)
         else:
-            records: list[dict] = []
-            for page in pages:
-                records.extend(page)
-            rows_loaded = len(records)
-
-            if records:
-                _add_lineage(records, run_id)
-                append_records(
-                    table_uri(
-                        lakehouse_tables_path,
-                        config["target_schema"],
-                        config["target_table"],
-                    ),
-                    records,
-                    storage_options=storage_options,
-                )
-
-                if incremental.get("enabled"):
-                    new_watermark = _max_incremental_value(
-                        records, incremental["field"]
-                    )
-                    if new_watermark is not None:
-                        write_watermark(
-                            lakehouse_tables_path,
-                            source_name,
-                            new_watermark,
-                            schema=log_schema,
-                            storage_options=storage_options,
-                        )
+            writer = _BatchWriter(
+                uri=table_uri(
+                    lakehouse_tables_path,
+                    config["target_schema"],
+                    config["target_table"],
+                ),
+                run_id=run_id,
+                source_name=source_name,
+                batch_size=config.get("batch_size", DEFAULT_BATCH_SIZE),
+                incremental=incremental,
+                lakehouse_tables_path=lakehouse_tables_path,
+                log_schema=log_schema,
+                storage_options=storage_options,
+            )
+            try:
+                for page in pages:
+                    writer.add(page)
+                writer.close()
+            finally:
+                # Ce que l'appelant voit doit être ce qui est réellement dans
+                # la table, y compris quand le run casse en cours de route.
+                rows_loaded = writer.rows_written
 
         status = "success"
     except Exception as exc:  # noqa: BLE001 — contrat : ne jamais lever
