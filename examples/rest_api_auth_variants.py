@@ -96,10 +96,11 @@ BASIC = {
 # token back". The login request is described field by field, and the token is
 # extracted from the response by dotted path.
 #
-# Called **once per `run_source`**, and never refreshed mid-run. An API handing
-# out 30-minute tokens will therefore break a two-hour backfill halfway
-# through: split it into bounded slices (one run per month, per id range), each
-# of which logs in again. See the backfill loops in netsuite_suiteql.py.
+# Renewed mid-run. An API handing out 30-minute tokens no longer breaks a
+# two-hour backfill: on a 401 the library logs in again and replays the page,
+# once per page. If the response carries the token lifetime, point
+# `expires_in_json_path` at it and the renewal happens before expiry rather
+# than after a refused call.
 # ---------------------------------------------------------------------------
 
 LOGIN = {
@@ -137,7 +138,9 @@ LOGIN = {
 # form to use for any Microsoft API (Graph, Fabric, Azure Management), see
 # microsoft_graph_odata.py.
 #
-# Same lifetime caveat as `token_endpoint`: one token per run, no refresh.
+# Renewed mid-run like `token_endpoint`, and better: the OAuth2 `expires_in`
+# is standard, so the token is refreshed before it expires rather than after a
+# 401.
 # ---------------------------------------------------------------------------
 
 CLIENT_CREDENTIALS = {

@@ -39,6 +39,7 @@ Robustness pass on long runs. A source of a few million rows used to be an all-o
 
 ### Known limitations
 
+- **`params_in: "body_template"` is all-or-nothing**: it sends no query string, so a source cannot put the pagination key in the body *and* the page size in the query string. NetSuite SuiteQL, which takes `limit` as a query param, therefore runs a keyset backfill at the API's default page size — see the caveat on `BACKFILL_KEYSET` in [examples/netsuite_suiteql.py](examples/netsuite_suiteql.py). Without a known page size the library cannot recognise a short last page and ends the run on one extra call.
 - The no-regression check on `incremental.checkpoint` compares against the maximum seen **during the current run**, not the watermark stored at its start. An API that returns rows older than the stored watermark can therefore move it backwards — pre-existing behavior, unchanged.
 - Warnings live in `RunResult` only; `log_runs` does not carry them.
 - A column that changes type from one run to the next is still a `SchemaMismatchError` at commit time. Only within a run is the type stabilized.

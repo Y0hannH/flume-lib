@@ -2,7 +2,7 @@
 #
 # Nothing here is NetSuite-specific library code: SuiteQL is a plain REST POST
 # endpoint, reached with the generic `oauth1`, `headers`, `body` templating and
-# `offset` pagination options.
+# `offset` / `keyset` pagination options.
 #
 # %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.9.0
 
@@ -89,13 +89,20 @@ def run_incremental():
 
 
 # ---------------------------------------------------------------------------
-# Backfill: bounded slices instead of one long run.
+# Backfill: monthly slices.
 #
-# Two hard limits make a single-pass backfill impossible on a large table:
-# NetSuite refuses an `offset` beyond 100 000, and run_source accumulates every
-# page in memory before writing. One run per month keeps both well within
-# bounds and makes each slice independently restartable. Incremental is off —
-# the bounds are explicit, so no watermark is read or written.
+# NetSuite refuses an `offset` beyond 100 000, which used to make a single-pass
+# backfill impossible on a large table. Memory is no longer a constraint —
+# `batch_size` bounds it — so the choice is now between two shapes:
+#
+#   - monthly slices, below, each independently restartable and easy to rerun
+#     one at a time after a failure;
+#   - a single keyset run (see BACKFILL_KEYSET further down), which walks the
+#     whole table in one pass without ever paying an offset.
+#
+# Slices remain the safer default when the table is being written to while you
+# read it. Incremental is off in both: the bounds are explicit, so no watermark
+# is read or written.
 # ---------------------------------------------------------------------------
 
 
@@ -125,6 +132,71 @@ def backfill_transactions(first_year: int, last_year: int):
             if result.status == "failed":
                 # Each slice is independent: note it and rerun just this one.
                 print(f"  {result.error_message}")
+
+
+# ---------------------------------------------------------------------------
+# Backfill in one pass: keyset pagination.
+#
+# `offset` pays for every row it skips and NetSuite stops honouring it past
+# 100 000. `keyset` filters on the last id seen instead — `WHERE id > {last_id}
+# ORDER BY id` — so page 3 000 costs exactly what page 1 costs, and no ceiling
+# applies. The whole table is reachable in a single run.
+#
+# Three conditions, all met here:
+#   - the query is ORDER BY id, and NetSuite ids are unique;
+#   - the key lives inside the SQL, hence "params_in": "body_template", which
+#     substitutes it into the {last_id} marker of the body;
+#   - the key comes back from the API, so "value_format": "numeric" constrains
+#     it to a shape with no room for syntax — mandatory in this mode.
+#
+# One caveat, and it is a real one: `params_in: "body_template"` sends **no
+# query string at all**, and SuiteQL takes `limit` there (see BASE above). So
+# this source cannot set the page size — NetSuite applies its own default
+# (1 000, which is also its maximum, so nothing is lost here). The library
+# therefore cannot recognise a short last page and ends the run on one extra
+# call returning an empty page. One request per backfill, not per page.
+#
+# Mixing the two — key in the body, `limit` in the query string — is not
+# expressible today. Track it before using this shape on an API whose default
+# page size is small.
+# ---------------------------------------------------------------------------
+
+BACKFILL_KEYSET = {
+    **BASE,
+    "name": "netsuite_transactions_backfill",
+    "target_table": "transactions",
+    "body": {"q": TRANSACTIONS_SELECT + " WHERE id > {last_id} ORDER BY id"},
+    "pagination": {
+        "type": "keyset",
+        "key_field": "id",
+        "key_param": "last_id",
+        "params_in": "body_template",
+        "value_format": "numeric",
+        # first page: every id is greater than 0
+        "initial_value": 0,
+        "items_field": "items",
+        # A safety net, not a target: 2.77 M rows in 1 000-row pages is ~2 800
+        # calls. Reaching this bound fails the run rather than truncating it.
+        "max_pages": 5000,
+    },
+    # 50 000 rows per Delta commit is the default; lowering it shortens what a
+    # failed run has to redo, at the cost of more commits.
+    "batch_size": 50000,
+}
+
+
+def backfill_keyset():
+    """One run for the whole table. Rows already written stay written if it
+    fails: rerun after deleting them by `_flume_run_id`, or narrow the query
+    with the last id actually loaded."""
+    result = run_source(BACKFILL_KEYSET)
+    print(f"{result.source_name}: {result.status} ({result.rows_loaded} rows)")
+    if result.warnings:
+        for warning in result.warnings:
+            print(f"  warning: {warning}")
+    if result.status == "failed":
+        print(f"  {result.error_message}")
+    return result
 
 
 # Validate credentials and the query shape without writing anything first:

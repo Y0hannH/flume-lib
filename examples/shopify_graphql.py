@@ -164,10 +164,11 @@ def run_incremental():
 # ---------------------------------------------------------------------------
 # Backfill: bounded slices instead of one long run.
 #
-# A cursor has no offset ceiling, so the limit here is memory only — run_source
-# accumulates every page before writing. One run per month keeps each slice
-# small and independently restartable. Incremental is off: the bounds are
-# explicit, so no watermark is read or written.
+# A cursor has no offset ceiling, and memory is no longer a constraint either
+# — `batch_size` bounds it. Monthly slices remain useful for a different
+# reason: each one is independently restartable, so a failure costs one month
+# rather than the whole backfill. Incremental is off: the bounds are explicit,
+# so no watermark is read or written.
 # ---------------------------------------------------------------------------
 
 
