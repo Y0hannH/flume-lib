@@ -21,7 +21,17 @@ permissions:
   contents: read
 
 jobs:
+  # Une release ne part pas d'un commit dont les tests échouent. CI et Release
+  # sont deux workflows distincts, et Actions ne permet pas de `needs:` entre
+  # workflows : la suite est donc rejouée ici, sur le ref exact qu'on publie,
+  # depuis la même définition que celle qu'utilise CI.
+  tests:
+    uses: ./.github/workflows/tests.yml
+    with:
+      ref: ${{ inputs.tag || github.ref }}
+
   bundles:
+    needs: tests
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
