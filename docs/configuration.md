@@ -261,6 +261,8 @@ A GraphQL selection is a tree; a Delta table is flat. Objects and lists (`custom
 - Query them downstream with the JSON functions of whatever reads the table; the library does not flatten.
 - To get real columns, ask for scalars in the query (`customer { id }` → still one JSON column, but a shallow one), or split the connection into its own source.
 
+How scalars themselves are typed: [Column types in Delta](#column-types-in-delta).
+
 ### Common failure modes
 
 | Symptom | Cause |
@@ -659,6 +661,23 @@ Retried: network errors (connection, timeout), HTTP 429 and 5xx, and application
 `max_attempts` bounds every one of those causes alike, so an API answering "transient" forever costs at most `max_attempts` calls per page, not an unbounded loop.
 
 When the response carries a `Retry-After` header (seconds or an HTTP date), that delay is used instead of the exponential backoff — APIs with strict governance ban clients that retry earlier than they were told to. The delay is capped at `max_retry_after_seconds`; beyond the cap the wait is truncated and the next attempt will most likely fail, which surfaces as a `failed` run in `log_runs` rather than a notebook hanging for an hour.
+
+## Column types in Delta
+
+Each column is typed from **all** the values of the batch being written, not from the first non-null one:
+
+| Values seen in the column | Delta type |
+|---|---|
+| integers only | `bigint` |
+| floats, or integers **and** floats | `double` |
+| booleans only | `boolean` |
+| anything else — strings, mixed scalars, objects, lists | `string` |
+
+Objects and lists are serialized to a JSON string. Dates and timestamps arrive as strings and stay strings: the library does not parse them, so downstream casting is the consumer's job.
+
+A column whose values fit none of those types — an integer beyond `bigint`, say — is still written, as text, and the degradation is reported in `RunResult.warnings`. A run can be `success` and carry warnings; that is the point. It used to be silent, which is how a column of amounts became a column of text without anyone noticing.
+
+Within a run, the types chosen by the first batch are applied to the following ones, so a source whose later rows look different cannot produce two incompatible schemas for the same table. Across runs, Delta's `schema_mode=merge` handles new columns, but not a column that changes type from one run to the next — that is a `SchemaMismatchError` at commit time.
 
 ## Technical tables
 

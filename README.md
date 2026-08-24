@@ -224,6 +224,8 @@ Delta tables created automatically in the technical schema (`log_schema`, defaul
 - **`flume.watermark`**: `source_name`, `last_value`, `updated_ts`
 - **`flume.log_runs`**: `run_id`, `source_name`, `start_ts`, `end_ts`, `status`, `rows_loaded`, `error_message` — one row per `run_source` call, success or failure
 
+Data columns are typed from all the values of a batch — integers and floats mixed give a `double`, not a text column — and a column that cannot be typed is written as text with the degradation reported in `RunResult.warnings`. See [Column types in Delta](docs/configuration.md#column-types-in-delta).
+
 ## Security
 
 See [docs/security.md](docs/security.md) — threat model, supply-chain posture, secret handling, and how to report a vulnerability. Key point for operators: **the source configuration decides where tokens are sent** — protect `Files/conf/` like code.

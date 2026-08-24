@@ -75,13 +75,20 @@ def delta(monkeypatch):
     """Mocke les écritures/lectures Delta et enregistre les appels."""
     # 'watermark_value' est ce que renverra read_watermark : None simule un
     # premier run, un test peut le remplacer pour simuler un run incremental.
+    # 'append_result' est ce que renverra append_records : (types Arrow
+    # retenus, dégradations subies). Un test peut le remplacer pour simuler
+    # une colonne repliée sur du texte.
     calls = {
         "append": [], "log": [], "watermark_write": [], "watermark_read": [],
-        "watermark_value": None,
+        "watermark_value": None, "append_result": ({}, []),
     }
 
-    def fake_append(uri, records, **kwargs):
-        calls["append"].append({"uri": uri, "records": records})
+    def fake_append(uri, records, known_types=None, **kwargs):
+        # copie : l'appelant réutilise et mute le même dict d'un lot à l'autre
+        calls["append"].append(
+            {"uri": uri, "records": records, "known_types": dict(known_types or {})}
+        )
+        return calls["append_result"]
 
     def fake_log(path, **kwargs):
         calls["log"].append(kwargs)
@@ -1049,3 +1056,67 @@ class TestTokenRefresh:
 
         assert result.status == "failed"
         assert "SECRET" not in result.error_message
+
+
+class TestTypeWarnings:
+    """Une colonne dégradée à l'écriture ne doit pas rester invisible sous un
+    run `success`."""
+
+    def test_a_degraded_column_surfaces_in_the_result(self, http, delta):
+        delta["append_result"] = ({}, ["colonne 'n' : écrite en texte"])
+        http.next_payloads = [[{"n": 1}]]
+        result = run_source(BASE_CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert result.warnings == ["colonne 'n' : écrite en texte"]
+
+    def test_the_same_degradation_is_reported_once_per_run(self, http, delta):
+        delta["append_result"] = ({}, ["colonne 'n' : écrite en texte"])
+        config = {**BASE_CONFIG, "batch_size": 1}
+        http.next_payloads = [[{"n": 1}, {"n": 2}, {"n": 3}]]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert len(delta["append"]) == 3
+        assert result.warnings == ["colonne 'n' : écrite en texte"]
+
+    def test_a_clean_run_carries_no_warning(self, http, delta):
+        http.next_payloads = [[{"n": 1}]]
+        result = run_source(BASE_CONFIG, lakehouse_tables_path=TABLES_PATH)
+        assert result.warnings == []
+
+    def test_the_types_of_the_first_batch_are_passed_to_the_next(self, http, delta):
+        import arro3.core as ac
+
+        delta["append_result"] = ({"n": ac.DataType.int64()}, [])
+        config = {**BASE_CONFIG, "batch_size": 1}
+        http.next_payloads = [[{"n": 1}, {"n": 2}]]
+        run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert delta["append"][0]["known_types"] == {}
+        assert delta["append"][1]["known_types"] == {"n": ac.DataType.int64()}
+
+    def test_warnings_survive_a_failed_run(self, http, delta):
+        delta["append_result"] = ({}, ["colonne 'n' : écrite en texte"])
+        config = {
+            **BASE_CONFIG,
+            "batch_size": 1,
+            "pagination": {"type": "offset", "limit": 1},
+        }
+
+        class HalfWay(FakeSession):
+            def request(self, method, url, **kwargs):
+                self.calls.append({"method": method, "url": url})
+                if len(self.calls) == 1:
+                    return FakeResponse([{"n": 1}])
+                return FakeResponse({}, status_code=403)
+
+        import flume_lib.source as source_module
+
+        source_module.requests.Session = HalfWay
+        try:
+            result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+        finally:
+            source_module.requests.Session = FakeSession
+
+        assert result.status == "failed"
+        assert result.warnings == ["colonne 'n' : écrite en texte"]

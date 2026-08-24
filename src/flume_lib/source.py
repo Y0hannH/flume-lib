@@ -170,6 +170,10 @@ class RunResult:
     run_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     # Renseigné uniquement en dry-run : premiers enregistrements bruts reçus
     sample: list | None = None
+    # Dégradations subies sans faire échouer le run — typiquement une colonne
+    # dont les valeurs ne rentrent pas dans le type déduit et qui finit en
+    # texte. Un run `success` peut en porter : c'est tout l'intérêt.
+    warnings: list = field(default_factory=list)
 
 
 def _utc_now() -> str:
@@ -418,6 +422,11 @@ class _BatchWriter:
 
         self._buffer: list[dict] = []
         self.rows_written = 0
+        # Types Arrow retenus par le premier lot : les lots suivants s'y
+        # conforment, sans quoi deux lots d'un même run pourraient typer
+        # différemment la même colonne et casser le commit Delta.
+        self._types: dict = {}
+        self.warnings: list[str] = []
         # plus grande valeur vue jusqu'ici / dernière effectivement commitée
         self._pending = None
         self._written = None
@@ -455,7 +464,17 @@ class _BatchWriter:
                 )
 
         _add_lineage(batch, self._run_id)
-        append_records(self._uri, batch, storage_options=self._storage_options)
+        types, fallbacks = append_records(
+            self._uri,
+            batch,
+            storage_options=self._storage_options,
+            known_types=self._types,
+        )
+        self._types.update(types)
+        for message in fallbacks:
+            # une colonne dégradée l'est à chaque lot : ne le dire qu'une fois
+            if message not in self.warnings:
+                self.warnings.append(message)
         self.rows_written += len(batch)
 
         if candidate is not None and not _is_regression(candidate, self._pending):
@@ -527,6 +546,7 @@ def run_source(
     rows_loaded = 0
     error_message = None
     sample = None
+    warnings: list[str] = []
 
     try:
         lakehouse_tables_path = resolve_lakehouse_tables_path(lakehouse_tables_path)
@@ -602,6 +622,7 @@ def run_source(
                 # Ce que l'appelant voit doit être ce qui est réellement dans
                 # la table, y compris quand le run casse en cours de route.
                 rows_loaded = writer.rows_written
+                warnings = writer.warnings
 
         status = "success"
     except Exception as exc:  # noqa: BLE001 — contrat : ne jamais lever
@@ -617,6 +638,7 @@ def run_source(
         end_ts=end_ts,
         run_id=run_id,
         sample=sample,
+        warnings=warnings,
     )
 
     if dry_run:
