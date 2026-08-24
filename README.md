@@ -30,7 +30,7 @@ No code is fetched from GitHub or PyPI at runtime — the notebook installs exac
 3. In the notebook:
 
    ```python
-   %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.10.0
+   %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.10.1
    ```
 
 `--no-index` guarantees pip resolves only from that folder — nothing is fetched from PyPI or GitHub. The folder layout is entirely up to you: any path works as long as the same path is passed to `--find-links`.
@@ -252,11 +252,11 @@ An `audit` job queries [OSV.dev](https://osv.dev) for known vulnerabilities in t
 
 ### Release procedure
 
-1. Bump the version in `pyproject.toml` and `src/flume_lib/__init__.py`
-2. Add the version's section to [CHANGELOG.md](CHANGELOG.md), breaking changes first
-3. `pytest`
+1. Bump the version in `pyproject.toml` and `src/flume_lib/__init__.py`, **and the pinned version of the `%pip install` lines** in this README and in `examples/` (`grep -rn "flume-lib==" README.md examples/`). These belong to the release commit, not after the tag: otherwise the tagged tree — and every artifact built from it — tells readers to install the previous version.
+2. Add the version's section to [CHANGELOG.md](CHANGELOG.md), breaking changes first. The release workflow uses it as the release notes and refuses to publish without it.
+3. `ruff check . && pytest`
 4. Commit the release, then tag that commit: `git tag -a vX.Y.Z`
-5. Add the tagged SHA to the table above (`git rev-list -n1 vX.Y.Z`) in a **separate** commit — a commit cannot contain its own SHA, so this one always lands after the tag, together with the pinned version of the `%pip install` lines in this README and in `examples/` (`grep -rn "flume-lib==" README.md examples/`)
+5. Add the tagged SHA to the table above (`git rev-list -n1 vX.Y.Z`) in a **separate** commit — a commit cannot contain its own SHA, so this one always lands after the tag
 6. Push branch and tag. Tags are protected against update and deletion: review the tag before pushing, it cannot be moved afterwards
 7. Pushing the tag triggers [the release workflow](.github/workflows/release.yml): it builds one offline batch **per Fabric kernel version** (3.10, 3.11, 3.12), verifies each one, and publishes the GitHub Release with the three zips and the wheel attached, using the CHANGELOG section as its notes. Nothing to build by hand.
 

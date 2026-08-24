@@ -5,7 +5,7 @@
 # `record_field` to unwrap the edges, `params_path` to put the page params where
 # GraphQL expects them, and `errors` to catch what Shopify answers with a 200.
 #
-# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.10.0
+# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.10.1
 
 from flume_lib import run_source
 

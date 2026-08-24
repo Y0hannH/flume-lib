@@ -2,7 +2,9 @@
 
 All notable changes to this project are documented here. Versions follow [semantic versioning](https://semver.org/); until 1.0.0, minor versions may contain breaking changes — these are always listed first.
 
-## [Unreleased]
+## [0.10.1] — 2026-08-24
+
+**The library itself is unchanged**: `src/flume_lib` is identical to 0.10.0, so the installed package behaves exactly the same. What this release carries is the tooling around it — batch verification, an automated release pipeline, and a fix to the batch builder that was producing incomplete bundles for kernels other than the one it ran on.
 
 ### Added
 
