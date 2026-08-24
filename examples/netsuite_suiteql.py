@@ -4,7 +4,7 @@
 # endpoint, reached with the generic `oauth1`, `headers`, `body` templating and
 # `offset` pagination options.
 #
-# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.8.0
+# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.9.0
 
 from datetime import date
 

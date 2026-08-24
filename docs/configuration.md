@@ -8,11 +8,16 @@ Exhaustive reference of every option: the JSON configuration of a source (key by
 {
   "name": "my_source",
   "base_url": "https://api.example.com/v1/items",
+  "method": "GET",
   "params": {"status": "active"},
   "headers": {"Prefer": "transient"},
+  "body": { ... },
+  "body_format": "json",
+  "template_paths": ["variables"],
   "auth": { ... },
   "pagination": { ... },
   "incremental": { ... },
+  "errors": { ... },
   "target_schema": "bronze",
   "target_table": "my_source",
   "retry": { ... },
@@ -36,6 +41,8 @@ Exhaustive reference of every option: the JSON configuration of a source (key by
 | `body` | object | no | `{}` | Request body sent on every data call. Requires a non-`GET` `method`. |
 | `body_format` | string | no | `json` | `json` or `form` encoding of `body`. |
 | `headers` | object | no | `{}` | Fixed HTTP headers added to every data call (literal strings only). Auth headers always win over these. For a credential, use `auth` — never put a secret here. |
+| `errors` | object | no | disabled | Application-error envelope of APIs that report failures inside a successful HTTP response. See [Application errors in a 200](#application-errors-in-a-200). |
+| `template_paths` | array | no | whole body | Restricts `{placeholder}` substitution to these dotted paths of `body`. See [Body templating](#body-templating). |
 
 **Configuration is validated strictly**: an unknown key raises a `ConfigError` (with a "did you mean…" suggestion) instead of being ignored. This is deliberate — a typo on an optional key such as `pagintaion` used to silently disable pagination, producing a run reported as `success` with most of the data missing. Validate ahead of a long batch with:
 
@@ -65,6 +72,18 @@ Search and reporting APIs often require a POST with a JSON payload. Set `method`
 ```
 
 With `"params_in": "body"` the request payload for the second page is `{"query": …, "fields": …, "limit": 200, "offset": 200}`. With the default `"query"`, `body` stays constant and the pagination params go to the query string.
+
+When the API expects those params nested rather than at the root, `pagination.params_path` says where to put them — GraphQL wants the page size and cursor **inside** `variables`, not at the root beside `query`:
+
+```json
+{
+  "method": "POST",
+  "body": {"query": "query($first: Int!, $after: String) { … }", "variables": {}},
+  "pagination": {"type": "cursor", "params_in": "body", "params_path": "variables", "…": "…"}
+}
+```
+
+The branch is created if `body` does not already carry it. A `params_path` that traverses something other than an object in `body` is rejected by validation.
 
 ### Static headers
 
@@ -107,6 +126,151 @@ Rules:
 - When no variable is in play (no `inject: "body_template"`), strings are left untouched, braces included.
 - Interpolated values are checked: a value containing `'`, `"`, `;`, `--`, `/*`, a backslash or a newline is rejected, so a value can never change the structure of the query it lands in.
 - **An explicit `value_format` is required** with `inject: "body_template"`. Character filtering only protects a placeholder that sits inside quotes; a bare one (`WHERE id > {last_id}`) would happily accept `0 OR 1=1`, which contains no forbidden character. Declaring `numeric`, `iso_date` or `iso_datetime` closes that — and a legitimate watermark is always a number or a date.
+
+#### Restricting the templating to part of the body
+
+A body that already uses braces for its own syntax cannot be scanned wholesale: a compact GraphQL query (`{orders{edges{node{id}}}}`) contains `{id}`, which is indistinguishable from a placeholder and fails the run. `template_paths` lists the dotted paths of `body` that carry placeholders; everything else is sent verbatim.
+
+```json
+{
+  "method": "POST",
+  "body": {
+    "query": "query($q: String) { orders(query: $q) { … } }",
+    "variables": {"q": "updated_at:>'{watermark}'"}
+  },
+  "template_paths": ["variables"]
+}
+```
+
+A path listed here must exist in `body` — a typo is a `ConfigError`, not a silently un-templated branch.
+
+### Application errors in a 200
+
+Some APIs — every GraphQL endpoint, and a few SOAP-descended REST ones — report failures inside a successful HTTP response. `errors` declares that envelope so those responses fail the run instead of passing for data:
+
+```json
+{
+  "errors": {
+    "path": "errors",
+    "code_field": "extensions.code",
+    "message_field": "message",
+    "retryable_codes": ["THROTTLED"]
+  }
+}
+```
+
+| Key | Default | Description |
+|---|---|---|
+| `path` | `errors` | Dotted path to the error list (or single error object). Absent or empty ⇒ the response is fine. |
+| `code_field` | `extensions.code` | Dotted path, inside one error, to its machine-readable code. |
+| `message_field` | `message` | Dotted path, inside one error, to its human-readable message. |
+| `retryable_codes` | `[]` | Codes that mean "transient": the request is replayed under the `retry` policy instead of failing the run. |
+
+The defaults follow the GraphQL specification (`errors[].message`, `errors[].extensions`), so a GraphQL source usually only needs `path` and `retryable_codes`. `path` may also resolve to a single error object rather than a list; it is then treated as one error.
+
+Scope and timing:
+
+- **Data calls only.** The token calls of `oauth2_client_credentials` and `token_endpoint` are not covered — they have their own error handling, driven by the HTTP status.
+- **Checked on every page**, before the records are extracted. An error on page 7 of 12 fails the run, and nothing is written: `run_source` accumulates all pages and writes once at the end.
+- **Exercised by `dry_run=True`**, like the rest of the request path — a missing scope surfaces without writing anything.
+
+Without this block, two things go wrong. A **partial** failure — valid `data` next to an `errors` entry, e.g. one field refused by a missing scope — is reported `success` while quietly missing part of what was asked for. A **total** failure surfaces only as a pagination error ("Impossible de localiser les enregistrements"), which says nothing about the actual cause. The API's own message is what ends up in `log_runs`, truncated to 500 characters over at most 3 errors — an error message quoting the whole query would otherwise be stored page after page.
+
+`retryable_codes` is also how throttling is caught on APIs that announce it in the body rather than with a 429 (Shopify's cost-based limiter does exactly that). A `Retry-After` header on such a response is still honored.
+
+## GraphQL endpoints
+
+GraphQL needs no dedicated source type: it is a POST of a JSON body to a single URL. Five generic options do the work, and this section puts them together. The worked example is Shopify's Admin API, but nothing below is Shopify-specific — any Relay connection has the same shape.
+
+| GraphQL concept | Option that covers it |
+|---|---|
+| Single endpoint, POST, `{query, variables}` | `base_url` + `method: "POST"` + `body` |
+| Records under `data.<connection>.edges` | `pagination.items_field` (dotted path) |
+| Each record wrapped in `{cursor, node}` | `pagination.record_field: "node"` |
+| `first` / `after` belong in `variables` | `pagination.params_in: "body"` + `params_path: "variables"` |
+| `pageInfo.hasNextPage` / `endCursor` | `pagination.type: "cursor"` + `has_more_field` / `cursor_field` |
+| Braces in the query vs. `{placeholder}` | `template_paths` |
+| Errors returned with HTTP 200 | `errors` |
+| Cost-based throttling in the body | `errors.retryable_codes: ["THROTTLED"]` |
+
+### Full source
+
+```json
+{
+  "name": "shopify_orders",
+  "base_url": "https://my-shop.myshopify.com/admin/api/2026-07/graphql.json",
+  "method": "POST",
+  "auth": {
+    "type": "api_key_header",
+    "header_name": "X-Shopify-Access-Token",
+    "key": {"keyvault_url": "https://kv.vault.azure.net", "secret_name": "shopify-admin-token"}
+  },
+  "body": {
+    "query": "query Orders($first: Int!, $after: String, $q: String) { orders(first: $first, after: $after, query: $q, sortKey: UPDATED_AT) { edges { node { id name updatedAt } } pageInfo { hasNextPage endCursor } } }",
+    "variables": {"q": "updated_at:>'{watermark}'"}
+  },
+  "template_paths": ["variables"],
+  "pagination": {
+    "type": "cursor",
+    "items_field": "data.orders.edges",
+    "record_field": "node",
+    "cursor_field": "data.orders.pageInfo.endCursor",
+    "has_more_field": "data.orders.pageInfo.hasNextPage",
+    "cursor_param": "after",
+    "limit": 250,
+    "limit_param": "first",
+    "params_in": "body",
+    "params_path": "variables"
+  },
+  "incremental": {
+    "enabled": true,
+    "field": "updatedAt",
+    "inject": "body_template",
+    "initial_value": "1970-01-01T00:00:00Z",
+    "value_format": "iso_datetime"
+  },
+  "errors": {"path": "errors", "retryable_codes": ["THROTTLED"]},
+  "retry": {"max_attempts": 6, "backoff_multiplier": 2},
+  "target_schema": "shopify",
+  "target_table": "orders"
+}
+```
+
+The request bodies this produces:
+
+```jsonc
+// first page — no cursor yet
+{"query": "query Orders(…) {…}", "variables": {"q": "updated_at:>'1970-01-01T00:00:00Z'", "first": 250}}
+// second page
+{"query": "query Orders(…) {…}", "variables": {"q": "updated_at:>'1970-01-01T00:00:00Z'", "first": 250, "after": "eyJsYXN0X2lkIjo…"}}
+```
+
+### Writing the query
+
+- **Declare the variables the pagination injects.** `$first` and `$after` are merged into `variables` at request time, so the query must declare them — but the library never edits the query text. `$first: Int!` is safe because a `limit` is sent on every call; `$after` must stay nullable (`String`), since the first request goes without it.
+- **Sort on the watermark field** (`sortKey: UPDATED_AT` here). Not required, but it makes a failed run resumable at roughly the right place.
+- **Keep the filter in a variable**, not inlined in the query text. That is what makes `template_paths: ["variables"]` sufficient, and it keeps the interpolated watermark under the `value_format` check.
+- **Braces**: with `template_paths` set, the query text is never scanned for placeholders and may be written in any style. Without it, a compact `{id}` would fail the run.
+
+### Nested selections in Delta
+
+A GraphQL selection is a tree; a Delta table is flat. Objects and lists (`customer { id email }`, `lineItems { edges { … } }`) are serialized to **one JSON string column each**, named after the field. Scalars become typed columns. Two consequences:
+
+- Query them downstream with the JSON functions of whatever reads the table; the library does not flatten.
+- To get real columns, ask for scalars in the query (`customer { id }` → still one JSON column, but a shallow one), or split the connection into its own source.
+
+### Common failure modes
+
+| Symptom | Cause |
+|---|---|
+| `Impossible de localiser les enregistrements` | `items_field` missing on a GraphQL source — `data` is an object, so the default probing finds nothing. |
+| `Champ 'data.x.edges' : liste attendue, NoneType reçu` | The connection returned `null` — usually an error in the response the `errors` block would have named. Add it. |
+| `placeholder '{id}' sans variable correspondante` | The query text is being scanned for placeholders: add `template_paths`. |
+| `Champ 'node' absent d'un enregistrement` | `record_field` set on a connection that is not edge-wrapped (some APIs expose `nodes` directly — then drop `record_field` and point `items_field` at `nodes`). |
+| Run `success` with fewer rows than expected | An `errors` entry alongside valid `data`, with no `errors` block declared. |
+| `THROTTLED` even after retries | The cost limiter, not the request rate: lower `limit`, or ask for fewer fields. |
+
+Working notebook, auth to Delta: [examples/shopify_graphql.py](../examples/shopify_graphql.py).
 
 ## `run_source` parameters
 
@@ -322,8 +486,10 @@ The type is selected by `pagination.type`. All strategies accept:
 
 | Common key | Default | Description |
 |---|---|---|
-| `items_field` | auto | Response field containing the record list. By default: a list response is used as-is, otherwise `data`, `items`, `results`, `value` are probed. Explicit error if none found. |
+| `items_field` | auto | Response field containing the record list, as a **dotted path** (`data.orders.edges`). Left out, the probing order is: a response that is already a list is used as-is, otherwise `data`, `items`, `results`, `value`. Explicit error if none is found, or if the configured path is absent or resolves to something other than a list. A response that is already a top-level list short-circuits this key — `items_field` is not applied to it. |
+| `record_field` | absent | Dotted path unwrapped from **each item** of that list. Relay connections (GraphQL) wrap every record in a `{cursor, node}` — `"record_field": "node"` keeps the record. Missing from any item ⇒ explicit error. |
 | `params_in` | `query` | Where pagination and incremental params are sent: `query` (query string) or `body` (merged into the request payload). `body` requires a non-`GET` `method`. |
+| `params_path` | root | With `"params_in": "body"`, dotted path inside `body` under which those params are merged (GraphQL: `variables`). The branch is created if absent. |
 
 ### `offset` — offset/limit
 
@@ -367,13 +533,46 @@ The `params`/`incremental` query params are sent on the first call only — the 
 {"type": "next_link", "next_field": "@odata.nextLink", "items_field": "value"}
 ```
 
-### `cursor` — not implemented (stub)
+### `cursor` — opaque cursor (Relay/GraphQL connections)
 
-Raises `NotImplementedError` (the run ends `failed` with that message).
+| Key | Default | Description |
+|---|---|---|
+| `cursor_param` | **required** | Name of the param carrying the cursor. Sent from the second request onwards — the first goes without it. |
+| `cursor_field` | **required** | Dotted path to the next cursor in the response (`data.orders.pageInfo.endCursor`). |
+| `has_more_field` | absent | Dotted path to a boolean saying whether another page exists (`data.orders.pageInfo.hasNextPage`). |
+| `limit` | absent | Requested page size; only sent if set. |
+| `limit_param` | `limit` | Name of the size param (GraphQL: `first`). |
+
+Stops when: `has_more_field` is false; or, without it, on an empty page or a `null`/absent cursor.
+
+`has_more_field` is worth setting whenever the API provides it. A heavily filtered connection can return an **empty page in the middle** of the results, which every "stop on empty page" heuristic reads as the end. Conversely, a response announcing a next page while carrying no cursor raises rather than truncating — a partial load reported as `success` is worse than a failed run.
+
+A cursor that does not advance between two requests also raises, instead of looping forever.
+
+```json
+{
+  "type": "cursor",
+  "items_field": "data.orders.edges",
+  "record_field": "node",
+  "cursor_field": "data.orders.pageInfo.endCursor",
+  "has_more_field": "data.orders.pageInfo.hasNextPage",
+  "cursor_param": "after",
+  "limit": 250,
+  "limit_param": "first",
+  "params_in": "body",
+  "params_path": "variables"
+}
+```
+
+Full GraphQL source, auth to Delta: [examples/shopify_graphql.py](../examples/shopify_graphql.py).
 
 ### `none` / absent
 
-A single HTTP call, no loop.
+A single HTTP call, no loop. The common keys still apply: `items_field` and `record_field` locate and unwrap the records of that one response, which a nested payload (a GraphQL query returning fewer than one page of results) needs just as much as a paginated one.
+
+```json
+{"type": "none", "items_field": "data.shop.metafields.edges", "record_field": "node"}
+```
 
 > **Offset ceilings.** Some APIs refuse an offset beyond a hard limit (NetSuite stops at 100 000). Past that point, split the source into bounded slices — one run per month or per id range, with the bounds in the query — rather than paging further.
 
@@ -399,7 +598,9 @@ Behavior: the last watermark is read from `<log_schema>.watermark` at run start 
 | `backoff_multiplier` | `1` | Exponential backoff multiplier (tenacity `wait_exponential`). |
 | `max_retry_after_seconds` | `300` | Ceiling on a server-provided `Retry-After` delay. |
 
-Retried: network errors (connection, timeout), HTTP 429 and 5xx. **Not retried**: other 4xx (401, 403, 404…) fail immediately. Applies to data calls; the token call (`oauth2_client_credentials`/`token_endpoint`) is not retried.
+Retried: network errors (connection, timeout), HTTP 429 and 5xx, and application errors whose code appears in [`errors.retryable_codes`](#application-errors-in-a-200). **Not retried**: other 4xx (401, 403, 404…) and any other application error — they fail immediately. Applies to data calls; the token call (`oauth2_client_credentials`/`token_endpoint`) is not retried.
+
+`max_attempts` bounds every one of those causes alike, so an API answering "transient" forever costs at most `max_attempts` calls per page, not an unbounded loop.
 
 When the response carries a `Retry-After` header (seconds or an HTTP date), that delay is used instead of the exponential backoff — APIs with strict governance ban clients that retry earlier than they were told to. The delay is capped at `max_retry_after_seconds`; beyond the cap the wait is truncated and the next attempt will most likely fail, which surfaces as a `failed` run in `log_runs` rather than a notebook hanging for an hour.
 
@@ -411,3 +612,5 @@ Created automatically on first run in `<log_schema>` (default `flume`):
 |---|---|
 | `watermark` | `source_name`, `last_value`, `updated_ts` — one row appended per advance (the current value is the max `updated_ts` per source). |
 | `log_runs` | `run_id`, `source_name`, `start_ts`, `end_ts`, `status`, `rows_loaded`, `error_message` — one row per `run_source` call, success or failure. |
+
+`error_message` holds the exception type and message of whatever failed. When the failure came from an [application error](#application-errors-in-a-200), that message is the API's own, truncated to the first 3 errors and 500 characters — a GraphQL error quotes the failing query in full, and `log_runs` is a table, not a log file. URLs in it are stripped of their query string (see [docs/security.md](security.md)).

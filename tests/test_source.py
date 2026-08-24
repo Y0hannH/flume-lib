@@ -448,6 +448,254 @@ class TestWatermarkInBodyTemplate:
         assert http.instances[-1].calls[0]["params"]["since"] == "1970-01-01"
 
 
+class TestResponseErrors:
+    """Erreurs applicatives renvoyées avec un statut HTTP 200 — la norme en
+    GraphQL."""
+
+    GRAPHQL = {
+        **BASE_CONFIG,
+        "method": "POST",
+        "body": {"query": "{ orders { edges { node { id } } } }"},
+        "pagination": {
+            "type": "none",
+            "items_field": "data.orders.edges",
+            "record_field": "node",
+        },
+        "errors": {"path": "errors", "retryable_codes": ["THROTTLED"]},
+    }
+
+    def test_error_in_a_200_fails_the_run(self, http, delta):
+        http.next_payloads = [{
+            "data": None,
+            "errors": [{
+                "message": "Access denied for orders field",
+                "extensions": {"code": "ACCESS_DENIED"},
+            }],
+        }]
+        result = run_source(self.GRAPHQL, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "failed"
+        assert "Access denied for orders field" in result.error_message
+        assert delta["append"] == []
+
+    def test_partial_error_beside_valid_data_fails_the_run(self, http, delta):
+        """Le cas dangereux : des lignes exploitables *et* une erreur. Sans
+        contrôle, le run passe `success` en ayant perdu une partie des données."""
+        payload = {
+            "data": {"orders": {"edges": [{"node": {"id": 1}}]}},
+            "errors": [{"message": "champ refusé", "extensions": {"code": "X"}}],
+        }
+        http.next_payloads = [payload]
+        result = run_source(self.GRAPHQL, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "failed"
+        assert "champ refusé" in result.error_message
+        assert delta["append"] == []
+
+    def test_without_the_errors_block_the_same_payload_passes_silently(
+        self, http, delta
+    ):
+        """Documente ce que le nouveau bloc 'errors' corrige."""
+        config = {k: v for k, v in self.GRAPHQL.items() if k != "errors"}
+        http.next_payloads = [{
+            "data": {"orders": {"edges": [{"node": {"id": 1}}]}},
+            "errors": [{"message": "champ refusé"}],
+        }]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+        assert result.status == "success"
+
+    def test_empty_errors_list_is_not_an_error(self, http, delta):
+        http.next_payloads = [{
+            "data": {"orders": {"edges": [{"node": {"id": 1}}]}},
+            "errors": [],
+        }]
+        result = run_source(self.GRAPHQL, lakehouse_tables_path=TABLES_PATH)
+        assert result.status == "success", result.error_message
+        assert delta["append"][0]["records"][0]["id"] == 1
+
+    def test_retryable_code_is_replayed(self, http, delta, monkeypatch):
+        monkeypatch.setattr("tenacity.nap.time.sleep", lambda _: None)
+
+        class Throttled(FakeSession):
+            def request(self, method, url, **kwargs):
+                self.calls.append({"method": method, "url": url})
+                if len(self.calls) == 1:
+                    return FakeResponse({
+                        "errors": [{
+                            "message": "Throttled",
+                            "extensions": {"code": "THROTTLED"},
+                        }],
+                    })
+                return FakeResponse(
+                    {"data": {"orders": {"edges": [{"node": {"id": 1}}]}}}
+                )
+
+        monkeypatch.setattr("flume_lib.source.requests.Session", Throttled)
+        Throttled.next_payloads = []
+        result = run_source(self.GRAPHQL, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert result.rows_loaded == 1
+        assert len(http.instances[-1].calls) == 2
+
+    def test_non_retryable_code_is_not_replayed(self, http, delta):
+        http.next_payloads = [
+            {"errors": [{"message": "nope", "extensions": {"code": "ACCESS_DENIED"}}]},
+            {"data": {"orders": {"edges": []}}},
+        ]
+        result = run_source(self.GRAPHQL, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "failed"
+        assert len(http.instances[-1].calls) == 1
+
+    def test_error_detail_is_capped(self, http, delta):
+        http.next_payloads = [
+            {"errors": [{"message": "x" * 5000, "extensions": {"code": "E"}}]}
+        ]
+        result = run_source(self.GRAPHQL, lakehouse_tables_path=TABLES_PATH)
+        assert result.status == "failed"
+        assert len(result.error_message) < 1000
+
+    def test_custom_envelope(self, http, delta):
+        config = {
+            **BASE_CONFIG,
+            "errors": {
+                "path": "response.faults",
+                "message_field": "detail",
+                "code_field": "kind",
+                "retryable_codes": ["BUSY"],
+            },
+        }
+        http.next_payloads = [
+            {"response": {"faults": [{"detail": "boom", "kind": "FATAL"}]}}
+        ]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+        assert result.status == "failed"
+        assert "boom" in result.error_message
+
+
+class TestNestedBodyParams:
+    """`params_path` : pagination imbriquée dans le corps (GraphQL variables)."""
+
+    CONFIG = {
+        **BASE_CONFIG,
+        "method": "POST",
+        "body": {
+            "query": "query($first: Int!, $after: String) { orders { id } }",
+            "variables": {"sort": "ID"},
+        },
+        "pagination": {
+            "type": "cursor",
+            "cursor_param": "after",
+            "cursor_field": "data.orders.pageInfo.endCursor",
+            "has_more_field": "data.orders.pageInfo.hasNextPage",
+            "items_field": "data.orders.edges",
+            "record_field": "node",
+            "limit": 250,
+            "limit_param": "first",
+            "params_in": "body",
+            "params_path": "variables",
+        },
+    }
+
+    @staticmethod
+    def page(ids, end_cursor, has_next):
+        return {"data": {"orders": {
+            "edges": [{"node": {"id": i}} for i in ids],
+            "pageInfo": {"endCursor": end_cursor, "hasNextPage": has_next},
+        }}}
+
+    def test_pagination_params_land_in_variables(self, http, delta):
+        http.next_payloads = [self.page([1], "c1", True), self.page([2], "c2", False)]
+        result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        bodies = [c["json"] for c in http.instances[-1].calls]
+        assert bodies[0]["variables"] == {"sort": "ID", "first": 250}
+        assert bodies[1]["variables"] == {"sort": "ID", "first": 250, "after": "c1"}
+        # la requête elle-même reste intacte à côté des variables
+        assert bodies[0]["query"] == self.CONFIG["body"]["query"]
+
+    def test_records_are_unwrapped_before_the_delta_write(self, http, delta):
+        http.next_payloads = [self.page([1, 2], "c2", False)]
+        run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+        written = delta["append"][0]["records"]
+        assert [r["id"] for r in written] == [1, 2]
+        assert "node" not in written[0]
+
+    def test_missing_variables_branch_is_created(self, http, delta):
+        config = {**self.CONFIG, "body": {"query": "q"}}
+        http.next_payloads = [self.page([1], "c1", False)]
+        run_source(config, lakehouse_tables_path=TABLES_PATH)
+        assert http.instances[-1].calls[0]["json"]["variables"] == {"first": 250}
+
+
+class TestTemplatePaths:
+    """Le corps GraphQL est plein d'accolades : le templating doit pouvoir
+    être restreint aux seules variables."""
+
+    CONFIG = {
+        **BASE_CONFIG,
+        "method": "POST",
+        "body": {
+            # accolades collées : indiscernables d'un placeholder sans restriction
+            "query": "{orders(query:$q){edges{node{id updatedAt}}pageInfo{hasNextPage}}}",
+            "variables": {"q": "updated_at:>'{watermark}'"},
+        },
+        "template_paths": ["variables"],
+        "pagination": {
+            "type": "none",
+            "items_field": "data.orders.edges",
+            "record_field": "node",
+        },
+        "incremental": {
+            "enabled": True,
+            "field": "updatedAt",
+            "inject": "body_template",
+            "initial_value": "1970-01-01T00:00:00Z",
+            "value_format": "iso_datetime",
+        },
+    }
+
+    PAYLOAD = {"data": {"orders": {"edges": [
+        {"node": {"id": 1, "updatedAt": "2026-08-22T09:00:00Z"}}
+    ]}}}
+
+    def test_only_the_declared_branch_is_substituted(self, http, delta):
+        http.next_payloads = [self.PAYLOAD]
+        result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        body = http.instances[-1].calls[0]["json"]
+        assert body["variables"]["q"] == "updated_at:>'1970-01-01T00:00:00Z'"
+        # la requête est repartie telle quelle, accolades comprises
+        assert body["query"] == self.CONFIG["body"]["query"]
+
+    def test_without_template_paths_the_graphql_braces_break_the_run(
+        self, http, delta
+    ):
+        """Justifie l'existence de l'option."""
+        config = {k: v for k, v in self.CONFIG.items() if k != "template_paths"}
+        http.next_payloads = [self.PAYLOAD]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "failed"
+        assert "placeholder" in result.error_message
+
+    def test_watermark_still_advances(self, http, delta):
+        http.next_payloads = [self.PAYLOAD]
+        run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+        assert delta["watermark_write"] == [("s1", "2026-08-22T09:00:00Z")]
+
+    def test_a_hostile_watermark_still_fails_the_run(self, http, delta):
+        delta["watermark_value"] = "2026-08-01T00:00:00Z' OR '1'='1"
+        http.next_payloads = [self.PAYLOAD]
+        result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "failed"
+        assert "interdit" in result.error_message
+
+
 class TestErrorMessagesLeakNothing:
     """error_message est persisté dans log_runs, une table Delta lisible par
     tout le lakehouse. La query string ne doit pas s'y retrouver."""

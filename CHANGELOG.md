@@ -2,6 +2,38 @@
 
 All notable changes to this project are documented here. Versions follow [semantic versioning](https://semver.org/); until 1.0.0, minor versions may contain breaking changes — these are always listed first.
 
+## [0.9.0] — 2026-08-24
+
+GraphQL APIs are now reachable without any endpoint-specific library code. The four additions below are generic; together they cover Relay connections, of which the Shopify Admin API is one — see [examples/shopify_graphql.py](examples/shopify_graphql.py).
+
+### Added
+
+- **`cursor` pagination**, previously a stub. The next cursor is read from the response by dotted path (`cursor_field`) and sent back in `cursor_param`; the first request goes without one. `has_more_field` — the `pageInfo.hasNextPage` of Relay connections — takes precedence over the empty-page heuristic when present, because a heavily filtered connection can return an empty page in the middle of its results. Optional `limit`/`limit_param` for the page size (GraphQL: `first`).
+- **Dotted paths and unwrapping in record extraction.** `items_field` accepts `data.orders.edges`; `record_field` unwraps each item (`node`), the shape every Relay connection uses. An `items_field` that resolves to something other than a list is now an explicit error instead of whatever came next.
+- **`pagination.params_path`**: with `"params_in": "body"`, nests the pagination params under a dotted path of the payload instead of merging them at the root. GraphQL expects the page size and cursor inside `variables`, beside `query` rather than next to it. The branch is created if the body does not carry it.
+- **`errors`**: declares the application-error envelope of APIs that report failures inside a successful HTTP response (`path`, `code_field`, `message_field`, `retryable_codes`), with defaults matching the GraphQL specification. Codes listed in `retryable_codes` are replayed under the `retry` policy — that is how cost-based throttling arrives when the API does not use a 429. A `Retry-After` header on such a response is still honored.
+- **`template_paths`**: restricts `{placeholder}` substitution to the listed dotted paths of `body`. A body that uses braces for its own syntax cannot be scanned wholesale — a compact GraphQL query (`{orders{edges{node{id}}}}`) contains `{id}`, indistinguishable from a placeholder, and failed the run. A listed path must exist in `body`.
+- **`examples/shopify_graphql.py`**: Shopify Admin GraphQL end to end — token in Key Vault, Relay cursor, incremental on `updatedAt` through Shopify's search syntax, monthly backfill slices, and the scope caveat on orders older than 60 days.
+
+### Fixed
+
+- **`items_field` and `record_field` are honored without pagination** (`"type": "none"` or absent). A single-call source against a nested response previously fell back to probing `data`/`items`/`results`/`value` and failed.
+
+### Documentation
+
+- **[docs/configuration.md](docs/configuration.md) gains a GraphQL section**: the option-by-concept mapping, a complete source, the request bodies it actually produces, how to write the query so the injected variables land correctly, how nested selections are stored in Delta, and a table of common failure modes with their cause.
+- **[docs/security.md](docs/security.md) gains "Values that come back from a response"**, covering the three values an API can influence the next request with — the watermark (filtered and format-checked), the cursor (passed as a discrete parameter, never concatenated), and the `next_link` URL. That last one is documented for the first time: `next_link` fetches whatever URL the response provides, on the authenticated session, so a hostile endpoint can redirect the next page to a host of its choosing and receive the auth header. Pre-existing behavior, inherent to the strategy, and not applicable to `offset`/`page`/`cursor`/`none`.
+- **Application errors in `log_runs`** are documented as what they are: text written by the remote API, truncated, landing in a table readable by everyone with lakehouse access.
+
+### Security
+
+- Error messages coming from an API are truncated (3 errors, 500 characters) before reaching `log_runs`. A GraphQL error quotes the failing query in full; stored page after page, that turns a technical table into a copy of the request.
+
+### Known limitations
+
+- An `errors` block is **opt-in**. Without it, behavior is unchanged: a response carrying valid `data` alongside an `errors` entry — one field refused by a missing scope, typically — is still reported `success`, short of part of what was asked for. Existing sources are unaffected; new GraphQL sources should always declare it.
+- Asynchronous bulk-export APIs (Shopify Bulk Operations and equivalents) remain out of scope: they submit a job, poll it and download a JSONL artifact, which does not fit the "one call, one page of JSON" model.
+
 ## [0.8.1] — 2026-08-22
 
 Aucun changement fonctionnel : la bibliothèque installée est identique à la

@@ -322,3 +322,112 @@ class TestBodyTemplateRequiresAnExplicitFormat:
         validate_config(
             cfg(incremental={"enabled": True, "field": "d", "param_name": "since"})
         )
+
+
+class TestErrorsSection:
+    def test_valid_graphql_envelope(self):
+        validate_config(cfg(errors={"path": "errors", "retryable_codes": ["THROTTLED"]}))
+
+    def test_defaults_only_is_valid(self):
+        validate_config(cfg(errors={}))
+
+    def test_unknown_key_raises(self):
+        with pytest.raises(ConfigError, match="retryable_codes"):
+            validate_config(cfg(errors={"retryable_code": ["X"]}))
+
+    def test_non_object_raises(self):
+        with pytest.raises(ConfigError, match="errors"):
+            validate_config(cfg(errors="errors"))
+
+    def test_empty_path_raises(self):
+        with pytest.raises(ConfigError, match="path"):
+            validate_config(cfg(errors={"path": ""}))
+
+    def test_non_list_retryable_codes_raises(self):
+        with pytest.raises(ConfigError, match="retryable_codes"):
+            validate_config(cfg(errors={"retryable_codes": "THROTTLED"}))
+
+
+class TestTemplatePaths:
+    BODY = {"query": "{orders{id}}", "variables": {"q": "updated_at:>'{watermark}'"}}
+
+    def test_valid_path(self):
+        validate_config(cfg(method="POST", body=self.BODY, template_paths=["variables"]))
+
+    def test_nested_path(self):
+        body = {"outer": {"inner": {"q": "{watermark}"}}}
+        validate_config(cfg(method="POST", body=body, template_paths=["outer.inner"]))
+
+    def test_unknown_path_raises(self):
+        with pytest.raises(ConfigError, match="variabels"):
+            validate_config(
+                cfg(method="POST", body=self.BODY, template_paths=["variabels"])
+            )
+
+    def test_path_through_a_non_object_raises(self):
+        with pytest.raises(ConfigError, match="query"):
+            validate_config(
+                cfg(method="POST", body=self.BODY, template_paths=["query.inner"])
+            )
+
+    def test_without_body_raises(self):
+        with pytest.raises(ConfigError, match="body"):
+            validate_config(cfg(template_paths=["variables"]))
+
+    def test_non_list_raises(self):
+        with pytest.raises(ConfigError, match="template_paths"):
+            validate_config(cfg(method="POST", body=self.BODY, template_paths="variables"))
+
+
+class TestCursorPaginationConfig:
+    GRAPHQL_BODY = {"query": "{orders{id}}", "variables": {}}
+
+    def cursor_cfg(self, **overrides):
+        pagination = {
+            "type": "cursor",
+            "cursor_param": "after",
+            "cursor_field": "data.orders.pageInfo.endCursor",
+            "has_more_field": "data.orders.pageInfo.hasNextPage",
+            "items_field": "data.orders.edges",
+            "record_field": "node",
+            "limit": 250,
+            "limit_param": "first",
+            "params_in": "body",
+            "params_path": "variables",
+            **overrides,
+        }
+        return cfg(method="POST", body=self.GRAPHQL_BODY, pagination=pagination)
+
+    def test_full_relay_config_is_valid(self):
+        validate_config(self.cursor_cfg())
+
+    @pytest.mark.parametrize("key", ["cursor_param", "cursor_field"])
+    def test_missing_required_cursor_key_raises(self, key):
+        config = self.cursor_cfg()
+        del config["pagination"][key]
+        with pytest.raises(ConfigError, match=key):
+            validate_config(config)
+
+    def test_unknown_cursor_key_raises(self):
+        with pytest.raises(ConfigError, match="cursor_field"):
+            validate_config(self.cursor_cfg(cursor_fields="x"))
+
+    def test_params_path_requires_params_in_body(self):
+        with pytest.raises(ConfigError, match="params_in"):
+            validate_config(self.cursor_cfg(params_in="query"))
+
+    def test_params_path_through_a_non_object_raises(self):
+        config = self.cursor_cfg(params_path="query")
+        with pytest.raises(ConfigError, match="params_path"):
+            validate_config(config)
+
+    def test_params_path_may_point_at_an_absent_branch(self):
+        """La branche est créée à l'envoi si le corps ne la porte pas encore."""
+        config = self.cursor_cfg()
+        config["body"] = {"query": "{orders{id}}"}
+        validate_config(config)
+
+    def test_record_field_is_accepted_by_every_strategy(self):
+        validate_config(
+            cfg(pagination={"type": "offset", "record_field": "node"})
+        )

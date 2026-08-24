@@ -12,7 +12,7 @@ Threat model and security posture of flume-lib. Audience: anyone deploying the l
 
 **Untrusted:**
 
-- Remote API responses (data, headers, pagination fields). They are parsed defensively: pagination stops are bounded by explicit conditions, record structures are serialized, and nothing from a response is ever executed or used to build a filesystem path. The one value that travels back out to the API is the watermark, and it is validated before it does (see [Request bodies](#request-bodies)).
+- Remote API responses (data, headers, pagination fields, application errors). They are parsed defensively: pagination stops are bounded by explicit conditions, record structures are serialized, and nothing from a response is ever executed or used to build a filesystem path. Three things do travel back out — see [Values that come back from a response](#values-that-come-back-from-a-response).
 - GitHub and PyPI **at runtime** — by design they are not on the execution path when using the recommended install.
 
 ## Supply chain
@@ -31,6 +31,27 @@ Threat model and security posture of flume-lib. Audience: anyone deploying the l
 - **URLs in error messages are stripped of their query string.** `log_runs` is a Delta table readable by everyone with lakehouse access — a wider audience than the configuration file — and a full URL would copy the query params into it. `RunResult.rows_loaded` still shows how far the run got.
 - `token_endpoint` refuses secret references in the request body when `method` is `GET` — query parameters end up in server and proxy logs. Use `POST`.
 
+## Values that come back from a response
+
+Three values read from an API response are used to build the next request. They are the only paths by which an API influences what the library does next.
+
+| Value | Where it goes | What bounds it |
+|---|---|---|
+| **Watermark** (`incremental.field`) | Interpolated into `body`/`params` | Character filter + mandatory `value_format` — see [Request bodies](#request-bodies). |
+| **Cursor** (`pagination.cursor_field`) | Sent back as a query param or a JSON value under `params_path` | Never concatenated into a string: it is passed as a discrete parameter value, URL-encoded by `requests` or serialized as JSON, so it cannot alter the structure of the request. A cursor that does not advance, or that is missing while the API announces another page, raises instead of looping or truncating. |
+| **Next-page URL** (`pagination.next_field`) | Fetched directly, with the session's auth headers | ⚠️ **Only the API's own honesty.** See below. |
+
+**`next_link` follows a URL chosen by the API.** The `next_link` strategy requests whatever URL the response puts in `next_field`, on the same authenticated session — so a compromised or hostile endpoint can point the next page at a host it controls and receive the `Authorization` header with it. There is currently no host allowlist. This is inherent to the strategy, not new, and it does not apply to `offset`, `page`, `cursor` or `none`, which only ever call `base_url`. If the API is not fully trusted, prefer a strategy that keeps the URL under your control.
+
+## Application errors in log_runs
+
+When a source declares an [`errors`](configuration.md#application-errors-in-a-200) block, the message an API returns in a successful HTTP response is persisted verbatim into `log_runs.error_message`, a Delta table readable by everyone with lakehouse access. Two bounds apply:
+
+- **Truncation**: at most the first 3 errors, 500 characters total. A GraphQL error quotes the failing query and its position; without a cap it would be stored page after page, turning a technical table into a copy of the request.
+- **No response bodies otherwise.** Only the declared `message_field` is read — the rest of the payload, including the data, never reaches the logs.
+
+What the library cannot do is judge the *content* of that message: it is written by the remote API. An API that echoed a credential back in an error message would put it in `log_runs`. That is a reason to treat `log_runs` as readable-by-many (it already is) rather than to distrust the feature — without it, the same failure is simply invisible.
+
 ## Request bodies
 
 `incremental.inject: "body_template"` interpolates the watermark into strings of `body` — typically into an SQL `WHERE` clause. Two things bound that:
@@ -45,7 +66,7 @@ A rejected watermark fails the run before any HTTP call, and the failure lands i
 
 - TLS certificate verification is always on. There is deliberately **no option to disable it**.
 - Every HTTP call has a timeout (data calls: `timeout_seconds`, default 60 s; token calls: default 30 s).
-- Retries are bounded (`max_attempts`, default 3) and only for network errors, HTTP 429 and 5xx. Auth failures (401/403) fail immediately and are never retried, so a misconfiguration cannot hammer an IdP.
+- Retries are bounded (`max_attempts`, default 3) and only for network errors, HTTP 429/5xx, and application error codes the configuration explicitly lists in `errors.retryable_codes`. Auth failures (401/403) fail immediately and are never retried, so a misconfiguration cannot hammer an IdP. The retryable codes come from the configuration, not from the response: an API cannot declare its own errors retryable, and even a listed code is capped by `max_attempts`.
 - A `Retry-After` header from the server takes precedence over the local backoff, so the library does not retry earlier than it was told to. The delay a server can impose is itself capped (`retry.max_retry_after_seconds`, default 300 s) — a hostile or broken server cannot park a notebook for hours.
 - `oauth1` signs each request with HMAC over the method, URL and query params, with a fresh nonce and timestamp per request; credentials are never sent on the wire.
 

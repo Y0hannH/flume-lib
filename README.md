@@ -2,7 +2,7 @@
 
 Generic API ingestion accelerator for **Microsoft Fabric Python notebooks** (non-Spark). Pure Python: Delta writes via [delta-rs](https://github.com/delta-io/delta-rs) (`deltalake`), no PySpark dependency.
 
-Point it at a JSON list of API sources; it handles authentication (Key Vault-backed secrets, OAuth2 service principals, custom login endpoints), pagination, incremental loading with watermarks, bounded retries, and writes everything — data and run logs — as Delta tables in a schema-enabled lakehouse.
+Point it at a JSON list of API sources; it handles authentication (Key Vault-backed secrets, OAuth2 service principals, OAuth 1.0a signing, custom login endpoints), pagination (offset, page, next-link, cursor), incremental loading with watermarks, bounded retries, and writes everything — data and run logs — as Delta tables in a schema-enabled lakehouse. REST and GraphQL endpoints are both covered by the same generic options — no per-API code.
 
 ## Requirements
 
@@ -30,7 +30,7 @@ No code is fetched from GitHub or PyPI at runtime — the notebook installs exac
 3. In the notebook:
 
    ```python
-   %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.8.0
+   %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.9.0
    ```
 
 `--no-index` guarantees pip resolves only from that folder — nothing is fetched from PyPI or GitHub. The folder layout is entirely up to you: any path works as long as the same path is passed to `--find-links`.
@@ -144,9 +144,11 @@ Beyond authentication, `headers` adds fixed headers to every data call (literal 
 | `offset` | Offset/limit query params; stops on empty or partial page |
 | `page` | Page number; total page count read from a response header (`total_pages_header`) or stop on empty/partial page |
 | `next_link` | Follows a next-page URL from the response body (e.g. `@odata.nextLink`) |
-| `cursor` | Not implemented (stub) |
+| `cursor` | Opaque cursor read from the response; `has_more_field` covers Relay/GraphQL connections |
 
-Data endpoints can be `GET` (default) or `POST`/`PUT`/`PATCH` via `method` + `body`; `pagination.params_in` decides whether pagination params go to the query string or into the request payload.
+Records are located with `items_field` (a dotted path — `data.orders.edges`) and, where each item is a wrapper, unwrapped with `record_field` (`node`).
+
+Data endpoints can be `GET` (default) or `POST`/`PUT`/`PATCH` via `method` + `body`; `pagination.params_in` decides whether pagination params go to the query string or into the request payload, and `params_path` where inside that payload (GraphQL: `variables`).
 
 Some APIs cap how far an offset may go (NetSuite refuses past 100 000). Past that, split the source into bounded slices — one run per month or per id range — rather than paging further; see [examples/netsuite_suiteql.py](examples/netsuite_suiteql.py).
 
@@ -161,6 +163,24 @@ With `"inject": "body_template"` the watermark is substituted into the `{placeho
 Exponential backoff via `tenacity` on network errors and HTTP 429/5xx, driven by `retry.max_attempts` (default 3) and `retry.backoff_multiplier` (default 1). Other 4xx fail immediately.
 
 A `Retry-After` header on the response overrides the backoff — retrying earlier than a server asked is what gets a client banned on APIs with strict governance. Capped by `retry.max_retry_after_seconds` (default 300).
+
+### Application errors in a 200
+
+GraphQL endpoints — and a few REST ones — report failures inside a successful HTTP response. The optional `errors` block declares that envelope (`path`, `code_field`, `message_field`), so such a response fails the run with the API's own message instead of passing for data; `retryable_codes` replays the ones the API calls transient, which is how cost-based throttling arrives when it is not a 429. Without it, a partial failure — valid rows *and* an error — is reported `success`, short of part of what was asked for.
+
+### GraphQL endpoints
+
+There is no GraphQL source type — a GraphQL endpoint is a POST of `{query, variables}` to a single URL, and five generic options cover it:
+
+| GraphQL concept | Option |
+|---|---|
+| Records under `data.<connection>.edges`, each wrapped in `{cursor, node}` | `items_field` (dotted) + `record_field` |
+| `first`/`after` belong inside `variables` | `params_in: "body"` + `params_path: "variables"` |
+| `pageInfo.hasNextPage` / `endCursor` | `pagination.type: "cursor"` + `has_more_field` / `cursor_field` |
+| Braces in the query vs. `{placeholder}` markers | `template_paths` |
+| Errors and throttling returned with HTTP 200 | `errors` + `retryable_codes` |
+
+Full walkthrough with the request bodies it produces, how to write the query, how nested selections land in Delta, and a table of common failure modes: [docs/configuration.md#graphql-endpoints](docs/configuration.md#graphql-endpoints). Working notebook: [examples/shopify_graphql.py](examples/shopify_graphql.py).
 
 ## Delta writes in Fabric (OneLake)
 
@@ -215,7 +235,8 @@ Version history: [CHANGELOG.md](CHANGELOG.md).
 ## Out of scope
 
 - Client-side scaffolding/installation CLI
-- Cursor pagination (stub)
+- Asynchronous bulk-export APIs (submit a job, poll it, download a JSONL/CSV artifact — Shopify Bulk Operations, NetSuite saved-search exports). The whole library assumes one HTTP call returns one page of JSON.
+- Streaming to Delta: every page of a run is accumulated in memory before a single write. Split large loads into bounded slices.
 
 ## License
 

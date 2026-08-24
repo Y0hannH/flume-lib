@@ -18,9 +18,9 @@ from tenacity import (
 from flume_lib._delta import append_records, resolve_lakehouse_tables_path, table_uri
 from flume_lib.auth import build_auth
 from flume_lib.logging_ import write_log_run
-from flume_lib.pagination import paginate
+from flume_lib.pagination import _MISSING, get_path, paginate
 from flume_lib.templating import check_value, render
-from flume_lib.validation import validate_config
+from flume_lib.validation import ConfigError, validate_config
 from flume_lib.watermark import read_watermark, write_watermark
 
 DEFAULT_LAKEHOUSE_TABLES_PATH = "/lakehouse/default/Tables"
@@ -42,13 +42,42 @@ LINEAGE_INGESTED_AT = "_flume_ingested_at"
 
 DRY_RUN_SAMPLE_SIZE = 3
 
+# Erreurs applicatives : bornes de ce qui part dans log_runs. Le message vient
+# de l'API et peut être volumineux (une erreur GraphQL recopie souvent la
+# requête et sa position) — inutile de le stocker en entier ligne après ligne.
+MAX_ERRORS_REPORTED = 3
+MAX_ERROR_DETAIL_CHARS = 500
 
-class RetryableHTTPError(Exception):
+DEFAULT_ERRORS_PATH = "errors"
+# Formes par défaut de la spécification GraphQL : `errors[].message` et
+# `errors[].extensions`. Surchargeable pour toute autre enveloppe d'erreur.
+DEFAULT_ERROR_MESSAGE_FIELD = "message"
+DEFAULT_ERROR_CODE_FIELD = "extensions.code"
+
+
+class RetryableError(Exception):
+    """Erreur transitoire : la requête sera rejouée. `retry_after`, quand il
+    est renseigné, prime sur le backoff exponentiel."""
+
+    def __init__(self, message: str, retry_after: float | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+class RetryableHTTPError(RetryableError):
     def __init__(self, status_code: int, url: str, retry_after: float | None = None):
         detail = f" (Retry-After: {retry_after:g}s)" if retry_after is not None else ""
-        super().__init__(f"HTTP {status_code} sur {url}{detail}")
+        super().__init__(f"HTTP {status_code} sur {url}{detail}", retry_after)
         self.status_code = status_code
-        self.retry_after = retry_after
+
+
+class APIError(Exception):
+    """Erreur applicative renvoyée avec un statut HTTP de succès — le cas
+    normal en GraphQL, où `errors` cohabite avec un 200 et `data: null`."""
+
+
+class RetryableAPIError(RetryableError):
+    """Même chose, mais annoncée comme transitoire par l'API (throttling)."""
 
 
 def _safe_url(url: str) -> str:
@@ -94,7 +123,7 @@ def _build_wait(retry_config: dict):
     def wait(retry_state):
         outcome = retry_state.outcome
         exc = outcome.exception() if outcome is not None else None
-        if isinstance(exc, RetryableHTTPError) and exc.retry_after is not None:
+        if isinstance(exc, RetryableError) and exc.retry_after is not None:
             return min(exc.retry_after, cap)
         return fallback(retry_state)
 
@@ -104,7 +133,7 @@ def _build_wait(retry_config: dict):
 _RETRYABLE_EXCEPTIONS = (
     requests.ConnectionError,
     requests.Timeout,
-    RetryableHTTPError,
+    RetryableError,
 )
 
 
@@ -125,14 +154,109 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _check_response_errors(
+    payload, errors_config: dict | None, url: str, retry_after: float | None = None
+) -> None:
+    """Détecte une erreur applicative transportée par une réponse au statut
+    HTTP de succès. Sans ce contrôle, une erreur partielle — en GraphQL, un
+    `data` exploitable accompagné d'un `errors` (champ refusé par un scope
+    manquant, par exemple) — donne un run `success` amputé d'une partie des
+    données, sans le moindre signal ; une erreur totale, elle, ne se manifeste
+    que par un message de pagination trompeur au lieu de celui de l'API.
+
+    Les codes listés dans `retryable_codes` déclenchent un rejeu plutôt qu'un
+    échec : c'est par là qu'arrive le throttling des APIs qui l'annoncent dans
+    le corps au lieu d'un 429."""
+    if not errors_config:
+        return
+    errors = get_path(payload, errors_config.get("path", DEFAULT_ERRORS_PATH))
+    if errors is _MISSING or not errors:
+        return
+    if not isinstance(errors, list):
+        # certaines APIs ne renvoient qu'une erreur, sans l'envelopper
+        errors = [errors]
+
+    code_field = errors_config.get("code_field", DEFAULT_ERROR_CODE_FIELD)
+    message_field = errors_config.get("message_field", DEFAULT_ERROR_MESSAGE_FIELD)
+
+    def _field(error, path):
+        value = get_path(error, path) if isinstance(error, dict) else _MISSING
+        return None if value is _MISSING else value
+
+    retryable_codes = errors_config.get("retryable_codes") or []
+    codes = [_field(e, code_field) for e in errors]
+    messages = [
+        str(_field(e, message_field) or e) for e in errors[:MAX_ERRORS_REPORTED]
+    ]
+    detail = " | ".join(messages)[:MAX_ERROR_DETAIL_CHARS]
+    summary = f"{len(errors)} erreur(s) applicative(s) sur {url} : {detail}"
+
+    if any(code in retryable_codes for code in codes if code is not None):
+        raise RetryableAPIError(summary, retry_after)
+    raise APIError(summary)
+
+
+def _merge_params_into_body(body: dict, params: dict, params_path: str | None) -> dict:
+    """Fusionne les paramètres de pagination dans le corps de la requête. À la
+    racine par défaut ; sous `params_path` quand l'API les attend imbriqués —
+    GraphQL veut curseur et taille de page à l'intérieur de `variables`, pas à
+    la racine aux côtés de `query`."""
+    if not params_path:
+        return {**body, **params}
+    merged = dict(body)
+    node = merged
+    parts = params_path.split(".")
+    for part in parts[:-1]:
+        child = dict(node.get(part) or {})
+        node[part] = child
+        node = child
+    last = parts[-1]
+    node[last] = {**(node.get(last) or {}), **params}
+    return merged
+
+
+def _render_body(body, variables: dict, template_paths: list | None):
+    """Applique le templating au corps de la requête. Sans `template_paths`,
+    tout le corps est parcouru. Avec, seules les branches désignées le sont —
+    nécessaire en GraphQL : une requête compacte (`{orders{edges{node{id}}}}`)
+    contient des `{id}` qu'un scan global prendrait pour des placeholders et
+    ferait échouer le run."""
+    if not variables or not template_paths:
+        return render(body, variables)
+    rendered = body
+    for path in template_paths:
+        rendered = _render_at_path(rendered, path.split("."), variables, path)
+    return rendered
+
+
+def _render_at_path(container, parts: list[str], variables: dict, full_path: str):
+    head, *rest = parts
+    if not isinstance(container, dict) or head not in container:
+        raise ConfigError(
+            f"template_paths : chemin '{full_path}' introuvable dans 'body'"
+        )
+    updated = dict(container)
+    updated[head] = (
+        render(container[head], variables)
+        if not rest
+        else _render_at_path(container[head], rest, variables, full_path)
+    )
+    return updated
+
+
 def _build_fetch_page(config: dict, variables: dict | None = None):
     auth_headers, signer = build_auth(config.get("auth"))
     retry_config = config.get("retry", {})
     timeout = config.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
     method = str(config.get("method", "GET")).upper()
-    base_body = render(config.get("body", {}), variables or {})
+    base_body = _render_body(
+        config.get("body", {}), variables or {}, config.get("template_paths")
+    )
     body_format = config.get("body_format", "json")
-    params_in = (config.get("pagination") or {}).get("params_in", "query")
+    pagination_config = config.get("pagination") or {}
+    params_in = pagination_config.get("params_in", "query")
+    params_path = pagination_config.get("params_path")
+    errors_config = config.get("errors")
     retryer = Retrying(
         stop=stop_after_attempt(retry_config.get("max_attempts", 3)),
         wait=_build_wait(retry_config),
@@ -152,24 +276,23 @@ def _build_fetch_page(config: dict, variables: dict | None = None):
         if method == "GET":
             kwargs["params"] = params
         elif params_in == "body":
-            kwargs[body_key] = {**base_body, **params}
+            kwargs[body_key] = _merge_params_into_body(base_body, params, params_path)
         else:
             kwargs["params"] = params
             kwargs[body_key] = dict(base_body)
         response = session.request(method, url, **kwargs)
+        retry_after = _parse_retry_after(response.headers.get("Retry-After"))
         if response.status_code == 429 or response.status_code >= 500:
-            raise RetryableHTTPError(
-                response.status_code,
-                _safe_url(url),
-                _parse_retry_after(response.headers.get("Retry-After")),
-            )
+            raise RetryableHTTPError(response.status_code, _safe_url(url), retry_after)
         if response.status_code >= 400:
             raise requests.HTTPError(
                 f"HTTP {response.status_code} sur {_safe_url(url)}",
                 response=response,
             )
+        payload = response.json()
+        _check_response_errors(payload, errors_config, _safe_url(url), retry_after)
         # headers requis par certaines stratégies (ex. total de pages)
-        return response.json(), response.headers
+        return payload, response.headers
 
     def fetch_page(url: str, params: dict):
         return retryer(_request, url, params)
@@ -204,6 +327,12 @@ def run_source(
     'body_template', le watermark est interpolé dans les placeholders {nom} de
     config['body'] au lieu d'être ajouté en query string — indispensable pour
     les APIs SQL-over-REST où le filtre vit dans la requête elle-même.
+    config['template_paths'] restreint ce templating à certaines branches du
+    corps, indispensable quand celui-ci contient déjà des accolades (GraphQL).
+
+    config['errors'] déclare l'enveloppe d'erreur applicative des APIs qui
+    répondent 200 avec l'erreur dans le corps — sans elle, un tel run finirait
+    'success' avec 0 ligne et aucun message.
 
     Cible exclusivement des lakehouses avec schémas : les données vont dans
     config['target_schema'] (requis), les tables techniques watermark et

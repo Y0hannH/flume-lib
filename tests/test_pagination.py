@@ -37,6 +37,34 @@ class TestExtractRecords:
         with pytest.raises(PaginationError):
             extract_records({"foo": "bar"})
 
+    def test_dotted_items_field(self):
+        payload = {"data": {"orders": {"edges": [{"node": {"id": 1}}]}}}
+        assert extract_records(payload, "data.orders.edges") == [{"node": {"id": 1}}]
+
+    def test_missing_dotted_path_raises(self):
+        payload = {"data": {"orders": {}}}
+        with pytest.raises(PaginationError, match="data.orders.edges"):
+            extract_records(payload, "data.orders.edges")
+
+    def test_items_field_pointing_at_a_non_list_raises(self):
+        # cas GraphQL typique : 'data' est un objet, pas une liste
+        with pytest.raises(PaginationError, match="liste attendue"):
+            extract_records({"data": {"orders": {}}}, "data")
+
+    def test_record_field_unwraps_each_item(self):
+        payload = {"data": {"orders": {"edges": [
+            {"cursor": "c1", "node": {"id": 1}},
+            {"cursor": "c2", "node": {"id": 2}},
+        ]}}}
+        assert extract_records(payload, "data.orders.edges", "node") == [
+            {"id": 1}, {"id": 2}
+        ]
+
+    def test_record_field_absent_from_an_item_raises(self):
+        payload = {"rows": [{"node": {"id": 1}}, {"autre": {}}]}
+        with pytest.raises(PaginationError, match="record_field"):
+            extract_records(payload, "rows", "node")
+
 
 class TestOffsetPagination:
     CONFIG = {"type": "offset", "limit": 2, "limit_param": "limit", "offset_param": "offset"}
@@ -161,6 +189,112 @@ class TestPagePagination:
         assert len(fetch.calls) == 2
 
 
+class TestCursorPagination:
+    """Forme Relay/GraphQL : enregistrements sous un chemin pointé, enveloppés
+    dans des edges, curseur et hasNextPage dans pageInfo."""
+
+    CONFIG = {
+        "type": "cursor",
+        "cursor_param": "after",
+        "cursor_field": "data.orders.pageInfo.endCursor",
+        "has_more_field": "data.orders.pageInfo.hasNextPage",
+        "items_field": "data.orders.edges",
+        "record_field": "node",
+        "limit": 250,
+        "limit_param": "first",
+    }
+
+    @staticmethod
+    def page(ids, end_cursor, has_next):
+        return {"data": {"orders": {
+            "edges": [{"cursor": f"c{i}", "node": {"id": i}} for i in ids],
+            "pageInfo": {"endCursor": end_cursor, "hasNextPage": has_next},
+        }}}
+
+    def test_follows_the_cursor_until_has_next_page_is_false(self):
+        fetch = make_fetch([
+            self.page([1, 2], "c2", True),
+            self.page([3], "c3", False),
+        ])
+        pages = list(paginate(fetch, "http://api/gql", {}, self.CONFIG))
+
+        assert pages == [[{"id": 1}, {"id": 2}], [{"id": 3}]]
+        # première requête sans curseur, suivante avec celui de la réponse
+        assert [c[1] for c in fetch.calls] == [
+            {"first": 250},
+            {"first": 250, "after": "c2"},
+        ]
+
+    def test_preserves_base_params(self):
+        fetch = make_fetch([self.page([1], "c1", False)])
+        list(paginate(fetch, "http://api/gql", {"query": "x"}, self.CONFIG))
+        assert fetch.calls[0][1] == {"query": "x", "first": 250}
+
+    def test_empty_page_does_not_end_the_run_when_has_next_page_is_true(self):
+        """Une connexion très filtrée peut rendre une page vide au milieu."""
+        fetch = make_fetch([
+            self.page([], "c0", True),
+            self.page([7], "c7", False),
+        ])
+        pages = list(paginate(fetch, "http://api/gql", {}, self.CONFIG))
+        assert pages == [[{"id": 7}]]
+        assert len(fetch.calls) == 2
+
+    def test_without_has_more_field_stops_on_empty_page(self):
+        config = {k: v for k, v in self.CONFIG.items() if k != "has_more_field"}
+        fetch = make_fetch([
+            self.page([1], "c1", True),
+            self.page([], None, True),
+        ])
+        pages = list(paginate(fetch, "http://api/gql", {}, config))
+        assert pages == [[{"id": 1}]]
+
+    def test_without_has_more_field_stops_when_cursor_is_null(self):
+        config = {k: v for k, v in self.CONFIG.items() if k != "has_more_field"}
+        fetch = make_fetch([self.page([1], None, True)])
+        pages = list(paginate(fetch, "http://api/gql", {}, config))
+        assert pages == [[{"id": 1}]]
+        assert len(fetch.calls) == 1
+
+    def test_missing_has_more_field_raises(self):
+        fetch = make_fetch([{"data": {"orders": {"edges": [], "pageInfo": {}}}}])
+        with pytest.raises(PaginationError, match="hasNextPage"):
+            list(paginate(fetch, "http://api/gql", {}, self.CONFIG))
+
+    def test_announced_next_page_without_cursor_raises(self):
+        """Tronquer ici passerait pour un succès partiel silencieux."""
+        payload = {"data": {"orders": {
+            "edges": [{"node": {"id": 1}}],
+            "pageInfo": {"hasNextPage": True},
+        }}}
+        fetch = make_fetch([payload])
+        with pytest.raises(PaginationError, match="annonce une page suivante"):
+            list(paginate(fetch, "http://api/gql", {}, self.CONFIG))
+
+    def test_a_stalled_cursor_raises_instead_of_looping(self):
+        fetch = make_fetch([
+            self.page([1], "c1", True),
+            self.page([1], "c1", True),
+        ])
+        with pytest.raises(PaginationError, match="ne progresse pas"):
+            list(paginate(fetch, "http://api/gql", {}, self.CONFIG))
+
+    def test_limit_is_optional(self):
+        config = {
+            "type": "cursor",
+            "cursor_param": "after",
+            "cursor_field": "next_cursor",
+            "items_field": "items",
+        }
+        fetch = make_fetch([{"items": [{"id": 1}], "next_cursor": None}])
+        list(paginate(fetch, "http://api/x", {}, config))
+        assert fetch.calls[0][1] == {}
+
+    def test_missing_cursor_keys_raise(self):
+        with pytest.raises(PaginationError, match="cursor_param"):
+            list(paginate(make_fetch([]), "http://api/x", {}, {"type": "cursor"}))
+
+
 class TestStrategySelection:
     def test_no_pagination_single_call(self):
         fetch = make_fetch([[{"id": 1}]])
@@ -172,6 +306,14 @@ class TestStrategySelection:
         with pytest.raises(PaginationError):
             list(paginate(make_fetch([]), "http://api/x", {}, {"type": "zigzag"}))
 
-    def test_cursor_is_stub(self):
-        with pytest.raises(NotImplementedError):
-            list(paginate(make_fetch([]), "http://api/x", {}, {"type": "cursor"}))
+    def test_single_call_honors_items_field(self):
+        """Sans pagination, une réponse GraphQL reste imbriquée."""
+        payload = {"data": {"shop": {"products": {"edges": [{"node": {"id": 1}}]}}}}
+        fetch = make_fetch([payload])
+        config = {
+            "type": "none",
+            "items_field": "data.shop.products.edges",
+            "record_field": "node",
+        }
+        pages = list(paginate(fetch, "http://api/gql", {}, config))
+        assert pages == [[{"id": 1}]]

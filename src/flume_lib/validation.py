@@ -15,6 +15,7 @@ _REQUIRED = ("base_url", "target_schema", "target_table")
 _OPTIONAL = (
     "name", "params", "auth", "pagination", "incremental", "retry",
     "timeout_seconds", "method", "body", "body_format", "headers",
+    "errors", "template_paths",
 )
 
 # Clés autorisées par type d'auth. Les formes historiques *_env_var sont
@@ -63,7 +64,7 @@ _AUTH_REQUIRED = {
 }
 
 # Clés acceptées par toutes les stratégies de pagination
-_PAGINATION_COMMON = ("items_field", "params_in")
+_PAGINATION_COMMON = ("items_field", "record_field", "params_in", "params_path")
 _PAGINATION_KEYS = {
     "none": (),
     "offset": ("limit", "limit_param", "offset_param"),
@@ -72,8 +73,12 @@ _PAGINATION_KEYS = {
         "total_pages_header",
     ),
     "next_link": ("next_field",),
-    "cursor": ("cursor_param", "cursor_field"),
+    "cursor": (
+        "cursor_param", "cursor_field", "has_more_field", "limit", "limit_param",
+    ),
 }
+
+_ERRORS_KEYS = ("path", "code_field", "message_field", "retryable_codes")
 
 _INCREMENTAL_KEYS = (
     "enabled", "field", "param_name", "inject", "placeholder",
@@ -101,6 +106,29 @@ def _check_required_groups(section: str, config: dict, groups) -> None:
         if not any(key in config for key in group):
             names = " ou ".join(f"'{k}'" for k in group)
             raise ConfigError(f"{section} : {names} requis")
+
+
+def _resolve_body_path(section: str, body, path: str, required: bool):
+    """Suit un chemin pointé dans `body` et retourne la valeur atteinte, ou
+    None si le chemin s'interrompt et que ce n'est pas une erreur. Traverser
+    autre chose qu'un objet est toujours une erreur : le chemin ne décrit pas
+    la config qu'on lui donne."""
+    parts = path.split(".")
+    node = body
+    for depth, part in enumerate(parts):
+        if not isinstance(node, dict):
+            prefix = ".".join(parts[:depth]) or "body"
+            raise ConfigError(
+                f"{section} : '{prefix}' n'est pas un objet dans 'body'"
+            )
+        if part not in node:
+            if required:
+                raise ConfigError(
+                    f"{section} : chemin '{path}' introuvable dans 'body'"
+                )
+            return None
+        node = node[part]
+    return node
 
 
 def _check_type(section: str, config: dict, allowed_types: dict, default: str):
@@ -144,6 +172,36 @@ def validate_config(config: dict) -> None:
                     f"headers : '{key}' doit être une chaîne littérale — pour un "
                     "credential, utiliser 'auth' (api_key_header, bearer_token…)"
                 )
+
+    errors_config = config.get("errors")
+    if errors_config is not None:
+        if not isinstance(errors_config, dict):
+            raise ConfigError("errors : doit être un objet")
+        _check_unknown("errors", errors_config, _ERRORS_KEYS)
+        for key in ("path", "code_field", "message_field"):
+            if key in errors_config and not (
+                isinstance(errors_config[key], str) and errors_config[key]
+            ):
+                raise ConfigError(f"errors : '{key}' doit être une chaîne non vide")
+        codes = errors_config.get("retryable_codes")
+        if codes is not None and not isinstance(codes, (list, tuple)):
+            raise ConfigError("errors : 'retryable_codes' doit être une liste")
+
+    template_paths = config.get("template_paths")
+    if template_paths is not None:
+        if not isinstance(template_paths, (list, tuple)) or not all(
+            isinstance(path, str) and path for path in template_paths
+        ):
+            raise ConfigError(
+                "template_paths : doit être une liste de chemins non vides"
+            )
+        if not isinstance(config.get("body"), dict):
+            raise ConfigError(
+                "template_paths : ne restreint que le templating de 'body', "
+                "absent de la config"
+            )
+        for path in template_paths:
+            _resolve_body_path("template_paths", config["body"], path, required=True)
 
     auth = config.get("auth")
     if auth is not None:
@@ -194,6 +252,33 @@ def validate_config(config: dict) -> None:
             raise ConfigError(
                 "pagination : \"params_in\": \"body\" nécessite une méthode POST"
             )
+
+        params_path = pagination.get("params_path")
+        if params_path is not None:
+            if not isinstance(params_path, str) or not params_path:
+                raise ConfigError(
+                    "pagination : 'params_path' doit être un chemin non vide"
+                )
+            if params_in != "body":
+                raise ConfigError(
+                    "pagination : 'params_path' imbrique les paramètres dans le "
+                    "corps et nécessite donc \"params_in\": \"body\""
+                )
+            target = _resolve_body_path(
+                "pagination", config.get("body") or {}, params_path, required=False
+            )
+            if target is not None and not isinstance(target, dict):
+                raise ConfigError(
+                    f"pagination : 'params_path' désigne '{params_path}', qui "
+                    "n'est pas un objet dans 'body'"
+                )
+
+        if pagination_type == "cursor":
+            for key in ("cursor_param", "cursor_field"):
+                if not pagination.get(key):
+                    raise ConfigError(
+                        f"pagination : '{key}' requis avec \"type\": \"cursor\""
+                    )
 
     incremental = config.get("incremental")
     if incremental is not None:
