@@ -9,11 +9,18 @@ All notable changes to this project are documented here. Versions follow [semant
 - **`scripts/verify_wheels.py`**: verifies a wheel batch twice over — every file matches `SHA256SUMS.txt` (catches a truncated or corrupted transfer, no network required, so it runs on the lakehouse side) and every file matches the digest **PyPI publishes** for that name and version (catches an altered mirror or a substituted file). A wheel present but missing from `SHA256SUMS.txt` is reported too — it would be covered by no digest at all.
 - **`scripts/audit_dependencies.py`**: queries [OSV.dev](https://osv.dev) for known vulnerabilities, either over the installed runtime closure or over a specific wheel batch. Exits non-zero when a vulnerability is known **and** when the check could not run — a check that did not execute is not a check that passed.
 - **`audit` CI job**, on every push and pull request, and **every Monday morning**. The weekly run is the reason it exists: an offline install freezes its versions, so a CVE published after a release surfaces nowhere. Nothing in a deployed lakehouse announces that its `urllib3` became vulnerable last week.
+- **Automated releases** ([.github/workflows/release.yml](.github/workflows/release.yml)): pushing a `v*` tag builds one offline batch **per Fabric kernel version** (3.10, 3.11, 3.12), verifies each — digests against PyPI, dependencies against OSV — and publishes the GitHub Release with the three zips and the wheel attached, using the CHANGELOG section as its notes. A failing check stops the publication. Runnable manually from the Actions tab for a tag that is already pushed.
+- **`scripts/release_notes.py`**: extracts a version's section from the CHANGELOG. Exits non-zero when the section is missing — a release without notes is a release published without knowing what it contains.
 - **[docs/security.md](docs/security.md) gains "Verifying a batch"** and "What these checks do not prove" — including that PyPI stopped signing packages in 2023, so a digest match proves the file equals what PyPI serves and nothing about whether what PyPI serves is sound.
+
+### Fixed
+
+- **A batch built for another Python version was silently incomplete.** `pip download --python-version` drives wheel tags and `Requires-Python` only — environment markers stay evaluated against the *running* interpreter. Building a 3.11 batch from a 3.12 machine therefore produced the right compiled wheels but dropped `typing-extensions`, which `arro3-core` requires below 3.12, and the offline install failed at the client with no earlier warning. `build_fabric_wheels.py` now defaults to the running interpreter's version and refuses a mismatch unless `--allow-marker-mismatch` is passed. The 0.10.0 batch published for 3.12 is unaffected — below-3.12 was the only version-conditional dependency, and it was correctly excluded.
+- **The batch zip now carries its kernel version** (`…-fabric-wheels-py312.zip`). Two batches for two kernels were indistinguishable by name, and uploading one for the other only showed at install time.
 
 ### Documentation
 
-- The release procedure now runs both checks before upload, and the offline one again after upload — the transfer is where a file gets truncated.
+- The release procedure now describes the automated workflow, and the offline verification to run after upload — the transfer is where a file gets truncated.
 
 ## [0.10.0] — 2026-08-24
 

@@ -258,14 +258,13 @@ An `audit` job queries [OSV.dev](https://osv.dev) for known vulnerabilities in t
 4. Commit the release, then tag that commit: `git tag -a vX.Y.Z`
 5. Add the tagged SHA to the table above (`git rev-list -n1 vX.Y.Z`) in a **separate** commit — a commit cannot contain its own SHA, so this one always lands after the tag, together with the pinned version of the `%pip install` lines in this README and in `examples/` (`grep -rn "flume-lib==" README.md examples/`)
 6. Push branch and tag. Tags are protected against update and deletion: review the tag before pushing, it cannot be moved afterwards
-7. `python scripts/build_fabric_wheels.py`, then verify the batch before uploading it to `Files/libs/` in the target lakehouses:
+7. Pushing the tag triggers [the release workflow](.github/workflows/release.yml): it builds one offline batch **per Fabric kernel version** (3.10, 3.11, 3.12), verifies each one, and publishes the GitHub Release with the three zips and the wheel attached, using the CHANGELOG section as its notes. Nothing to build by hand.
 
-```bash
-python scripts/verify_wheels.py          # digests match SHA256SUMS.txt *and* PyPI
-python scripts/audit_dependencies.py --wheels fabric-wheels   # known vulnerabilities
-```
+   A batch must be built by the interpreter of the version it targets — `pip download --python-version` only drives wheel tags and `Requires-Python`, never environment markers — which is why there is one runner per version rather than one runner for three batches. Building a 3.11 batch from a 3.12 machine silently drops `typing-extensions`, and the offline install then fails at the client. `build_fabric_wheels.py` refuses that combination by default.
 
-8. After uploading, verify again on the lakehouse side — the transfer is where a file gets truncated:
+   To publish a tag that is already pushed, run the workflow manually from the Actions tab with the tag as input.
+
+8. Download the batch matching the kernel from the Release, upload the `.whl` files to `Files/libs/`, and verify on the lakehouse side — the transfer is where a file gets truncated:
 
 ```bash
 python scripts/verify_wheels.py /lakehouse/default/Files/libs --offline

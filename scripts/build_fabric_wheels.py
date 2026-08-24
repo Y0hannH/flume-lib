@@ -2,9 +2,18 @@
 le wheel de flume-lib + toutes ses dépendances résolues pour le kernel Fabric
 (Linux x86_64), les empreintes SHA256 et un zip prêt à transférer.
 
+Le lot doit être construit **par l'interpréteur de la version visée**.
+`pip download --python-version` ne pilote que les tags de wheel et
+`Requires-Python` ; les marqueurs d'environnement (`typing-extensions ;
+python_full_version < "3.12"`) restent évalués contre l'interpréteur qui
+tourne. Construire un lot 3.11 depuis un poste en 3.14 donne donc les bons
+wheels compilés, mais un lot amputé des dépendances conditionnelles — et
+`pip install --no-index` échoue chez le client. Le script refuse par défaut.
+
 Usage :
-    python scripts/build_fabric_wheels.py
-    python scripts/build_fabric_wheels.py --python-version 3.11 --out dist-fabric
+    python3.12 scripts/build_fabric_wheels.py           # lot pour kernel 3.12
+    python3.11 scripts/build_fabric_wheels.py           # lot pour kernel 3.11
+    python scripts/build_fabric_wheels.py --python-version 3.11 --allow-marker-mismatch
 
 Install côté notebook (après upload des .whl dans le dossier de wheels) :
     %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==X.Y.Z
@@ -70,8 +79,12 @@ def write_checksums(out_dir: Path) -> Path:
     return checksums
 
 
-def make_zip(out_dir: Path, version: str) -> Path:
-    zip_path = out_dir / f"flume-lib-{version}-fabric-wheels.zip"
+def make_zip(out_dir: Path, version: str, python_version: str) -> Path:
+    # La version de kernel dans le nom : deux lots pour deux kernels sont
+    # indiscernables autrement, et se déposer l'un pour l'autre ne se voit
+    # qu'à l'installation.
+    tag = "py" + python_version.replace(".", "")[:3]
+    zip_path = out_dir / f"flume-lib-{version}-fabric-wheels-{tag}.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
         for file in sorted(out_dir.glob("*.whl")) + [out_dir / "SHA256SUMS.txt"]:
             archive.write(file, file.name)
@@ -80,15 +93,36 @@ def make_zip(out_dir: Path, version: str) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    running = f"{sys.version_info.major}.{sys.version_info.minor}"
     parser.add_argument(
-        "--python-version", default="3.12",
-        help="Version Python du kernel Fabric cible (défaut : 3.12)",
+        "--python-version", default=running,
+        help=f"Version Python du kernel Fabric cible (défaut : {running}, "
+             "celle de l'interpréteur courant)",
+    )
+    parser.add_argument(
+        "--allow-marker-mismatch", action="store_true",
+        help="Construire malgré une version cible différente de l'interpréteur "
+             "courant. Le lot risque d'être amputé de dépendances "
+             "conditionnelles — voir la docstring.",
     )
     parser.add_argument(
         "--out", default="fabric-wheels",
         help="Dossier de sortie, relatif à la racine du repo (défaut : fabric-wheels)",
     )
     args = parser.parse_args()
+
+    target = ".".join(args.python_version.split(".")[:2])
+    if target != running and not args.allow_marker_mismatch:
+        raise SystemExit(
+            f"Interpréteur courant en {running}, lot demandé pour {target}.\n"
+            "pip évalue les marqueurs d'environnement contre l'interpréteur qui "
+            "tourne, pas contre --python-version : le lot serait amputé des "
+            "dépendances conditionnelles à la version (arro3-core exige "
+            "typing-extensions en dessous de 3.12) et l'installation hors ligne "
+            "échouerait chez le client.\n\n"
+            f"Relancer avec un interpréteur {target}, ou passer "
+            "--allow-marker-mismatch en connaissance de cause."
+        )
 
     out_dir = REPO_ROOT / args.out
     shutil.rmtree(out_dir, ignore_errors=True)
@@ -99,7 +133,7 @@ def main() -> None:
     shutil.copy2(lib_wheel, out_dir)
     download_dependencies(lib_wheel, out_dir, args.python_version)
     write_checksums(out_dir)
-    zip_path = make_zip(out_dir, version)
+    zip_path = make_zip(out_dir, version, args.python_version)
 
     print(f"\nflume-lib {version} — kernel Python {args.python_version} :")
     for wheel in sorted(out_dir.glob("*.whl")):

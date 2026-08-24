@@ -1,0 +1,105 @@
+name: Release
+
+# Construit les lots d'installation hors ligne et publie la Release GitHub.
+#
+# Un lot doit être construit par l'interpréteur de la version visée : pip
+# n'évalue les marqueurs d'environnement que contre l'interpréteur qui tourne,
+# jamais contre --python-version. D'où la matrice — un runner par version de
+# kernel Fabric, et trois lots corrects plutôt qu'un seul, ambigu.
+
+on:
+  push:
+    tags: ["v*"]
+  # Pour publier un tag déjà poussé, ou rejouer une release ratée
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag à publier (ex. v0.10.0)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  bundles:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Les trois versions de kernel Fabric Python notebook
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: pip install build
+
+      # Sans --python-version : le script cible l'interpréteur courant, qui est
+      # celui de la matrice. C'est la seule façon d'obtenir un lot complet.
+      - name: Build the offline bundle
+        run: python scripts/build_fabric_wheels.py
+
+      # Une release ne part pas sans que son lot ait été vérifié : empreintes
+      # conformes à PyPI, et aucune vulnérabilité connue. Un échec ici arrête
+      # la publication.
+      - name: Verify integrity
+        run: python scripts/verify_wheels.py
+
+      - name: Known vulnerabilities (OSV.dev)
+        run: python scripts/audit_dependencies.py --wheels fabric-wheels
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.python-version }}
+          path: fabric-wheels/*.zip
+          if-no-files-found: error
+
+  publish:
+    needs: bundles
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install build
+
+      # Le wheel seul, pour qui installe depuis un environnement connecté
+      - name: Build the wheel
+        run: python -m build --wheel
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: bundles
+          pattern: bundle-*
+          merge-multiple: true
+
+      # Le CHANGELOG est la description de référence d'une version : la
+      # recopier à la main garantirait deux textes divergents. Absente, la
+      # publication échoue plutôt que de sortir une release sans notes.
+      - name: Release notes from the CHANGELOG
+        run: python scripts/release_notes.py "$TAG" --output NOTES.md
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+
+      # --draft ici si tu préfères relire avant que la release soit visible
+      - name: Publish
+        run: gh release create "$TAG" --title "$TAG" --notes-file NOTES.md dist/*.whl bundles/*.zip
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+          GH_TOKEN: ${{ github.token }}

@@ -45,7 +45,9 @@ python scripts/audit_dependencies.py --wheels fabric-wheels  # a specific batch
 
 Queries [OSV.dev](https://osv.dev), the public database aggregating the GitHub Advisory Database, PyPA advisories and NVD. Exits non-zero if a vulnerability is known, **and also if the check could not run** — a check that did not execute is not a check that passed.
 
-The `audit` job of [CI](../.github/workflows/ci.yml) runs it on every push and pull request, and **every Monday morning**. The weekly run is the one that matters: an offline install freezes its versions, so a CVE published after a release would otherwise surface nowhere. Nothing in a deployed lakehouse tells you its `urllib3` became vulnerable last week.
+The [release workflow](../.github/workflows/release.yml) runs both checks on every batch it builds, and refuses to publish if either fails. A release therefore never carries a wheel whose digest diverges from PyPI, nor a dependency with a publicly known vulnerability, at the moment it is cut.
+
+The `audit` job of [CI](../.github/workflows/ci.yml) runs the vulnerability check on every push and pull request, and **every Monday morning**. The weekly run is the one that matters: an offline install freezes its versions, so a CVE published after a release would otherwise surface nowhere. Nothing in a deployed lakehouse tells you its `urllib3` became vulnerable last week.
 
 ### What these checks do not prove
 
