@@ -30,7 +30,7 @@ No code is fetched from GitHub or PyPI at runtime — the notebook installs exac
 3. In the notebook:
 
    ```python
-   %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.9.0
+   %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.10.0
    ```
 
 `--no-index` guarantees pip resolves only from that folder — nothing is fetched from PyPI or GitHub. The folder layout is entirely up to you: any path works as long as the same path is passed to `--find-links`.
@@ -47,6 +47,7 @@ Pin the **full commit SHA** of a release, never a tag — a tag can be re-pointe
 
 | Version | SHA |
 |---|---|
+| v0.10.0 | `67c0d77537ed80a73effda8a9bc26e766174c805` |
 | v0.9.0 | `809a82df70d6790574853e1329b8f3bf5b1b663c` |
 | v0.8.1 | `8e26f5e250a690f77b7ca7e196c855588efd76eb` |
 | v0.8.0 | `526840b400baaf5de3889af5b0d783833fa9066a` |
