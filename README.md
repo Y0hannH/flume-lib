@@ -135,7 +135,7 @@ Credentials are **never stored in the configuration** — every credential is a 
 | `token_endpoint` | Arbitrary login call (JSON/form body, secret refs in any field, token extracted by JSON path) |
 | `oauth1` | OAuth 1.0a request signing (RFC 5849, HMAC-SHA256/SHA1, `realm`) — NetSuite TBA and legacy OAuth 1.0a APIs |
 
-The token is obtained once per `run_source` (no mid-run refresh). `oauth1` is the exception: it signs every request individually, so nothing expires mid-run.
+`oauth2_client_credentials` and `token_endpoint` tokens are **renewed mid-run**: proactively when the endpoint announces an `expires_in`, and reactively on a 401 otherwise (once per page — a freshly issued token refused again fails the run). A run longer than the token's lifetime no longer dies on its last pages. The other types carry a static credential and are never renewed; `oauth1` signs every request individually, so nothing expires mid-run.
 
 Beyond authentication, `headers` adds fixed headers to every data call (literal strings only — a secret belongs in `auth`).
 
@@ -191,6 +191,19 @@ There is no GraphQL source type — a GraphQL endpoint is a POST of `{query, var
 | Errors and throttling returned with HTTP 200 | `errors` + `retryable_codes` |
 
 Full walkthrough with the request bodies it produces, how to write the query, how nested selections land in Delta, and a table of common failure modes: [docs/configuration.md#graphql-endpoints](docs/configuration.md#graphql-endpoints). Working notebook: [examples/shopify_graphql.py](examples/shopify_graphql.py).
+
+## Examples
+
+Every file in [`examples/`](examples/) is a complete Fabric notebook, runnable as-is once the URLs and secret names are yours. Start with the first one — the other five assume it.
+
+| Example | What it covers |
+|---|---|
+| [rest_api_paginated.py](examples/rest_api_paginated.py) | **The ordinary REST API.** One fictional endpoint read with each of the five pagination shapes (`offset`, `page`, `next_link`, `cursor`, `none`), incremental by query param, config validation and dry run. The reference file. |
+| [rest_api_auth_variants.py](examples/rest_api_auth_variants.py) | **The six auth blocks side by side** — static token, API key header, Basic, vendor login endpoint, OAuth2 client credentials, none — plus a probe loop that checks credentials without writing anything. |
+| [microsoft_graph_odata.py](examples/microsoft_graph_odata.py) | **OData v4**: Microsoft Graph and Business Central through the same three options, an Entra ID service principal, `$select`/`$filter`/`$top`, and why an OData `$filter` cannot carry a watermark. |
+| [netsuite_suiteql.py](examples/netsuite_suiteql.py) | **SQL over REST**: OAuth 1.0a signing (NetSuite TBA), the watermark templated into a `WHERE` clause, and monthly backfill slices under an offset ceiling. |
+| [shopify_graphql.py](examples/shopify_graphql.py) | **GraphQL**: Relay cursor, pagination params inside `variables`, `template_paths` against the braces of the query, and errors returned with an HTTP 200. |
+| [notebook_ingest_example.py](examples/notebook_ingest_example.py) | **Config-driven run**: a JSON source list read from `Files/conf/`, one loop, a failure summary. |
 
 ## Delta writes in Fabric (OneLake)
 

@@ -16,7 +16,7 @@ from tenacity import (
 )
 
 from flume_lib._delta import append_records, resolve_lakehouse_tables_path, table_uri
-from flume_lib.auth import build_auth
+from flume_lib.auth import AuthProvider
 from flume_lib.logging_ import write_log_run
 from flume_lib.pagination import _MISSING, get_path, paginate
 from flume_lib.templating import check_value, render
@@ -74,6 +74,19 @@ class RetryableHTTPError(RetryableError):
         detail = f" (Retry-After: {retry_after:g}s)" if retry_after is not None else ""
         super().__init__(f"HTTP {status_code} sur {url}{detail}", retry_after)
         self.status_code = status_code
+
+
+class ExpiredTokenError(RetryableError):
+    """401 sur une auth à token renouvelable. Le token vient d'être renouvelé
+    et la requête est rejouée sans attendre : `retry_after=0` court-circuite le
+    backoff, qui n'aurait ici aucun sens — rien n'est saturé, le credential
+    était simplement périmé."""
+
+    def __init__(self, url: str):
+        super().__init__(
+            f"HTTP 401 sur {url} — token renouvelé, requête rejouée",
+            retry_after=0,
+        )
 
 
 class IncrementalError(Exception):
@@ -254,7 +267,7 @@ def _render_at_path(container, parts: list[str], variables: dict, full_path: str
 
 
 def _build_fetch_page(config: dict, variables: dict | None = None):
-    auth_headers, signer = build_auth(config.get("auth"))
+    auth = AuthProvider(config.get("auth"))
     retry_config = config.get("retry", {})
     timeout = config.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
     method = str(config.get("method", "GET")).upper()
@@ -275,12 +288,15 @@ def _build_fetch_page(config: dict, variables: dict | None = None):
     session = requests.Session()
     # headers de la config d'abord : l'auth ne doit jamais être écrasée par eux
     session.headers.update(config.get("headers", {}))
-    session.headers.update(auth_headers)
-    if signer is not None:
-        session.auth = signer
+    session.headers.update(auth.headers())
+    if auth.signer is not None:
+        session.auth = auth.signer
     body_key = "json" if body_format == "json" else "data"
 
-    def _request(url: str, params: dict):
+    def _request(url: str, params: dict, state: dict):
+        if auth.refreshable:
+            # renouvellement anticipé quand le endpoint annonce une expiration
+            session.headers.update(auth.headers())
         kwargs = {"timeout": timeout}
         if method == "GET":
             kwargs["params"] = params
@@ -293,6 +309,17 @@ def _build_fetch_page(config: dict, variables: dict | None = None):
         retry_after = _parse_retry_after(response.headers.get("Retry-After"))
         if response.status_code == 429 or response.status_code >= 500:
             raise RetryableHTTPError(response.status_code, _safe_url(url), retry_after)
+        if (
+            response.status_code == 401
+            and auth.refreshable
+            and not state["refreshed"]
+        ):
+            # Une seule tentative de renouvellement par page : si le 401
+            # persiste avec un token neuf, ce n'est pas une expiration et
+            # rejouer ne ferait que retarder le diagnostic.
+            state["refreshed"] = True
+            session.headers.update(auth.refresh())
+            raise ExpiredTokenError(_safe_url(url))
         if response.status_code >= 400:
             raise requests.HTTPError(
                 f"HTTP {response.status_code} sur {_safe_url(url)}",
@@ -304,7 +331,7 @@ def _build_fetch_page(config: dict, variables: dict | None = None):
         return payload, response.headers
 
     def fetch_page(url: str, params: dict):
-        return retryer(_request, url, params)
+        return retryer(_request, url, params, {"refreshed": False})
 
     return fetch_page
 

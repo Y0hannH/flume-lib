@@ -33,7 +33,8 @@ _AUTH_KEYS = {
     ),
     "token_endpoint": (
         "token_url", "method", "body", "body_format", "headers",
-        "token_json_path", "header_name", "value_prefix", "timeout_seconds",
+        "token_json_path", "expires_in_json_path", "header_name",
+        "value_prefix", "timeout_seconds",
     ),
     "oauth1": (
         "consumer_key", "consumer_secret", "token", "token_secret",

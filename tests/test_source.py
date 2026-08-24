@@ -943,3 +943,109 @@ class TestWatermarkCoherence:
         assert result.status == "success", result.error_message
         assert delta["append"] == []
         assert delta["watermark_write"] == []
+
+
+class TestTokenRefresh:
+    """Un run plus long que la durée de vie du token voyait ses dernières
+    pages répondre 401 — statut non rejouable, run perdu en entier."""
+
+    SP_CONFIG = {
+        **BASE_CONFIG,
+        "auth": {
+            "type": "oauth2_client_credentials",
+            "token_url": "https://idp.test/token",
+            "client_id": "id",
+            "client_secret": "sec",
+        },
+    }
+    STATIC_CONFIG = {
+        **BASE_CONFIG,
+        "auth": {"type": "bearer_token", "token": "static-tok"},
+    }
+
+    @pytest.fixture
+    def token_endpoint(self, monkeypatch):
+        """Compte les appels au token endpoint et sert un token différent à
+        chaque fois, pour distinguer l'original du renouvelé."""
+        issued = []
+
+        def fake_post(url, **kwargs):
+            issued.append(url)
+            response = MagicMock()
+            response.status_code = 200
+            response.json.return_value = {"access_token": f"tok-{len(issued)}"}
+            return response
+
+        monkeypatch.setattr("flume_lib.source.requests.Session", FakeSession)
+        monkeypatch.setattr("flume_lib.auth.requests.post", fake_post)
+        return issued
+
+    @staticmethod
+    def _session_class(statuses):
+        """Session factice qui rejoue une suite de statuts HTTP et retient le
+        header d'auth de chaque appel."""
+
+        class Recording(FakeSession):
+            def request(self, method, url, **kwargs):
+                index = len(self.calls)
+                self.calls.append(
+                    {"url": url, "auth": self.headers.get("Authorization")}
+                )
+                status = statuses[min(index, len(statuses) - 1)]
+                if status == 200:
+                    return FakeResponse([{"id": index}])
+                return FakeResponse({}, status_code=status)
+
+        return Recording
+
+    def _run(self, monkeypatch, config, statuses):
+        # FakeSession.__init__ enregistre chaque instance sur la classe de
+        # base ; la fixture `http` a remis la liste à zéro.
+        monkeypatch.setattr(
+            "flume_lib.source.requests.Session", self._session_class(statuses)
+        )
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+        return result, FakeSession.instances[-1]
+
+    def test_a_401_renews_the_token_and_replays_the_page(
+        self, http, delta, token_endpoint, monkeypatch
+    ):
+        result, session = self._run(monkeypatch, self.SP_CONFIG, [401, 200])
+
+        assert result.status == "success", result.error_message
+        assert result.rows_loaded == 1
+        # un token à l'ouverture de la session, un second après le 401
+        assert len(token_endpoint) == 2
+        assert [c["auth"] for c in session.calls] == [
+            "Bearer tok-1",
+            "Bearer tok-2",
+        ]
+
+    def test_a_persistent_401_is_not_replayed_forever(
+        self, http, delta, token_endpoint, monkeypatch
+    ):
+        result, session = self._run(monkeypatch, self.SP_CONFIG, [401])
+
+        assert result.status == "failed"
+        assert "401" in result.error_message
+        # une seule tentative de renouvellement : un token neuf refusé n'est
+        # pas une expiration
+        assert len(token_endpoint) == 2
+        assert len(session.calls) == 2
+
+    def test_a_static_credential_is_never_renewed(self, http, delta, monkeypatch):
+        result, session = self._run(monkeypatch, self.STATIC_CONFIG, [401])
+
+        assert result.status == "failed"
+        assert "401" in result.error_message
+        # échec immédiat : rejouer un credential statique ne le corrigerait pas
+        assert len(session.calls) == 1
+
+    def test_the_query_string_is_still_stripped_from_the_401(
+        self, http, delta, token_endpoint, monkeypatch
+    ):
+        config = {**self.SP_CONFIG, "params": {"api_key": "SECRET"}}
+        result, _ = self._run(monkeypatch, config, [401])
+
+        assert result.status == "failed"
+        assert "SECRET" not in result.error_message

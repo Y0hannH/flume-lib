@@ -331,6 +331,20 @@ Legacy form still supported: `token_env_var`, `key_env_var`, `username_env_var`,
 
 The type is selected by `auth.type`. The token is obtained **once per run** (no mid-run refresh).
 
+All of them side by side in one runnable notebook, with a probe loop that checks credentials without writing anything: [examples/rest_api_auth_variants.py](../examples/rest_api_auth_variants.py).
+
+### Token expiry on long runs
+
+The token of an `oauth2_client_credentials` or `token_endpoint` auth expires — 60 minutes is common. A run longer than that used to see its last pages answered with 401, a status that is never retried: the whole run failed. Both types are now renewed mid-run, in two ways.
+
+**Proactively**, when the token endpoint announces a lifetime: `expires_in` for `oauth2_client_credentials` (standard OAuth2, read automatically), or the path declared in `expires_in_json_path` for `token_endpoint`. The token is renewed 60 seconds before the announced expiry, so the API never sees an expired credential.
+
+**Reactively**, on a 401, for endpoints that announce nothing. The token is renewed and the page replayed immediately, without backoff — nothing is saturated, the credential was simply stale. This happens **once per page**: if a freshly issued token is refused again, the run fails with the 401, because that is no longer an expiry and replaying would only delay the diagnosis.
+
+The other types carry a static credential (`bearer_token`, `api_key_header`, `basic`) or sign each request individually (`oauth1`). They are never renewed: a 401 there is a configuration error, and it fails immediately.
+
+Renewal costs one extra token call, and only when needed. It is bounded by `retry.max_attempts` like every other retry cause.
+
 ### `bearer_token` — static token
 
 | Key | Required | Default | Description |
@@ -420,6 +434,7 @@ For any API where the token comes from a non-standard preliminary call: login/pa
 | `body_format` | no | `json` | `json` (JSON body) or `form` (form-encoded). |
 | `headers` | no | `{}` | Headers of the token call; same rules as `body`. |
 | `token_json_path` | no | `access_token` | Dotted path of the token in the JSON response (e.g. `data.token`, `result.auth.jwt`). |
+| `expires_in_json_path` | no | — | Dotted path of the token lifetime, in seconds, in the same response. Enables proactive refresh — see [Token expiry on long runs](#token-expiry-on-long-runs). |
 | `header_name` | no | `Authorization` | Header used on subsequent data calls. |
 | `value_prefix` | no | `Bearer ` | Token prefix in that header. |
 | `timeout_seconds` | no | `30` | Token call timeout. |
@@ -507,6 +522,8 @@ Stops on: empty page, or partial page (`< limit`).
 {"type": "offset", "limit": 500, "limit_param": "top", "offset_param": "skip"}
 ```
 
+Runnable source: [examples/rest_api_paginated.py](../examples/rest_api_paginated.py).
+
 ### `page` — page number (header-provided total supported)
 
 | Key | Default | Description |
@@ -523,6 +540,8 @@ Stops after: `total_pages` pages when `total_pages_header` is set; otherwise emp
 {"type": "page", "page_param": "page", "size_param": "per_page", "page_size": 100, "total_pages_header": "X-Total-Pages"}
 ```
 
+Runnable source: [examples/rest_api_paginated.py](../examples/rest_api_paginated.py).
+
 ### `next_link` — next-page URL in the response
 
 | Key | Default | Description |
@@ -534,6 +553,10 @@ The `params`/`incremental` query params are sent on the first call only — the 
 ```json
 {"type": "next_link", "next_field": "@odata.nextLink", "items_field": "value"}
 ```
+
+`next_field` is a top-level response key, not a dotted path — `@odata.nextLink` works because that is the key, dot included, whereas a URL nested under `links.next` is out of reach.
+
+Runnable sources: [examples/rest_api_paginated.py](../examples/rest_api_paginated.py), and OData end to end (Microsoft Graph, Business Central) in [examples/microsoft_graph_odata.py](../examples/microsoft_graph_odata.py).
 
 ### `cursor` — opaque cursor (Relay/GraphQL connections)
 
@@ -566,7 +589,7 @@ A cursor that does not advance between two requests also raises, instead of loop
 }
 ```
 
-Full GraphQL source, auth to Delta: [examples/shopify_graphql.py](../examples/shopify_graphql.py).
+Full GraphQL source, auth to Delta: [examples/shopify_graphql.py](../examples/shopify_graphql.py). The same strategy against a flat REST response, cursor in the query string: [examples/rest_api_paginated.py](../examples/rest_api_paginated.py).
 
 ### `none` / absent
 
@@ -618,6 +641,10 @@ Data is always committed **before** its watermark. If the watermark commit fails
 Behavior: the last watermark is read from `<log_schema>.watermark` at run start (`initial_value` is used on the very first run, and no param is sent if neither exists); the new watermark is written **only if the run succeeded** and at least one record was loaded — unless [`checkpoint`](#resuming-with-incrementalcheckpoint) is on, in which case it advances batch by batch.
 
 The max of each batch is computed **before** that batch is written, so a `field` whose values cannot be compared (mixed types) fails the run without leaving rows behind an unadvanced watermark. Comparison uses Python `max()` — works for ISO 8601 timestamps and numerics; beware of date formats that don't sort lexicographically.
+
+`inject: "query_param"` sends the watermark as the **entire value** of one param: it produces `?updated_since=2026-08-01T00:00:00Z`, and cannot build an expression around it. An API whose filter is a composed string — OData's `$filter=lastModifiedDateTime ge 2026-08-01T00:00:00Z`, a SQL `WHERE` clause — needs the value *inside* a string, which is `inject: "body_template"` and therefore a non-`GET` `method`. For a GET endpoint that only accepts a composed filter, the bound has to be computed in the notebook and written into `params` there; [examples/microsoft_graph_odata.py](../examples/microsoft_graph_odata.py) shows that form, and what it costs (re-read overlap, deduplicated downstream on the lineage columns).
+
+Runnable incremental sources: query param in [examples/rest_api_paginated.py](../examples/rest_api_paginated.py), `body_template` into a SQL `WHERE` in [examples/netsuite_suiteql.py](../examples/netsuite_suiteql.py), and into GraphQL `variables` in [examples/shopify_graphql.py](../examples/shopify_graphql.py).
 
 ## Retry
 

@@ -4,7 +4,12 @@ from unittest.mock import MagicMock
 import pytest
 
 import flume_lib.secrets_ as secrets_
-from flume_lib.auth import AuthError, build_auth_headers
+from flume_lib.auth import (
+    TOKEN_EXPIRY_MARGIN_SECONDS,
+    AuthError,
+    AuthProvider,
+    build_auth_headers,
+)
 from flume_lib.secrets_ import SecretResolutionError, resolve_secret
 
 
@@ -267,3 +272,117 @@ class TestEdgeCases:
     def test_unknown_type_raises(self):
         with pytest.raises(AuthError, match="zigzag"):
             build_auth_headers({"type": "zigzag"})
+
+
+class TestAuthProviderRefresh:
+    """Le token d'un run long expire : le provider le renouvelle, par
+    anticipation quand l'endpoint annonce une durée de vie, à la demande sinon."""
+
+    SP = {
+        "type": "oauth2_client_credentials",
+        "token_url": "https://idp.exemple.com/token",
+        "client_id": "id",
+        "client_secret": "sec",
+    }
+
+    def test_static_auth_is_not_refreshable(self, monkeypatch):
+        monkeypatch.setenv("T", "tok")
+        for config in (
+            None,
+            {"type": "none"},
+            {"type": "bearer_token", "token": {"env_var": "T"}},
+            {"type": "api_key_header", "key": {"env_var": "T"}},
+        ):
+            assert AuthProvider(config).refreshable is False
+
+    def test_token_based_auth_is_refreshable(self):
+        assert AuthProvider(self.SP).refreshable is True
+        assert AuthProvider(
+            {"type": "token_endpoint", "token_url": "https://x/login"}
+        ).refreshable is True
+
+    def test_token_is_fetched_once_and_cached(self, monkeypatch):
+        mock = _mock_token_response(monkeypatch, {"access_token": "t1"})
+        provider = AuthProvider(self.SP)
+
+        assert provider.headers() == {"Authorization": "Bearer t1"}
+        assert provider.headers() == {"Authorization": "Bearer t1"}
+        assert mock.call_count == 1
+
+    def test_refresh_forces_a_new_token(self, monkeypatch):
+        response = MagicMock()
+        response.status_code = 200
+        response.json.side_effect = [
+            {"access_token": "t1"}, {"access_token": "t2"},
+        ]
+        mock = MagicMock(return_value=response)
+        monkeypatch.setattr("flume_lib.auth.requests.post", mock)
+
+        provider = AuthProvider(self.SP)
+        assert provider.headers() == {"Authorization": "Bearer t1"}
+        assert provider.refresh() == {"Authorization": "Bearer t2"}
+        assert provider.headers() == {"Authorization": "Bearer t2"}
+        assert mock.call_count == 2
+
+    def test_an_announced_expiry_triggers_a_proactive_refresh(self, monkeypatch):
+        response = MagicMock()
+        response.status_code = 200
+        response.json.side_effect = [
+            {"access_token": "t1", "expires_in": 3600},
+            {"access_token": "t2", "expires_in": 3600},
+        ]
+        monkeypatch.setattr("flume_lib.auth.requests.post", MagicMock(return_value=response))
+
+        clock = {"now": 1000.0}
+        monkeypatch.setattr("flume_lib.auth.time.monotonic", lambda: clock["now"])
+
+        provider = AuthProvider(self.SP)
+        assert provider.headers() == {"Authorization": "Bearer t1"}
+
+        # encore valide une heure moins la marge
+        clock["now"] = 1000.0 + 3600 - TOKEN_EXPIRY_MARGIN_SECONDS - 1
+        assert provider.headers() == {"Authorization": "Bearer t1"}
+
+        # dans la marge : renouvelé avant que l'API ne réponde 401
+        clock["now"] = 1000.0 + 3600 - TOKEN_EXPIRY_MARGIN_SECONDS
+        assert provider.headers() == {"Authorization": "Bearer t2"}
+
+    def test_without_expires_in_nothing_is_refreshed_on_its_own(self, monkeypatch):
+        mock = _mock_token_response(monkeypatch, {"access_token": "t1"})
+        clock = {"now": 0.0}
+        monkeypatch.setattr("flume_lib.auth.time.monotonic", lambda: clock["now"])
+
+        provider = AuthProvider(self.SP)
+        provider.headers()
+        clock["now"] = 10_000_000.0
+        provider.headers()
+        assert mock.call_count == 1
+
+    def test_token_endpoint_expiry_is_read_where_declared(self, monkeypatch):
+        _mock_token_response(
+            monkeypatch, {"data": {"token": "t", "ttl": 120}}
+        )
+        provider = AuthProvider(
+            {
+                "type": "token_endpoint",
+                "token_url": "https://x/login",
+                "token_json_path": "data.token",
+                "expires_in_json_path": "data.ttl",
+            }
+        )
+        provider.headers()
+        assert provider._expires_at is not None
+
+    def test_oauth1_exposes_a_signer_and_no_headers(self, monkeypatch):
+        monkeypatch.setenv("CK", "k")
+        monkeypatch.setenv("CS", "s")
+        provider = AuthProvider(
+            {
+                "type": "oauth1",
+                "consumer_key": {"env_var": "CK"},
+                "consumer_secret": {"env_var": "CS"},
+            }
+        )
+        assert provider.headers() == {}
+        assert provider.signer is not None
+        assert provider.refreshable is False
