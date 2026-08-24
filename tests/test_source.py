@@ -762,7 +762,8 @@ class TestErrorMessagesLeakNothing:
             def request(self, method, url, **kwargs):
                 self.calls.append({"method": method, "url": url})
                 if len(self.calls) <= 2:
-                    return FakeResponse([{"id": 1}, {"id": 2}])
+                    start = 2 * len(self.calls) - 1
+                    return FakeResponse([{"id": start}, {"id": start + 1}])
                 return FakeResponse({}, status_code=403)
 
         import flume_lib.source as source_module
@@ -828,7 +829,8 @@ class TestBatchedWrites:
             def request(self, method, url, **kwargs):
                 self.calls.append({"method": method, "url": url})
                 if len(self.calls) <= 2:
-                    return FakeResponse([{"id": 1}, {"id": 2}])
+                    start = 2 * len(self.calls) - 1
+                    return FakeResponse([{"id": start}, {"id": start + 1}])
                 return FakeResponse({}, status_code=403)
 
         import flume_lib.source as source_module
@@ -1120,3 +1122,91 @@ class TestTypeWarnings:
 
         assert result.status == "failed"
         assert result.warnings == ["colonne 'n' : écrite en texte"]
+
+
+class TestKeysetInBody:
+    """Le cas SQL-over-REST : la clé de pagination vit dans la requête
+    elle-même, pas en query string. C'est ce qui permet de dépasser le
+    plafond d'offset des APIs qui en imposent un."""
+
+    CONFIG = {
+        **BASE_CONFIG,
+        "method": "POST",
+        "body": {
+            "q": "select id, amount from transactions "
+                 "where id > {since_id} order by id"
+        },
+        "pagination": {
+            "type": "keyset",
+            "key_field": "id",
+            "key_param": "since_id",
+            "params_in": "body_template",
+            "value_format": "numeric",
+            "initial_value": 0,
+            "limit": 2,
+            "limit_param": "rows",
+            "items_field": "items",
+        },
+    }
+
+    def test_the_key_is_substituted_into_the_query(self, http, delta):
+        http.next_payloads = [
+            {"items": [{"id": 1}, {"id": 2}]},
+            {"items": [{"id": 3}]},
+        ]
+        result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert result.rows_loaded == 3
+        queries = [c["json"]["q"] for c in http.instances[0].calls]
+        assert queries[0].endswith("where id > 0 order by id")
+        assert queries[1].endswith("where id > 2 order by id")
+
+    def test_nothing_goes_to_the_query_string(self, http, delta):
+        http.next_payloads = [{"items": [{"id": 1}]}]
+        run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+        assert all("params" not in c for c in http.instances[0].calls)
+
+    def test_a_hostile_key_fails_the_run(self, http, delta):
+        http.next_payloads = [{"items": [{"id": 1}, {"id": "0 OR 1=1"}]}]
+        result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "failed"
+        assert "numeric" in result.error_message
+        # la clé hostile n'a jamais été envoyée
+        assert len(http.instances[0].calls) == 1
+
+    def test_the_watermark_and_the_key_share_the_body(self, http, delta):
+        config = {
+            **self.CONFIG,
+            "body": {
+                "q": "select id from t where ts > '{watermark}' "
+                     "and id > {since_id} order by id"
+            },
+            "incremental": {
+                "enabled": True,
+                "field": "ts",
+                "inject": "body_template",
+                "value_format": "iso_datetime",
+                "initial_value": "2026-01-01T00:00:00Z",
+            },
+        }
+        http.next_payloads = [{"items": [{"id": 1, "ts": "2026-02-01T00:00:00Z"}]}]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        query = http.instances[0].calls[0]["json"]["q"]
+        assert "ts > '2026-01-01T00:00:00Z'" in query
+        assert "id > 0" in query
+        assert delta["watermark_write"] == [("s1", "2026-02-01T00:00:00Z")]
+
+    def test_a_typo_in_a_placeholder_fails_the_run(self, http, delta):
+        config = {
+            **self.CONFIG,
+            "body": {"q": "select id from t where id > {sinceid}"},
+        }
+        http.next_payloads = [{"items": [{"id": 1}]}]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "failed"
+        assert "sinceid" in result.error_message

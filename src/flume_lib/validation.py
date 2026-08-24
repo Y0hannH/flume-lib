@@ -65,7 +65,10 @@ _AUTH_REQUIRED = {
 }
 
 # Clés acceptées par toutes les stratégies de pagination
-_PAGINATION_COMMON = ("items_field", "record_field", "params_in", "params_path")
+_PAGINATION_COMMON = (
+    "items_field", "record_field", "params_in", "params_path",
+    "max_pages", "max_rows",
+)
 _PAGINATION_KEYS = {
     "none": (),
     "offset": ("limit", "limit_param", "offset_param"),
@@ -77,7 +80,13 @@ _PAGINATION_KEYS = {
     "cursor": (
         "cursor_param", "cursor_field", "has_more_field", "limit", "limit_param",
     ),
+    "keyset": (
+        "key_field", "key_param", "initial_value", "value_format",
+        "limit", "limit_param",
+    ),
 }
+
+_PARAMS_IN = ("query", "body", "body_template")
 
 _ERRORS_KEYS = ("path", "code_field", "message_field", "retryable_codes")
 
@@ -253,14 +262,48 @@ def validate_config(config: dict) -> None:
             ("type",) + _PAGINATION_COMMON + _PAGINATION_KEYS[pagination_type],
         )
         params_in = pagination.get("params_in", "query")
-        if params_in not in ("query", "body"):
+        if params_in not in _PARAMS_IN:
+            known = ", ".join(f"'{v}'" for v in _PARAMS_IN)
             raise ConfigError(
-                f"pagination : 'params_in' doit valoir 'query' ou 'body', pas '{params_in}'"
+                f"pagination : 'params_in' doit valoir l'un de {known}, "
+                f"pas '{params_in}'"
             )
-        if params_in == "body" and method == "GET":
+        if params_in in ("body", "body_template") and method == "GET":
             raise ConfigError(
-                "pagination : \"params_in\": \"body\" nécessite une méthode POST"
+                f'pagination : "params_in": "{params_in}" nécessite une méthode POST'
             )
+        if params_in == "body_template":
+            if not isinstance(config.get("body"), dict) or not config["body"]:
+                raise ConfigError(
+                    'pagination : "params_in": "body_template" substitue les '
+                    "paramètres dans 'body', absent de la config"
+                )
+            if config.get("params"):
+                raise ConfigError(
+                    "pagination : \"params_in\": \"body_template\" n'envoie "
+                    "aucune "
+                    "query string — 'params' ne partirait nulle part"
+                )
+            incremental_config = config.get("incremental") or {}
+            if (
+                incremental_config.get("enabled")
+                and incremental_config.get("inject", "query_param") == "query_param"
+            ):
+                raise ConfigError(
+                    "pagination : \"params_in\": \"body_template\" n'envoie "
+                    "aucune "
+                    "query string — le watermark doit lui aussi passer par "
+                    '"inject": "body_template"'
+                )
+
+        for key in ("max_pages", "max_rows"):
+            if key not in pagination:
+                continue
+            value = pagination[key]
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ConfigError(f"pagination : '{key}' doit être un entier")
+            if value < 1:
+                raise ConfigError(f"pagination : '{key}' doit être supérieur à 0")
 
         params_path = pagination.get("params_path")
         if params_path is not None:
@@ -288,6 +331,30 @@ def validate_config(config: dict) -> None:
                     raise ConfigError(
                         f"pagination : '{key}' requis avec \"type\": \"cursor\""
                     )
+
+        if pagination_type == "keyset":
+            for key in ("key_field", "key_param"):
+                if not pagination.get(key):
+                    raise ConfigError(
+                        f"pagination : '{key}' requis avec \"type\": \"keyset\""
+                    )
+            value_format = pagination.get("value_format", "any")
+            if value_format not in VALUE_FORMATS:
+                known = ", ".join(VALUE_FORMATS)
+                raise ConfigError(
+                    f"pagination : 'value_format' inconnu '{value_format}' — "
+                    f"attendu l'un de : {known}"
+                )
+            if params_in == "body_template" and value_format == "any":
+                known = ", ".join(f for f in VALUE_FORMATS if f != "any")
+                raise ConfigError(
+                    "pagination : 'value_format' explicite requis quand la clé "
+                    "est interpolée dans le corps — attendu l'un de : "
+                    f"{known}. La clé vient de la réponse de l'API ; le "
+                    "filtrage des caractères ne protège qu'un placeholder "
+                    "entre quotes, un placeholder nu (WHERE id > {last_key}) "
+                    "accepterait '0 OR 1=1'"
+                )
 
     incremental = config.get("incremental")
     if incremental is not None:

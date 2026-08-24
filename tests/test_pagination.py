@@ -317,3 +317,133 @@ class TestStrategySelection:
         }
         pages = list(paginate(fetch, "http://api/gql", {}, config))
         assert pages == [[{"id": 1}]]
+
+
+class TestKeysetPagination:
+    """Seule stratégie qui atteint le fond d'une table de plusieurs millions
+    de lignes sur les APIs qui plafonnent l'offset."""
+
+    CONFIG = {
+        "type": "keyset",
+        "key_field": "id",
+        "key_param": "since_id",
+        "limit": 2,
+    }
+
+    def test_the_key_of_the_last_record_drives_the_next_page(self):
+        fetch = make_fetch([
+            [{"id": 1}, {"id": 2}],
+            [{"id": 3}, {"id": 4}],
+            [{"id": 5}],
+        ])
+        pages = list(paginate(fetch, "https://api/items", {}, self.CONFIG))
+
+        assert [len(p) for p in pages] == [2, 2, 1]
+        sent = [params for _, params in fetch.calls]
+        # la première requête part sans clé
+        assert "since_id" not in sent[0]
+        assert sent[1]["since_id"] == "2"
+        assert sent[2]["since_id"] == "4"
+        assert all(p["limit"] == 2 for p in sent)
+
+    def test_an_initial_value_seeds_the_first_page(self):
+        fetch = make_fetch([[{"id": 11}]])
+        list(paginate(
+            fetch, "https://api/items", {}, {**self.CONFIG, "initial_value": 10}
+        ))
+        assert fetch.calls[0][1]["since_id"] == "10"
+
+    def test_a_partial_page_ends_the_pagination(self):
+        fetch = make_fetch([[{"id": 1}]])
+        pages = list(paginate(fetch, "https://api/items", {}, self.CONFIG))
+        assert len(pages) == 1
+        assert len(fetch.calls) == 1
+
+    def test_an_empty_page_ends_the_pagination(self):
+        fetch = make_fetch([[]])
+        assert list(paginate(fetch, "https://api/items", {}, self.CONFIG)) == []
+
+    def test_without_a_limit_it_stops_on_an_empty_page(self):
+        config = {k: v for k, v in self.CONFIG.items() if k != "limit"}
+        fetch = make_fetch([[{"id": 1}], [{"id": 2}], []])
+        pages = list(paginate(fetch, "https://api/items", {}, config))
+        assert [len(p) for p in pages] == [1, 1]
+
+    def test_a_key_that_does_not_advance_stops_instead_of_looping(self):
+        fetch = make_fetch([
+            [{"id": 1}, {"id": 5}],
+            [{"id": 9}, {"id": 5}],
+        ])
+        with pytest.raises(PaginationError, match="n'avance pas"):
+            list(paginate(fetch, "https://api/items", {}, self.CONFIG))
+
+    def test_a_missing_key_in_the_last_record_raises(self):
+        fetch = make_fetch([[{"id": 1}, {"other": 2}]])
+        with pytest.raises(PaginationError, match="key_field|'id'"):
+            list(paginate(fetch, "https://api/items", {}, self.CONFIG))
+
+    def test_key_field_and_key_param_are_required(self):
+        with pytest.raises(PaginationError, match="key_field"):
+            list(paginate(make_fetch([]), "https://api", {}, {"type": "keyset"}))
+
+    def test_a_dotted_key_field_is_supported(self):
+        config = {**self.CONFIG, "key_field": "meta.cursor_id", "limit": 1}
+        fetch = make_fetch([[{"meta": {"cursor_id": 7}}], []])
+        list(paginate(fetch, "https://api/items", {}, config))
+        assert fetch.calls[1][1]["since_id"] == "7"
+
+    def test_a_hostile_key_is_rejected_before_being_sent(self):
+        config = {**self.CONFIG, "value_format": "numeric"}
+        fetch = make_fetch([[{"id": 1}, {"id": "1 OR 1=1"}]])
+        with pytest.raises(Exception, match="numeric|interdit"):
+            list(paginate(fetch, "https://api/items", {}, config))
+
+
+class TestPaginationBounds:
+    OFFSET = {"type": "offset", "limit": 2}
+
+    def test_max_pages_stops_the_run_instead_of_truncating(self):
+        fetch = make_fetch([[{"id": 1}, {"id": 2}], [{"id": 3}, {"id": 4}]])
+        pages = paginate(
+            fetch, "https://api/items", {}, {**self.OFFSET, "max_pages": 2}
+        )
+        collected = []
+        with pytest.raises(PaginationError, match="max_pages"):
+            for page in pages:
+                collected.append(page)
+        # les pages lues sont bien livrées avant l'erreur : elles sont écrites
+        assert [len(p) for p in collected] == [2, 2]
+
+    def test_max_rows_stops_the_run(self):
+        fetch = make_fetch([[{"id": 1}, {"id": 2}], [{"id": 3}, {"id": 4}]])
+        with pytest.raises(PaginationError, match="max_rows"):
+            list(paginate(
+                fetch, "https://api/items", {}, {**self.OFFSET, "max_rows": 3}
+            ))
+
+    def test_a_run_under_the_bounds_is_untouched(self):
+        fetch = make_fetch([[{"id": 1}, {"id": 2}], [{"id": 3}]])
+        pages = list(paginate(
+            fetch,
+            "https://api/items",
+            {},
+            {**self.OFFSET, "max_pages": 10, "max_rows": 100},
+        ))
+        assert [len(p) for p in pages] == [2, 1]
+
+    def test_an_api_serving_the_same_page_forever_is_stopped(self):
+        """Une API qui reclampe un numéro de page hors limite et resert la
+        première n'a aucune condition d'arrêt naturelle."""
+        page = [{"id": 1}, {"id": 2}]
+        fetch = make_fetch([list(page) for _ in range(50)])
+        with pytest.raises(PaginationError, match="identique à la précédente"):
+            list(paginate(
+                fetch, "https://api/items", {}, {"type": "page", "page_size": 2}
+            ))
+
+    def test_two_different_pages_are_not_mistaken_for_a_loop(self):
+        fetch = make_fetch([
+            [{"id": 1}, {"id": 2}], [{"id": 3}, {"id": 4}], [{"id": 5}],
+        ])
+        pages = list(paginate(fetch, "https://api/items", {}, self.OFFSET))
+        assert [len(p) for p in pages] == [2, 2, 1]

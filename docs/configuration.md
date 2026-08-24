@@ -507,8 +507,10 @@ The type is selected by `pagination.type`. All strategies accept:
 |---|---|---|
 | `items_field` | auto | Response field containing the record list, as a **dotted path** (`data.orders.edges`). Left out, the probing order is: a response that is already a list is used as-is, otherwise `data`, `items`, `results`, `value`. Explicit error if none is found, or if the configured path is absent or resolves to something other than a list. A response that is already a top-level list short-circuits this key — `items_field` is not applied to it. |
 | `record_field` | absent | Dotted path unwrapped from **each item** of that list. Relay connections (GraphQL) wrap every record in a `{cursor, node}` — `"record_field": "node"` keeps the record. Missing from any item ⇒ explicit error. |
-| `params_in` | `query` | Where pagination and incremental params are sent: `query` (query string) or `body` (merged into the request payload). `body` requires a non-`GET` `method`. |
+| `params_in` | `query` | Where pagination and incremental params are sent: `query` (query string), `body` (merged into the request payload as JSON values), or `body_template` (substituted into the `{placeholder}` markers of `body`). The last two require a non-`GET` `method`. |
 | `params_path` | root | With `"params_in": "body"`, dotted path inside `body` under which those params are merged (GraphQL: `variables`). The branch is created if absent. |
+| `max_pages` | none | Stops the run with an error past that many pages. See [Safety bounds](#safety-bounds). |
+| `max_rows` | none | Same, on the number of rows read. |
 
 ### `offset` — offset/limit
 
@@ -543,6 +545,61 @@ Stops after: `total_pages` pages when `total_pages_header` is set; otherwise emp
 ```
 
 Runnable source: [examples/rest_api_paginated.py](../examples/rest_api_paginated.py).
+
+### `keyset` — filter by the last key seen (seek method)
+
+Each page is filtered by the value of `key_field` taken from the **last record of the previous page**, sent back in `key_param`. Unlike `offset`, the cost of a page does not grow with its depth and nothing caps it: this is the only strategy that reaches the bottom of a multi-million-row table on APIs that bound the offset — NetSuite stops at 100 000, which is what forces month-by-month slicing.
+
+| Key | Required | Default | Description |
+|---|---|---|---|
+| `key_field` | **yes** | — | Dotted path of the key inside a record (`id`, `meta.cursor_id`). |
+| `key_param` | **yes** | — | Param carrying the key on the next request — or the `{placeholder}` name with `"params_in": "body_template"`. |
+| `initial_value` | no | none | Key used on the very first request. Required with `body_template`, otherwise the placeholder has nothing to resolve to. |
+| `value_format` | **yes** with `body_template`, otherwise no (default `any`) | `any` | Validation applied to the key before it is sent: `any`, `numeric`, `iso_date`, `iso_datetime`. |
+| `limit` | no | none | Page size. |
+| `limit_param` | no | `limit` | Param carrying it. |
+
+**The source must be sorted by `key_field`, with unique values.** That is inherent to the method, not a limitation of the library: a key that goes backwards would re-read pages forever, and a duplicated key would skip everything sharing it. The library checks that the key advances from page to page and stops with an explicit error if it does not — it never loops.
+
+Stop conditions: an empty page, a page shorter than `limit`, or `key_field` missing from the last record (an error — the next page cannot be built).
+
+Query-string form (`since_id`, `starting_after`…):
+
+```json
+{
+  "type": "keyset",
+  "key_field": "id",
+  "key_param": "since_id",
+  "limit": 250
+}
+```
+
+SQL-over-REST form, where the key belongs inside the query itself:
+
+```json
+{
+  "method": "POST",
+  "body": {"q": "select id, amount from transactions where id > {since_id} order by id"},
+  "pagination": {
+    "type": "keyset",
+    "key_field": "id",
+    "key_param": "since_id",
+    "params_in": "body_template",
+    "value_format": "numeric",
+    "initial_value": 0,
+    "limit": 1000,
+    "limit_param": "rows"
+  }
+}
+```
+
+The key comes back from the API, so with `body_template` it is interpolated into a query and `value_format` is **required** — same rule, and the same reason, as the incremental watermark. `"params_in": "body_template"` also forbids top-level `params` and a `query_param` watermark: no query string is sent at all, so anything put there would go nowhere.
+
+The watermark and the key can share one body — the watermark bounds the window, the key walks it:
+
+```json
+{"q": "select id, ts from t where ts > '{watermark}' and id > {since_id} order by id"}
+```
 
 ### `next_link` — next-page URL in the response
 
@@ -602,6 +659,12 @@ A single HTTP call, no loop. The common keys still apply: `items_field` and `rec
 ```
 
 > **Offset ceilings.** Some APIs refuse an offset beyond a hard limit (NetSuite stops at 100 000). Past that point, split the source into bounded slices — one run per month or per id range, with the bounds in the query — rather than paging further.
+
+### Safety bounds
+
+`max_pages` and `max_rows` bound a run whose order of magnitude is known. Reaching one is an **error**, not a clean stop: truncating silently would produce a `success` run short of part of its data, which is the failure mode this library exists to avoid. Rows already written stay written, and the message says what happened. The bound fires on the count alone — a source that happens to end exactly on it still fails, because the run stopped before observing the end.
+
+Independently of any configuration, a page **identical to the one before it** stops the run. An API that clamps an out-of-range page number and serves the first page again has no natural stop condition — the notebook used to run until its timeout, memory climbing. The strategies that read a cursor, a next link or a keyset key have their own no-progress checks on top.
 
 ## Batched writes
 

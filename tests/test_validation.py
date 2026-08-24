@@ -470,3 +470,120 @@ class TestIncrementalCheckpoint:
     def test_checkpoint_without_enabled_raises(self):
         with pytest.raises(ConfigError, match="checkpoint"):
             validate_config(cfg(incremental={"checkpoint": True}))
+
+
+class TestKeysetPagination:
+    def keyset(self, **overrides):
+        return {
+            "type": "keyset", "key_field": "id", "key_param": "since_id",
+            **overrides,
+        }
+
+    def test_minimal_keyset_is_valid(self):
+        validate_config(cfg(pagination=self.keyset()))
+
+    @pytest.mark.parametrize("key", ["key_field", "key_param"])
+    def test_missing_required_key_raises(self, key):
+        pagination = self.keyset()
+        del pagination[key]
+        with pytest.raises(ConfigError, match=key):
+            validate_config(cfg(pagination=pagination))
+
+    def test_unknown_keyset_key_raises(self):
+        with pytest.raises(ConfigError, match="clé inconnue"):
+            validate_config(cfg(pagination=self.keyset(cursor_param="c")))
+
+    def test_unknown_value_format_raises(self):
+        with pytest.raises(ConfigError, match="value_format"):
+            validate_config(cfg(pagination=self.keyset(value_format="iso_week")))
+
+    def test_body_template_requires_an_explicit_value_format(self):
+        with pytest.raises(ConfigError, match="value_format"):
+            validate_config(cfg(
+                method="POST",
+                body={"q": "select * from t where id > {since_id}"},
+                pagination=self.keyset(params_in="body_template"),
+            ))
+
+    def test_body_template_with_a_value_format_is_valid(self):
+        validate_config(cfg(
+            method="POST",
+            body={"q": "select * from t where id > {since_id}"},
+            pagination=self.keyset(
+                params_in="body_template", value_format="numeric"
+            ),
+        ))
+
+
+class TestParamsInBodyTemplate:
+    BASE_KEYSET = {
+        "type": "keyset", "key_field": "id", "key_param": "since_id",
+        "params_in": "body_template", "value_format": "numeric",
+    }
+
+    def test_requires_a_post(self):
+        with pytest.raises(ConfigError, match="POST"):
+            validate_config(cfg(pagination=self.BASE_KEYSET))
+
+    def test_requires_a_body(self):
+        with pytest.raises(ConfigError, match="body"):
+            validate_config(cfg(method="POST", pagination=self.BASE_KEYSET))
+
+    def test_rejects_top_level_params(self):
+        with pytest.raises(ConfigError, match="params"):
+            validate_config(cfg(
+                method="POST",
+                body={"q": "{since_id}"},
+                params={"status": "active"},
+                pagination=self.BASE_KEYSET,
+            ))
+
+    def test_rejects_a_watermark_sent_as_a_query_param(self):
+        with pytest.raises(ConfigError, match="inject"):
+            validate_config(cfg(
+                method="POST",
+                body={"q": "{since_id}"},
+                incremental={
+                    "enabled": True, "field": "ts", "param_name": "since",
+                },
+                pagination=self.BASE_KEYSET,
+            ))
+
+    def test_a_watermark_in_the_body_is_accepted(self):
+        validate_config(cfg(
+            method="POST",
+            body={"q": "where ts > '{watermark}' and id > {since_id}"},
+            incremental={
+                "enabled": True, "field": "ts", "inject": "body_template",
+                "value_format": "iso_datetime", "initial_value": "2020-01-01T00:00:00Z",
+            },
+            pagination=self.BASE_KEYSET,
+        ))
+
+    def test_an_unknown_params_in_raises(self):
+        with pytest.raises(ConfigError, match="params_in"):
+            validate_config(cfg(pagination={"type": "offset", "params_in": "url"}))
+
+
+class TestPaginationBounds:
+    @pytest.mark.parametrize("key", ["max_pages", "max_rows"])
+    def test_positive_integers_are_valid(self, key):
+        validate_config(cfg(pagination={"type": "offset", key: 10}))
+
+    @pytest.mark.parametrize("key", ["max_pages", "max_rows"])
+    @pytest.mark.parametrize("value", [0, -5])
+    def test_non_positive_raises(self, key, value):
+        with pytest.raises(ConfigError, match="supérieur à 0"):
+            validate_config(cfg(pagination={"type": "offset", key: value}))
+
+    @pytest.mark.parametrize("key", ["max_pages", "max_rows"])
+    @pytest.mark.parametrize("value", ["10", 1.5, True])
+    def test_non_integer_raises(self, key, value):
+        with pytest.raises(ConfigError, match="entier"):
+            validate_config(cfg(pagination={"type": "offset", key: value}))
+
+    def test_bounds_are_accepted_by_every_strategy(self):
+        for pagination_type in ("offset", "page", "next_link"):
+            validate_config(cfg(pagination={
+                "type": pagination_type, "max_pages": 5, "max_rows": 500,
+            }))

@@ -275,12 +275,16 @@ def _build_fetch_page(config: dict, variables: dict | None = None):
     retry_config = config.get("retry", {})
     timeout = config.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
     method = str(config.get("method", "GET")).upper()
-    base_body = _render_body(
-        config.get("body", {}), variables or {}, config.get("template_paths")
-    )
     body_format = config.get("body_format", "json")
     pagination_config = config.get("pagination") or {}
     params_in = pagination_config.get("params_in", "query")
+    template_paths = config.get("template_paths")
+    if params_in == "body_template":
+        # Le corps change à chaque page : le rendre ici échouerait sur les
+        # placeholders que seule la pagination sait remplir.
+        base_body = config.get("body", {})
+    else:
+        base_body = _render_body(config.get("body", {}), variables or {}, template_paths)
     params_path = pagination_config.get("params_path")
     errors_config = config.get("errors")
     retryer = Retrying(
@@ -306,6 +310,10 @@ def _build_fetch_page(config: dict, variables: dict | None = None):
             kwargs["params"] = params
         elif params_in == "body":
             kwargs[body_key] = _merge_params_into_body(base_body, params, params_path)
+        elif params_in == "body_template":
+            kwargs[body_key] = _render_body(
+                base_body, {**(variables or {}), **params}, template_paths
+            )
         else:
             kwargs["params"] = params
             kwargs[body_key] = dict(base_body)

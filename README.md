@@ -2,7 +2,7 @@
 
 Generic API ingestion accelerator for **Microsoft Fabric Python notebooks** (non-Spark). Pure Python: Delta writes via [delta-rs](https://github.com/delta-io/delta-rs) (`deltalake`), no PySpark dependency.
 
-Point it at a JSON list of API sources; it handles authentication (Key Vault-backed secrets, OAuth2 service principals, OAuth 1.0a signing, custom login endpoints), pagination (offset, page, next-link, cursor), incremental loading with watermarks, bounded retries, and writes everything — data and run logs — as Delta tables in a schema-enabled lakehouse. REST and GraphQL endpoints are both covered by the same generic options — no per-API code.
+Point it at a JSON list of API sources; it handles authentication (Key Vault-backed secrets, OAuth2 service principals, OAuth 1.0a signing, custom login endpoints), pagination (offset, page, next-link, cursor, keyset), incremental loading with watermarks, bounded retries, and writes everything — data and run logs — as Delta tables in a schema-enabled lakehouse. REST and GraphQL endpoints are both covered by the same generic options — no per-API code.
 
 ## Requirements
 
@@ -147,12 +147,15 @@ Beyond authentication, `headers` adds fixed headers to every data call (literal 
 | `page` | Page number; total page count read from a response header (`total_pages_header`) or stop on empty/partial page |
 | `next_link` | Follows a next-page URL from the response body (e.g. `@odata.nextLink`) |
 | `cursor` | Opaque cursor read from the response; `has_more_field` covers Relay/GraphQL connections |
+| `keyset` | Filters each page by the key of the last record seen (`id > last`); the only strategy that gets past an offset cap |
 
 Records are located with `items_field` (a dotted path — `data.orders.edges`) and, where each item is a wrapper, unwrapped with `record_field` (`node`).
 
-Data endpoints can be `GET` (default) or `POST`/`PUT`/`PATCH` via `method` + `body`; `pagination.params_in` decides whether pagination params go to the query string or into the request payload, and `params_path` where inside that payload (GraphQL: `variables`).
+Data endpoints can be `GET` (default) or `POST`/`PUT`/`PATCH` via `method` + `body`; `pagination.params_in` decides whether pagination params go to the query string, are merged into the request payload as JSON values, or are substituted into the `{placeholder}` markers of `body` (`body_template`, for SQL-over-REST endpoints), and `params_path` where inside that payload (GraphQL: `variables`).
 
-Some APIs cap how far an offset may go (NetSuite refuses past 100 000). Past that, split the source into bounded slices — one run per month or per id range — rather than paging further; see [examples/netsuite_suiteql.py](examples/netsuite_suiteql.py).
+Some APIs cap how far an offset may go (NetSuite refuses past 100 000). `keyset` is the answer: it filters on the last key seen instead of counting rows, so depth costs nothing and no cap applies — at the price of a source sorted by that key. Slicing the source into bounded windows remains an option; see [examples/netsuite_suiteql.py](examples/netsuite_suiteql.py).
+
+`max_pages` and `max_rows` bound a run. Reaching one **fails** the run rather than truncating it silently. Independently of them, a page identical to the one before it stops the run — an API that clamps an out-of-range page number and re-serves the first one has no natural stop condition.
 
 ### Incremental (watermark)
 
