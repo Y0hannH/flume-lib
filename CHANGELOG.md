@@ -2,7 +2,9 @@
 
 All notable changes to this project are documented here. Versions follow [semantic versioning](https://semver.org/); until 1.0.0, minor versions may contain breaking changes — these are always listed first.
 
-## [Unreleased]
+## [0.12.0] — 2026-08-25
+
+Two changes reach code that already exists. Every message the library raises is now in English, which breaks anything matching on message text — the exception *classes* are untouched, and remain the supported way to branch on a failure. And the incremental watermark, until now reinjected exactly as it was read, can be converted before it is sent: the gap that made an API dating its records in a local offset while filtering in UTC impossible to load incrementally at all. The rest is documentation — a cookbook organised by what an API does rather than by what the library offers, and a key index generated from the source instead of from anyone's memory.
 
 ### Changed
 
