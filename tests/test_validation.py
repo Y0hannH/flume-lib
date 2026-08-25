@@ -146,6 +146,23 @@ class TestIncrementalAndRetry:
         with pytest.raises(ConfigError, match="'field' required"):
             validate_config(cfg(incremental={"enabled": True, "param_name": "since"}))
 
+    def test_valid_normalize(self):
+        validate_config(
+            cfg(incremental={
+                "enabled": True, "field": "updated_at", "param_name": "since",
+                "normalize": "utc_iso",
+            })
+        )
+
+    def test_unknown_normalize_raises(self):
+        with pytest.raises(ConfigError, match="unknown 'normalize'"):
+            validate_config(
+                cfg(incremental={
+                    "enabled": True, "field": "updated_at", "param_name": "since",
+                    "normalize": "utc",
+                })
+            )
+
     def test_disabled_incremental_needs_nothing(self):
         validate_config(cfg(incremental={"enabled": False}))
 

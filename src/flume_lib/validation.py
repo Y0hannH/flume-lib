@@ -8,7 +8,7 @@ données seraient perdues sans aucun signal."""
 import difflib
 
 from flume_lib.oauth1 import SIGNATURE_METHODS
-from flume_lib.templating import VALUE_FORMATS, templated_placeholders
+from flume_lib.templating import NORMALIZERS, VALUE_FORMATS, templated_placeholders
 
 # Clés top-level
 _REQUIRED = ("base_url", "target_schema", "target_table")
@@ -92,7 +92,7 @@ _ERRORS_KEYS = ("path", "code_field", "message_field", "retryable_codes")
 
 _INCREMENTAL_KEYS = (
     "enabled", "field", "param_name", "inject", "placeholder",
-    "initial_value", "value_format", "checkpoint",
+    "initial_value", "value_format", "normalize", "checkpoint",
 )
 _INCREMENTAL_INJECTS = ("query_param", "body_template")
 _RETRY_KEYS = ("max_attempts", "backoff_multiplier", "max_retry_after_seconds")
@@ -370,6 +370,13 @@ def validate_config(config: dict) -> None:
             known = ", ".join(VALUE_FORMATS)
             raise ConfigError(
                 f"incremental: unknown 'value_format' '{value_format}' — "
+                f"expected one of: {known}"
+            )
+        normalize = incremental.get("normalize", "none")
+        if normalize not in NORMALIZERS:
+            known = ", ".join(NORMALIZERS)
+            raise ConfigError(
+                f"incremental: unknown 'normalize' '{normalize}' — "
                 f"expected one of: {known}"
             )
         if incremental.get("checkpoint") and not incremental.get("enabled"):

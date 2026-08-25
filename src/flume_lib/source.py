@@ -19,7 +19,12 @@ from flume_lib._delta import resolve_lakehouse_tables_path, table_uri, write_rec
 from flume_lib.auth import AuthProvider
 from flume_lib.logging_ import write_log_run
 from flume_lib.pagination import _MISSING, get_path, paginate
-from flume_lib.templating import check_value, render, templated_placeholders
+from flume_lib.templating import (
+    check_value,
+    normalize_value,
+    render,
+    templated_placeholders,
+)
 from flume_lib.validation import ConfigError, validate_config
 from flume_lib.watermark import read_watermark, write_watermark
 
@@ -655,6 +660,15 @@ def run_source(
                 # substitué et partirait tel quel dans la requête.
                 last_value = incremental.get("initial_value")
             if last_value is not None:
+                # Avant toute injection, et donc aussi bien pour la valeur
+                # relue que pour 'initial_value' : les deux doivent partir
+                # sous la même forme, sans quoi le premier run essaierait un
+                # format et les suivants un autre.
+                last_value = normalize_value(
+                    last_value,
+                    incremental.get("normalize", "none"),
+                    label="incremental: watermark",
+                )
                 if incremental.get("inject", "query_param") == "body_template":
                     placeholder = incremental.get("placeholder", "watermark")
                     variables[placeholder] = check_value(

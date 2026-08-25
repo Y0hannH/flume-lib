@@ -463,6 +463,95 @@ class TestWatermarkInBodyTemplate:
         assert http.instances[-1].calls[0]["params"]["since"] == "1970-01-01"
 
 
+class TestIncrementalNormalize:
+    """`normalize` reforme le watermark entre sa lecture et son depart vers
+    l'API : le cas d'une API qui date en fuseau local et ne filtre qu'en UTC."""
+
+    CONFIG = {
+        **BASE_CONFIG,
+        "incremental": {
+            "enabled": True,
+            "field": "updated_at",
+            "param_name": "updated_from",
+            "normalize": "utc_iso",
+        },
+    }
+
+    def test_watermark_is_sent_in_utc(self, http, delta):
+        delta["watermark_value"] = "2026-08-25T14:57:44.000+02:00"
+        http.next_payloads = [[{"id": 1, "updated_at": "2026-08-26T09:00:00.000+02:00"}]]
+        run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+        params = http.instances[-1].calls[0]["params"]
+        assert params["updated_from"] == "2026-08-25T12:57:44.000Z"
+
+    def test_initial_value_is_normalized_too(self, http, delta):
+        # premier run et runs suivants doivent partir sous la meme forme
+        config = {
+            **BASE_CONFIG,
+            "incremental": {
+                **self.CONFIG["incremental"],
+                "initial_value": "2024-01-01T00:00:00.000+01:00",
+            },
+        }
+        http.next_payloads = [[{"id": 1, "updated_at": "2026-08-26T09:00:00.000+02:00"}]]
+        run_source(config, lakehouse_tables_path=TABLES_PATH)
+        params = http.instances[-1].calls[0]["params"]
+        assert params["updated_from"] == "2023-12-31T23:00:00.000Z"
+
+    def test_stored_watermark_keeps_the_api_form(self, http, delta):
+        # la normalisation ne touche que ce qui est envoye : le watermark
+        # reste ce que l'API a ecrit, et le max d'un lot porte sur les
+        # valeurs brutes des enregistrements
+        delta["watermark_value"] = "2026-08-25T14:57:44.000+02:00"
+        http.next_payloads = [[{"id": 1, "updated_at": "2026-08-26T09:00:00.000+02:00"}]]
+        run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+        assert delta["watermark_write"] == [
+            ("s1", "2026-08-26T09:00:00.000+02:00")
+        ]
+
+    def test_unconvertible_watermark_fails_before_any_call(self, http, delta):
+        delta["watermark_value"] = "25/08/2026"
+        http.next_payloads = [[{"id": 1}]]
+        result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+        assert result.status == "failed"
+        assert "TemplateError" in result.error_message
+        assert http.instances == []
+
+    def test_body_template_is_normalized_as_well(self, http, delta):
+        delta["watermark_value"] = "2026-08-25T14:57:44.000+02:00"
+        config = {
+            **BASE_CONFIG,
+            "method": "POST",
+            "body": {"q": "WHERE ts > '{watermark}'"},
+            "incremental": {
+                "enabled": True,
+                "field": "updated_at",
+                "inject": "body_template",
+                "value_format": "iso_datetime",
+                "normalize": "utc_iso",
+            },
+        }
+        http.next_payloads = [[{"id": 1, "updated_at": "2026-08-26T09:00:00.000+02:00"}]]
+        run_source(config, lakehouse_tables_path=TABLES_PATH)
+        assert http.instances[-1].calls[0]["json"] == {
+            "q": "WHERE ts > '2026-08-25T12:57:44.000Z'"
+        }
+
+    def test_without_normalize_the_raw_value_is_sent(self, http, delta):
+        # non-regression : le defaut reste le passage verbatim
+        delta["watermark_value"] = "2026-08-25T14:57:44.000+02:00"
+        config = {
+            **BASE_CONFIG,
+            "incremental": {
+                "enabled": True, "field": "updated_at", "param_name": "updated_from",
+            },
+        }
+        http.next_payloads = [[{"id": 1, "updated_at": "2026-08-26T09:00:00.000+02:00"}]]
+        run_source(config, lakehouse_tables_path=TABLES_PATH)
+        params = http.instances[-1].calls[0]["params"]
+        assert params["updated_from"] == "2026-08-25T14:57:44.000+02:00"
+
+
 class TestResponseErrors:
     """Erreurs applicatives renvoyées avec un statut HTTP 200 — la norme en
     GraphQL."""

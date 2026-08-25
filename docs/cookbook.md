@@ -51,6 +51,7 @@ Two traps worth naming, because both fail silently rather than loudly:
 | Full reload, the table mirrors the source | `"write": {"mode": "overwrite"}`, no `incremental` |
 | Append-only stream (events, logs) | nothing — `append` is the default |
 | Only what changed since the last run | `"incremental": {"enabled": true, "field": …, "param_name": …}` |
+| …and the API dates its records in a local offset but filters in UTC | same + `"normalize": "utc_iso"` |
 | A rerunnable backfill, one window at a time | `"write": {"mode": "replace_where", "replace_where": "<SQL>"}` |
 
 `overwrite` and `replace_where` share one deliberate behaviour: **a run that loads zero rows replaces nothing.** The target keeps its previous contents and `RunResult.warnings` says so, on a run still marked `success`. An API that is down and a genuinely empty window both answer "0 rows", and emptying the table on that signal would destroy data without anything having failed. Read `warnings` in your run loop — it does not reach `log_runs`.
@@ -358,6 +359,7 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `placeholder` | — | `"watermark"` | name substituted in `body` with `"inject": "body_template"` |
 | `initial_value` | — | — |  |
 | `value_format` | — | `"any"` | one of `any` / `numeric` / `iso_date` / `iso_datetime` |
+| `normalize` | — | `"none"` | one of `none` / `utc_iso`; reshapes the watermark before it is **sent**, not as stored |
 | `checkpoint` | — | — | commits the watermark batch by batch; incompatible with any `write.mode` but `append` |
 
 #### `write`
