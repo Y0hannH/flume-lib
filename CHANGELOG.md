@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented here. Versions follow [semantic versioning](https://semver.org/); until 1.0.0, minor versions may contain breaking changes — these are always listed first.
 
+## [Unreleased]
+
+**The library is unchanged.** Documentation and tooling only.
+
+### Added
+
+- **[docs/cookbook.md](docs/cookbook.md).** Everything was already documented, and finding it still meant reading. The material was organised by library concept — the auth types together, the pagination types together — while writing a config means taking five independent decisions whose answers live in five sections of two files, and nobody thinks "I need the `page` strategy": they think "the vendor returns the page count in a header". The cookbook is the missing axis: three tables mapping an observable property of an API onto the block to write, the two configs that cover most vendor APIs — a static token in a header, and a token fetched by a login call with a client id and secret — and a failure-prefix table for reading `RunResult.error_message`. It replaces nothing — `configuration.md` still explains *why*, the examples still teach — it is the entry point and the place to come back to.
+- **A flat index of every configuration key**, with its block, whether it is required, and its default. That index is the half you want on the fourth source of the month, and the half most likely to rot: **[scripts/gen_key_index.py](scripts/gen_key_index.py)** generates it from the source rather than from anyone's memory. The keys come from `validation.py`, which is the authority — a key absent from those tuples is refused at validation. The defaults are read out of the implementation by AST, because that is where they live: `pagination_config.get("page_param", "page")` is the only honest statement of what `page_param` defaults to. The requirements written inline in `validate_config` — `cursor_field` once the type is `cursor`, `field` once `incremental.enabled` is true — cannot be introspected, so the script *proves* each one by building a valid config, removing the key, and demanding that validation object. A requirement that quietly disappears fails the generator instead of publishing a false line.
+- **A CI job for it** (`key-index`), on the model of the SHA table check: `--check` regenerates in memory and fails if the page has drifted. Nobody regenerates a doc when adding a key, and a reference index that is wrong is worse than no index at all — it gets consulted instead of the source, and believed.
+
+## [0.11.1] — 2026-08-25
+
+One fix, and the reason it stayed invisible: resolving the default lakehouse to its OneLake URI had only ever been exercised where the notebook and its lakehouse share a workspace — the arrangement nobody thinks to question until a lakehouse is attached from somewhere else.
+
+### Fixed
+
+- **A default lakehouse attached from another workspace resolved to a path that does not exist.** The OneLake URI was assembled from `currentWorkspaceId` — the workspace of the *notebook* — and the id of the default lakehouse, which are two different workspaces as soon as the attached lakehouse comes from elsewhere. The resulting `abfss://<notebook_workspace>@…/<lakehouse_id>/Tables` points nowhere, and every run failed on the first read of `_delta_log` with a 404 that named neither the workspace nor what was wrong with it. The lakehouse's own workspace (`defaultLakehouseWorkspaceId`) is now preferred, `currentWorkspaceId` remaining the fallback for the common case where both coincide. Passing `lakehouse_tables_path` explicitly was, and remains, the way to target a lakehouse that is not the default one.
+
 ## [0.11.0] — 2026-08-25
 
 The first release since 0.10.0 to change the library itself. Until now every write was an `append`, which made a backfill a one-shot operation: rerunning a monthly slice that had failed halfway added a second copy of its rows, and de-duplicating them by hand was the only way back. That mattered more since 0.10.0 made ingestion at-least-once. A run can now replace the window it loads instead of adding to it.

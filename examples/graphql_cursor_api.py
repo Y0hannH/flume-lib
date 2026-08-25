@@ -8,7 +8,7 @@
 # `params_path` to put the page params where GraphQL expects them, and `errors`
 # to catch what the API answers with an HTTP 200.
 #
-# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.11.0
+# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.11.1
 
 from flume_lib import run_source
 

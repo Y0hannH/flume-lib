@@ -36,6 +36,23 @@ class TestResolveLakehouseTablesPath:
             "abfss://ws-123@onelake.dfs.fabric.microsoft.com/lh-456/Tables"
         )
 
+    def test_uses_lakehouse_workspace_when_it_differs(self, fake_notebookutils):
+        """Un lakehouse attaché depuis un autre workspace : l'URI doit porter
+        le workspace du lakehouse. Assemblée avec celui du notebook, elle
+        désigne un chemin inexistant et la première lecture rend un 404."""
+        fake_notebookutils.runtime.context["defaultLakehouseWorkspaceId"] = "ws-999"
+        assert resolve_lakehouse_tables_path("/lakehouse/default/Tables") == (
+            "abfss://ws-999@onelake.dfs.fabric.microsoft.com/lh-456/Tables"
+        )
+
+    def test_falls_back_to_notebook_workspace(self, fake_notebookutils):
+        """Clé absente ou vide : le workspace du notebook reste le repli, et
+        il est correct tant que le lakehouse vit dans le même workspace."""
+        fake_notebookutils.runtime.context["defaultLakehouseWorkspaceId"] = ""
+        assert resolve_lakehouse_tables_path("/lakehouse/default/Tables") == (
+            "abfss://ws-123@onelake.dfs.fabric.microsoft.com/lh-456/Tables"
+        )
+
     def test_keeps_abfss_path_unchanged(self, fake_notebookutils):
         uri = "abfss://ws@onelake.dfs.fabric.microsoft.com/lh/Tables"
         assert resolve_lakehouse_tables_path(uri) == uri

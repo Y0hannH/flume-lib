@@ -43,6 +43,29 @@ jobs:
       - name: SHA table covers the published tags
         run: python scripts/check_readme_shas.py
 
+  # L'index des clés du cookbook est généré depuis validation.py et depuis les
+  # défauts lus dans l'implémentation. Personne ne pense à le regénérer en
+  # ajoutant une clé, et un index de référence faux est pire que pas d'index :
+  # on le consulte au lieu de lire la source, et on y croit. D'où ce contrôle
+  # plutôt qu'une ligne de plus dans une procédure.
+  key-index:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # le script résout les défauts nommés en important flume_lib.source,
+      # qui tire requests et delta-rs : les dépendances runtime suffisent
+      - name: Install the runtime dependencies
+        run: pip install .
+
+      - name: Key index matches the code
+        run: python scripts/gen_key_index.py --check
+
   audit:
     runs-on: ubuntu-latest
     steps:

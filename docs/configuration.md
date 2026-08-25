@@ -2,6 +2,8 @@
 
 Exhaustive reference of every option: the JSON configuration of a source (key by key, with required/optional status and defaults), the `run_source` parameters, and the secret reference format.
 
+Looking something up rather than reading through? [cookbook.md](cookbook.md) maps what a vendor's API does onto what to write, and carries a flat index of every key with its default. This page explains *why*; that one answers *which key*.
+
 ## Source overview
 
 ```json
@@ -287,7 +289,7 @@ run_source(config, lakehouse_tables_path=..., storage_options=..., log_schema=..
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `config` | dict | — | One entry of the configuration JSON (see above). |
-| `lakehouse_tables_path` | str | `/lakehouse/default/Tables` | Tables root. In Fabric, the default is automatically resolved to the OneLake ABFSS URI of the notebook's default lakehouse. Can be an explicit `abfss://...` URI to target another lakehouse. |
+| `lakehouse_tables_path` | str | `/lakehouse/default/Tables` | Tables root. In Fabric, the default is automatically resolved to the OneLake ABFSS URI of the default lakehouse — using that lakehouse's workspace, which is not always the notebook's. Can be an explicit `abfss://...` URI to target another lakehouse. |
 | `storage_options` | dict \| None | `None` | Passed through to delta-rs. If absent with an `abfss://` URI, a storage bearer token is obtained via `notebookutils`. |
 | `log_schema` | str | `flume` | Schema of the technical tables `watermark` and `log_runs`. |
 | `dry_run` | bool | `False` | See [Dry run](#dry-run). |

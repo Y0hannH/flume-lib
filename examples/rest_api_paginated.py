@@ -8,7 +8,7 @@
 #
 # Read this one first; the others assume it.
 #
-# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.11.0
+# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.11.1
 
 from flume_lib import ConfigError, run_source, validate_config
 

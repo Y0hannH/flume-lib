@@ -30,7 +30,7 @@ No code is fetched from GitHub or PyPI at runtime — the notebook installs exac
 3. In the notebook:
 
    ```python
-   %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.11.0
+   %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.11.1
    ```
 
 `--no-index` guarantees pip resolves only from that folder — nothing is fetched from PyPI or GitHub. The folder layout is entirely up to you: any path works as long as the same path is passed to `--find-links`.
@@ -93,6 +93,8 @@ The library targets **schema-enabled lakehouses only**: each source declares its
 
 ## Source configuration
 
+> ⚡ **Writing a config right now**: [docs/cookbook.md](docs/cookbook.md) — "the vendor's API does X → write Y" for auth, pagination and reload strategy, plus a flat index of every key with its default, generated from the source. Start here once you know the library.
+>
 > 📖 **Full reference**: [docs/configuration.md](docs/configuration.md) — every key of every auth and pagination type, with required/optional status, defaults, stop conditions and examples. Below is an overview.
 
 Configurations are **strictly validated**: an unknown key is an error with a "did you mean…" suggestion, never a silent no-op. `validate_config(config)` is exported so a whole source list can be checked before running anything.
@@ -234,6 +236,8 @@ Every file in [`examples/`](examples/) is a complete Fabric notebook, runnable a
 ## Delta writes in Fabric (OneLake)
 
 The local `/lakehouse/default/...` mount in Fabric notebooks does not support the atomic rename that the delta-rs transaction log commit requires (`Operation not permitted (os error 1)`, table left without a valid `_delta_log`). The library works around this automatically: in Fabric, the default path is resolved to the OneLake ABFSS URI of the notebook's default lakehouse, and writes authenticate with a storage token obtained via `notebookutils` — nothing to configure.
+
+The default lakehouse may live in another workspace than the notebook — the URI carries the lakehouse's workspace, not the notebook's. If the runtime context does not expose it, resolution falls back to the notebook's workspace and the run fails with a 404 on `_delta_log`; pass `lakehouse_tables_path` explicitly in that case.
 
 To target another lakehouse, pass its ABFSS URI directly:
 

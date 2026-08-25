@@ -10,6 +10,14 @@ from deltalake.exceptions import TableNotFoundError
 
 ONELAKE_HOST = "onelake.dfs.fabric.microsoft.com"
 
+# Le workspace à mettre dans l'URI est celui du lakehouse attaché, pas celui du
+# notebook : les deux diffèrent dès qu'on attache un lakehouse d'un autre
+# workspace, et l'URI assemblée avec `currentWorkspaceId` désigne alors un
+# chemin qui n'existe pas — 404 dès la première lecture de `_delta_log`, sans
+# que le token soit en cause. `currentWorkspaceId` reste le repli : il est
+# correct dans le cas courant, et les clés du contexte varient selon le runtime.
+WORKSPACE_CONTEXT_KEYS = ("defaultLakehouseWorkspaceId", "currentWorkspaceId")
+
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -36,14 +44,22 @@ def table_uri(lakehouse_tables_path: str, schema: str, table_name: str) -> str:
 def resolve_lakehouse_tables_path(path: str) -> str:
     """Dans Fabric, convertit le chemin local du lakehouse par défaut vers son
     URI ABFSS OneLake : le montage local ne supporte pas le rename atomique
-    requis par le commit du transaction log delta-rs (os error 1)."""
+    requis par le commit du transaction log delta-rs (os error 1).
+
+    Le lakehouse par défaut peut vivre dans un autre workspace que le notebook ;
+    l'URI porte le workspace du lakehouse (voir WORKSPACE_CONTEXT_KEYS). Si le
+    contexte ne l'expose pas, le repli sur le workspace du notebook produira un
+    chemin inexistant — passer `lakehouse_tables_path` explicitement."""
     if not path.startswith("/lakehouse/default/"):
         return path
     try:
         import notebookutils  # préinstallé dans les notebooks Fabric
 
         context = notebookutils.runtime.context
-        workspace_id = context.get("currentWorkspaceId")
+        workspace_id = next(
+            (context.get(key) for key in WORKSPACE_CONTEXT_KEYS if context.get(key)),
+            None,
+        )
         lakehouse_id = context.get("defaultLakehouseId")
         if workspace_id and lakehouse_id:
             suffix = path.removeprefix("/lakehouse/default/").strip("/")
