@@ -222,6 +222,7 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `template_paths` | — | — | restricts body templating to these branches (GraphQL braces) |
 | `batch_size` | — | `50 000` | rows per Delta commit; caps the memory a run uses |
 | `write` | — | — |  |
+| `allow_body_on_get` | — | — | lets a GET carry a body — refused by default, most APIs ignore it |
 
 #### `pagination` — common to every strategy
 

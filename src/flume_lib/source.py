@@ -314,13 +314,19 @@ def _build_fetch_page(config: dict, variables: dict | None = None):
     if auth.signer is not None:
         session.auth = auth.signer
     body_key = "json" if body_format == "json" else "data"
+    # Un GET porteur d'un corps n'a pas de semantique definie par HTTP, et la
+    # plupart des APIs l'ignorent : le refuser est le bon defaut. Certaines
+    # l'exigent pourtant — leur filtre ne vit que la. Une fois l'exception
+    # declaree, un GET suit exactement les memes branches qu'un POST : c'est
+    # `params_in` qui decide ou vont les parametres, pas la methode.
+    allow_body_on_get = bool(config.get("allow_body_on_get"))
 
     def _request(url: str, params: dict, state: dict):
         if auth.refreshable:
             # renouvellement anticipé quand le endpoint annonce une expiration
             session.headers.update(auth.headers())
         kwargs = {"timeout": timeout}
-        if method == "GET":
+        if method == "GET" and not allow_body_on_get:
             kwargs["params"] = params
         elif params_in == "body":
             kwargs[body_key] = _merge_params_into_body(base_body, params, params_path)

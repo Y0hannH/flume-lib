@@ -282,6 +282,8 @@ _NOTES = {
     ("config", "body"): 'rejected on GET — set `"method": "POST"`',
     ("config", "template_paths"): "restricts body templating to these branches (GraphQL braces)",
     ("config", "batch_size"): "rows per Delta commit; caps the memory a run uses",
+    ("config", "allow_body_on_get"):
+        "lets a GET carry a body — refused by default, most APIs ignore it",
     ("pagination.*", "items_field"):
         "dotted path; without it, `data`/`items`/`results`/`value` are probed",
     ("pagination.*", "record_field"): "extracts a sub-object out of each record",

@@ -15,7 +15,7 @@ _REQUIRED = ("base_url", "target_schema", "target_table")
 _OPTIONAL = (
     "name", "params", "auth", "pagination", "incremental", "retry",
     "timeout_seconds", "method", "body", "body_format", "headers",
-    "errors", "template_paths", "batch_size", "write",
+    "errors", "template_paths", "batch_size", "write", "allow_body_on_get",
 )
 
 # Clés autorisées par type d'auth. Les formes historiques *_env_var sont
@@ -170,7 +170,10 @@ def validate_config(config: dict) -> None:
     method = str(config.get("method", "GET")).upper()
     if method not in ("GET", "POST", "PUT", "PATCH"):
         raise ConfigError(f"config: unsupported HTTP method '{method}'")
-    if "body" in config and method == "GET":
+    allow_body_on_get = config.get("allow_body_on_get", False)
+    if not isinstance(allow_body_on_get, bool):
+        raise ConfigError("config: 'allow_body_on_get' must be a boolean")
+    if "body" in config and method == "GET" and not allow_body_on_get:
         raise ConfigError(
             "config: 'body' is ignored on GET — set \"method\": \"POST\""
         )
@@ -271,7 +274,11 @@ def validate_config(config: dict) -> None:
                 f"pagination: 'params_in' must be one of {known}, "
                 f"not '{params_in}'"
             )
-        if params_in in ("body", "body_template") and method == "GET":
+        if (
+            params_in in ("body", "body_template")
+            and method == "GET"
+            and not allow_body_on_get
+        ):
             raise ConfigError(
                 f'pagination: "params_in": "{params_in}" requires a POST method'
             )

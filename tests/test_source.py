@@ -1545,3 +1545,66 @@ class TestWriteModes:
         assert result.status == "failed"
         assert "checkpoint" in result.error_message
         assert delta["writes"] == []
+
+
+class TestBodyOnGet:
+    """Certaines APIs ne lisent leur filtre que dans le corps d'un GET. La
+    validation le refuse par defaut, et le runtime laissait tomber le corps
+    silencieusement : les deux se declarent ensemble."""
+
+    CONFIG = {
+        **BASE_CONFIG,
+        "allow_body_on_get": True,
+        "body": {"updated_from": "{watermark}"},
+        "incremental": {
+            "enabled": True,
+            "field": "updated_at",
+            "inject": "body_template",
+            "placeholder": "watermark",
+            "value_format": "iso_datetime",
+            "normalize": "utc_iso",
+        },
+    }
+
+    def test_body_is_sent_on_get(self, http, delta):
+        delta["watermark_value"] = "2026-08-25T16:05:30.000+02:00"
+        http.next_payloads = [[{"id": 1, "updated_at": "2026-08-26T09:00:00.000+02:00"}]]
+        result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        call = http.instances[-1].calls[0]
+        assert call["method"] == "GET"
+        assert call["json"] == {"updated_from": "2026-08-25T14:05:30.000Z"}
+
+    def test_pagination_stays_in_the_query_string(self, http, delta):
+        # params_in vaut "query" : page/per_page restent dans l'URL pendant que
+        # le watermark vit dans le corps
+        delta["watermark_value"] = "2026-08-25T16:05:30.000+02:00"
+        config = {
+            **self.CONFIG,
+            "pagination": {
+                "type": "page", "page_param": "page",
+                "size_param": "per_page", "page_size": 100,
+            },
+        }
+        http.next_payloads = [
+            [{"id": i, "updated_at": "2026-08-26T09:00:00.000+02:00"} for i in range(100)],
+            [{"id": 101, "updated_at": "2026-08-26T09:00:00.000+02:00"}],
+        ]
+        run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        calls = http.instances[-1].calls
+        assert calls[0]["params"] == {"page": 1, "per_page": 100}
+        assert calls[1]["params"] == {"page": 2, "per_page": 100}
+        # le corps est identique d'une page a l'autre : il ne porte que le filtre
+        assert calls[0]["json"] == calls[1]["json"] == {
+            "updated_from": "2026-08-25T14:05:30.000Z"
+        }
+
+    def test_without_the_flag_the_config_is_refused(self, http, delta):
+        config = {k: v for k, v in self.CONFIG.items() if k != "allow_body_on_get"}
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+        assert result.status == "failed"
+        assert "ignored on GET" in result.error_message
+        assert http.instances == []
+

@@ -44,7 +44,8 @@ Looking something up rather than reading through? [cookbook.md](cookbook.md) map
 | `retry` | object | no | see [Retry](#retry) | HTTP retry policy. |
 | `timeout_seconds` | number | no | `60` | Timeout of each data HTTP request. |
 | `method` | string | no | `GET` | HTTP method of the data calls: `GET`, `POST`, `PUT`, `PATCH`. |
-| `body` | object | no | `{}` | Request body sent on every data call. Requires a non-`GET` `method`. |
+| `body` | object | no | `{}` | Request body sent on every data call. Requires a non-`GET` `method`, unless `allow_body_on_get` says otherwise. |
+| `allow_body_on_get` | boolean | no | `false` | Lets a `GET` carry a body. See [A body on a GET](#a-body-on-a-get). |
 | `body_format` | string | no | `json` | `json` or `form` encoding of `body`. |
 | `headers` | object | no | `{}` | Fixed HTTP headers added to every data call (literal strings only). Auth headers always win over these. For a credential, use `auth` — never put a secret here. |
 | `errors` | object | no | disabled | Application-error envelope of APIs that report failures inside a successful HTTP response. See [Application errors in a 200](#application-errors-in-a-200). |
@@ -761,6 +762,27 @@ That is also why `checkpoint` is refused with a replacing mode: resuming mid-run
 `partition_by` sets the partition columns **when the table is created**. Delta fixes them at that point: passing them for an existing unpartitioned table fails with an explicit message, since changing them means rewriting the table whole, which this library does not do. Partition on a column a `replace_where` predicate filters on and the replacement only rewrites the matching partitions.
 
 The library performs no `OPTIMIZE` and no `VACUUM`. A table written batch after batch accumulates small files, and the replaced files stay on disk until vacuumed — schedule both out of band if a table grows enough to need them.
+
+### A body on a GET
+
+HTTP gives a body on a `GET` no defined semantics, and most APIs drop it without a word, so a `body` alongside `"method": "GET"` is refused by default — the mistake is common and silent. Some APIs do read one, though, and put their filter nowhere else: the incidents endpoint of SolarWinds Service Desk is one. `"allow_body_on_get": true` declares that exception.
+
+Once declared, a `GET` follows exactly the same paths as a `POST`: `pagination.params_in` decides where the parameters go, not the method. Pagination therefore stays in the query string while the filter lives in the body, with nothing special to write:
+
+```json
+{
+  "method": "GET",
+  "allow_body_on_get": true,
+  "body": {"updated_from": "{watermark}"},
+  "pagination": {"type": "page", "page_param": "page", "size_param": "per_page", "page_size": 100},
+  "incremental": {
+    "enabled": true, "field": "updated_at", "inject": "body_template",
+    "placeholder": "watermark", "value_format": "iso_datetime", "normalize": "utc_iso"
+  }
+}
+```
+
+The flag only lifts a refusal; it changes nothing for a config that does not set a body.
 
 ## Incremental (watermark)
 

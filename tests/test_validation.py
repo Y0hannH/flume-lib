@@ -722,3 +722,42 @@ class TestWrite:
             write={"mode": "replace_where", "replace_where": "m = '01'"},
             incremental={"enabled": True, "field": "ts", "param_name": "since"},
         ))
+
+
+class TestBodyOnGet:
+    """Un GET porteur d'un corps est refuse par defaut — la plupart des APIs
+    l'ignorent, et le silence coute cher. Certaines l'exigent : l'exception se
+    declare."""
+
+    def test_body_on_get_is_refused_by_default(self):
+        with pytest.raises(ConfigError, match="ignored on GET"):
+            validate_config(cfg(body={"updated_from": "2026-01-01"}))
+
+    def test_body_on_get_is_allowed_once_declared(self):
+        validate_config(
+            cfg(body={"updated_from": "2026-01-01"}, allow_body_on_get=True)
+        )
+
+    def test_body_on_post_needs_no_flag(self):
+        validate_config(cfg(method="POST", body={"updated_from": "2026-01-01"}))
+
+    def test_params_in_body_on_get_is_refused_by_default(self):
+        # sans cle 'body' : sinon la regle precedente tire la premiere
+        with pytest.raises(ConfigError, match="requires a POST method"):
+            validate_config(
+                cfg(pagination={"type": "offset", "params_in": "body"})
+            )
+
+    def test_params_in_body_on_get_is_allowed_once_declared(self):
+        validate_config(
+            cfg(
+                pagination={"type": "offset", "params_in": "body"},
+                allow_body_on_get=True,
+            )
+        )
+
+    @pytest.mark.parametrize("value", ["true", 1, None])
+    def test_non_boolean_raises(self, value):
+        with pytest.raises(ConfigError, match="must be a boolean"):
+            validate_config(cfg(allow_body_on_get=value))
+
