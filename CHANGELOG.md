@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here. Versions follow [semantic versioning](https://semver.org/); until 1.0.0, minor versions may contain breaking changes — these are always listed first.
 
+## [0.10.2] — 2026-08-24
+
+**The library is unchanged** — `src/flume_lib` is identical to 0.10.0. This release closes the gap the 0.10.1 pipeline left open.
+
+### Added
+
+- **A release is gated on its own test suite.** CI and Release are separate workflows and Actions offers no `needs:` between workflows, so both now call one reusable workflow ([.github/workflows/tests.yml](.github/workflows/tests.yml)) that lints and runs the suite on 3.10, 3.11 and 3.12. Release runs it **against the exact ref it is about to publish**, before building a single batch. Until now the two workflows started in parallel on a tag push and the release verified the batches but never the code: a tag placed on a commit that had never passed CI would have been published all the same. Defining the steps once, rather than copying them into both workflows, is deliberate — two copies drift, and it is the Release copy that matters.
+
 ## [0.10.1] — 2026-08-24
 
 **The library itself is unchanged**: `src/flume_lib` is identical to 0.10.0, so the installed package behaves exactly the same. What this release carries is the tooling around it — batch verification, an automated release pipeline, and a fix to the batch builder that was producing incomplete bundles for kernels other than the one it ran on.
@@ -12,7 +20,6 @@ All notable changes to this project are documented here. Versions follow [semant
 - **`scripts/audit_dependencies.py`**: queries [OSV.dev](https://osv.dev) for known vulnerabilities, either over the installed runtime closure or over a specific wheel batch. Exits non-zero when a vulnerability is known **and** when the check could not run — a check that did not execute is not a check that passed.
 - **`audit` CI job**, on every push and pull request, and **every Monday morning**. The weekly run is the reason it exists: an offline install freezes its versions, so a CVE published after a release surfaces nowhere. Nothing in a deployed lakehouse announces that its `urllib3` became vulnerable last week.
 - **Automated releases** ([.github/workflows/release.yml](.github/workflows/release.yml)): pushing a `v*` tag builds one offline batch **per Fabric kernel version** (3.10, 3.11, 3.12), verifies each — digests against PyPI, dependencies against OSV — and publishes the GitHub Release with the three zips and the wheel attached, using the CHANGELOG section as its notes. A failing check stops the publication. Runnable manually from the Actions tab for a tag that is already pushed.
-- **A release is gated on the test suite.** CI and Release are separate workflows and Actions offers no `needs:` between workflows, so both now call one reusable workflow ([.github/workflows/tests.yml](.github/workflows/tests.yml)) that lints and runs the suite on 3.10, 3.11 and 3.12. Release runs it against the exact ref being published, before building anything. Previously the two ran in parallel on a tag push and the release verified the batches but never the code — a tag on a commit that had never passed CI would have published regardless.
 - **`scripts/release_notes.py`**: extracts a version's section from the CHANGELOG. Exits non-zero when the section is missing — a release without notes is a release published without knowing what it contains.
 - **[docs/security.md](docs/security.md) gains "Verifying a batch"** and "What these checks do not prove" — including that PyPI stopped signing packages in 2023, so a digest match proves the file equals what PyPI serves and nothing about whether what PyPI serves is sound.
 
