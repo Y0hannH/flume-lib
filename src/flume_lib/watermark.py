@@ -3,7 +3,7 @@
 
 from datetime import datetime, timezone
 
-from flume_lib._delta import append_records, query_table, sql_quote, table_uri
+from flume_lib._delta import query_table, sql_quote, table_uri, write_records
 
 WATERMARK_TABLE = "watermark"
 
@@ -34,7 +34,7 @@ def write_watermark(
     storage_options: dict | None = None,
 ) -> None:
     uri = table_uri(lakehouse_tables_path, schema, WATERMARK_TABLE)
-    append_records(
+    write_records(
         uri,
         [
             {

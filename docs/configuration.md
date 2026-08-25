@@ -20,6 +20,7 @@ Exhaustive reference of every option: the JSON configuration of a source (key by
   "errors": { ... },
   "target_schema": "bronze",
   "target_table": "my_source",
+  "write": { ... },
   "batch_size": 50000,
   "retry": { ... },
   "timeout_seconds": 60
@@ -35,7 +36,8 @@ Exhaustive reference of every option: the JSON configuration of a source (key by
 | `pagination` | object | no | single call | See [Pagination](#pagination). Absent or `{"type": "none"}` = one HTTP call. |
 | `incremental` | object | no | disabled | See [Incremental](#incremental-watermark). |
 | `target_schema` | string | **yes** | — | Destination schema for the data (schema-enabled lakehouse required). Letters/digits/underscore only. |
-| `target_table` | string | **yes** | — | Destination table. Written in `append` mode with `schema_mode=merge`. Letters/digits/underscore only. |
+| `target_table` | string | **yes** | — | Destination table, written with `schema_mode=merge`. Letters/digits/underscore only. |
+| `write` | object | no | append | How the target table is written: append, full overwrite, or replacement of one window. See [Write mode](#write-mode). |
 | `batch_size` | integer | no | `50000` | Rows buffered before each Delta write. Bounds the memory of a run. See [Batched writes](#batched-writes). |
 | `retry` | object | no | see [Retry](#retry) | HTTP retry policy. |
 | `timeout_seconds` | number | no | `60` | Timeout of each data HTTP request. |
@@ -93,7 +95,7 @@ Some APIs require a header that is not authentication. `headers` adds fixed head
 
 ```json
 {
-  "base_url": "https://1234567.suitetalk.api.netsuite.com/services/rest/query/v1/suiteql",
+  "base_url": "https://api.example.com/services/rest/query/v1/sql",
   "headers": {"Prefer": "transient"},
   "method": "POST",
   "body": {"q": "SELECT id FROM customer"},
@@ -178,11 +180,11 @@ Scope and timing:
 
 Without this block, two things go wrong. A **partial** failure — valid `data` next to an `errors` entry, e.g. one field refused by a missing scope — is reported `success` while quietly missing part of what was asked for. A **total** failure surfaces only as a pagination error ("Impossible de localiser les enregistrements"), which says nothing about the actual cause. The API's own message is what ends up in `log_runs`, truncated to 500 characters over at most 3 errors — an error message quoting the whole query would otherwise be stored page after page.
 
-`retryable_codes` is also how throttling is caught on APIs that announce it in the body rather than with a 429 (Shopify's cost-based limiter does exactly that). A `Retry-After` header on such a response is still honored.
+`retryable_codes` is also how throttling is caught on APIs that announce it in the body rather than with a 429 (cost-based limiters commonly do exactly that). A `Retry-After` header on such a response is still honored.
 
 ## GraphQL endpoints
 
-GraphQL needs no dedicated source type: it is a POST of a JSON body to a single URL. Five generic options do the work, and this section puts them together. The worked example is Shopify's Admin API, but nothing below is Shopify-specific — any Relay connection has the same shape.
+GraphQL needs no dedicated source type: it is a POST of a JSON body to a single URL. Five generic options do the work, and this section puts them together. The worked example below is a commerce admin API, but nothing in it is specific to one vendor — every connection built on the `edges`/`node` convention has the same shape.
 
 | GraphQL concept | Option that covers it |
 |---|---|
@@ -199,13 +201,13 @@ GraphQL needs no dedicated source type: it is a POST of a JSON body to a single 
 
 ```json
 {
-  "name": "shopify_orders",
-  "base_url": "https://my-shop.myshopify.com/admin/api/2026-07/graphql.json",
+  "name": "commerce_orders",
+  "base_url": "https://api.example.com/admin/2026-07/graphql.json",
   "method": "POST",
   "auth": {
     "type": "api_key_header",
-    "header_name": "X-Shopify-Access-Token",
-    "key": {"keyvault_url": "https://kv.vault.azure.net", "secret_name": "shopify-admin-token"}
+    "header_name": "X-Api-Access-Token",
+    "key": {"keyvault_url": "https://kv.vault.azure.net", "secret_name": "graphql-admin-token"}
   },
   "body": {
     "query": "query Orders($first: Int!, $after: String, $q: String) { orders(first: $first, after: $after, query: $q, sortKey: UPDATED_AT) { edges { node { id name updatedAt } } pageInfo { hasNextPage endCursor } } }",
@@ -233,7 +235,7 @@ GraphQL needs no dedicated source type: it is a POST of a JSON body to a single 
   },
   "errors": {"path": "errors", "retryable_codes": ["THROTTLED"]},
   "retry": {"max_attempts": 6, "backoff_multiplier": 2},
-  "target_schema": "shopify",
+  "target_schema": "commerce",
   "target_table": "orders"
 }
 ```
@@ -274,7 +276,7 @@ How scalars themselves are typed: [Column types in Delta](#column-types-in-delta
 | Run `success` with fewer rows than expected | An `errors` entry alongside valid `data`, with no `errors` block declared. |
 | `THROTTLED` even after retries | The cost limiter, not the request rate: lower `limit`, or ask for fewer fields. |
 
-Working notebook, auth to Delta: [examples/shopify_graphql.py](../examples/shopify_graphql.py).
+Working notebook, auth to Delta: [examples/graphql_cursor_api.py](../examples/graphql_cursor_api.py).
 
 ## `run_source` parameters
 
@@ -291,6 +293,8 @@ run_source(config, lakehouse_tables_path=..., storage_options=..., log_schema=..
 | `dry_run` | bool | `False` | See [Dry run](#dry-run). |
 
 Returns a `RunResult` with `source_name`, `status` (`success`/`failed`), `rows_loaded`, `error_message` (None on success), `start_ts`, `end_ts` (ISO 8601 UTC), `run_id` (UUID), and `sample` (dry run only). **Never raises.**
+
+All four parameters worked through, with the cases each one exists for: [examples/run_options.py](../examples/run_options.py).
 
 ### Dry run
 
@@ -469,7 +473,7 @@ Form-encoded variant with a custom output header:
 }
 ```
 
-### `oauth1` — OAuth 1.0a request signing (NetSuite TBA, legacy APIs)
+### `oauth1` — OAuth 1.0a request signing (ERP token auth, legacy APIs)
 
 Unlike every other type, OAuth 1.0a cannot be reduced to a fixed header: the signature covers the method, the URL and the query params of **each** request, so it is recomputed page after page.
 
@@ -488,12 +492,12 @@ Unlike every other type, OAuth 1.0a cannot be reduced to a fixed header: the sig
 |---|---|---|
 | `consumer_key` / `consumer_secret` | **yes** | Application credentials (secret references). |
 | `token` / `token_secret` | no, but together | Access token credentials. Omitting both gives two-legged OAuth 1.0a. |
-| `realm` | no | Sent in the header, outside the signature. NetSuite requires the account id here (`1234567`, `1234567_SB1`). |
+| `realm` | no | Sent in the header, outside the signature. APIs that use it expect the account id here (e.g. `1234567`). |
 | `signature_method` | no (default `HMAC-SHA256`) | `HMAC-SHA256` or `HMAC-SHA1`. |
 
 Implemented on the standard library only — no extra wheel to freeze for Fabric. A JSON request body is never signed (RFC 5849 §3.4.1.3.1); a `form` body is.
 
-> **Redirects.** The signature covers the request URL, and `requests` replays the original `Authorization` header on a same-host redirect instead of re-signing — the API then sees an invalid signature and answers 401. Point `base_url` at the final URL. NetSuite's SuiteQL endpoint does not redirect.
+> **Redirects.** The signature covers the request URL, and `requests` replays the original `Authorization` header on a same-host redirect instead of re-signing — the API then sees an invalid signature and answers 401. Point `base_url` at the final URL.
 
 ### `none` / absent
 
@@ -506,7 +510,7 @@ The type is selected by `pagination.type`. All strategies accept:
 | Common key | Default | Description |
 |---|---|---|
 | `items_field` | auto | Response field containing the record list, as a **dotted path** (`data.orders.edges`). Left out, the probing order is: a response that is already a list is used as-is, otherwise `data`, `items`, `results`, `value`. Explicit error if none is found, or if the configured path is absent or resolves to something other than a list. A response that is already a top-level list short-circuits this key — `items_field` is not applied to it. |
-| `record_field` | absent | Dotted path unwrapped from **each item** of that list. Relay connections (GraphQL) wrap every record in a `{cursor, node}` — `"record_field": "node"` keeps the record. Missing from any item ⇒ explicit error. |
+| `record_field` | absent | Dotted path unwrapped from **each item** of that list. GraphQL connections wrap every record in a `{cursor, node}` — `"record_field": "node"` keeps the record. Missing from any item ⇒ explicit error. |
 | `params_in` | `query` | Where pagination and incremental params are sent: `query` (query string), `body` (merged into the request payload as JSON values), or `body_template` (each param whose `{placeholder}` appears in `body` is substituted there, the rest go to the query string). The last two require a non-`GET` `method`. |
 | `params_path` | root | With `"params_in": "body"`, dotted path inside `body` under which those params are merged (GraphQL: `variables`). The branch is created if absent. |
 | `max_pages` | none | Stops the run with an error past that many pages. See [Safety bounds](#safety-bounds). |
@@ -548,7 +552,7 @@ Runnable source: [examples/rest_api_paginated.py](../examples/rest_api_paginated
 
 ### `keyset` — filter by the last key seen (seek method)
 
-Each page is filtered by the value of `key_field` taken from the **last record of the previous page**, sent back in `key_param`. Unlike `offset`, the cost of a page does not grow with its depth and nothing caps it: this is the only strategy that reaches the bottom of a multi-million-row table on APIs that bound the offset — NetSuite stops at 100 000, which is what forces month-by-month slicing.
+Each page is filtered by the value of `key_field` taken from the **last record of the previous page**, sent back in `key_param`. Unlike `offset`, the cost of a page does not grow with its depth and nothing caps it: this is the only strategy that reaches the bottom of a multi-million-row table on APIs that bound the offset — some stop at 100 000, which is what forces month-by-month slicing.
 
 | Key | Required | Default | Description |
 |---|---|---|---|
@@ -595,10 +599,10 @@ SQL-over-REST form, where the key belongs inside the query itself:
 
 The key comes back from the API, so with `body_template` it is interpolated into a query and `value_format` is **required** — same rule, and the same reason, as the incremental watermark.
 
-`body_template` routes **per param**, not per request: a param whose `{placeholder}` appears in `body` is substituted there, every other one goes to the query string. Both channels of a request stay available, which is what the shape above needs — SuiteQL takes the key inside the SQL and `limit` as a query param:
+`body_template` routes **per param**, not per request: a param whose `{placeholder}` appears in `body` is substituted there, every other one goes to the query string. Both channels of a request stay available, which is what the shape above needs — a SQL-over-REST endpoint takes the key inside the SQL and `limit` as a query param:
 
 ```
-POST /suiteql?limit=1000
+POST /sql?limit=1000
 Body: {"q": "select id, amount from transactions where id > 2000 order by id"}
 ```
 
@@ -628,7 +632,7 @@ The `params`/`incremental` query params are sent on the first call only — the 
 
 Runnable sources: [examples/rest_api_paginated.py](../examples/rest_api_paginated.py), and OData end to end (Microsoft Graph, Business Central) in [examples/microsoft_graph_odata.py](../examples/microsoft_graph_odata.py).
 
-### `cursor` — opaque cursor (Relay/GraphQL connections)
+### `cursor` — opaque cursor (GraphQL connections)
 
 | Key | Default | Description |
 |---|---|---|
@@ -659,7 +663,7 @@ A cursor that does not advance between two requests also raises, instead of loop
 }
 ```
 
-Full GraphQL source, auth to Delta: [examples/shopify_graphql.py](../examples/shopify_graphql.py). The same strategy against a flat REST response, cursor in the query string: [examples/rest_api_paginated.py](../examples/rest_api_paginated.py).
+Full GraphQL source, auth to Delta: [examples/graphql_cursor_api.py](../examples/graphql_cursor_api.py). The same strategy against a flat REST response, cursor in the query string: [examples/rest_api_paginated.py](../examples/rest_api_paginated.py).
 
 ### `none` / absent
 
@@ -669,7 +673,7 @@ A single HTTP call, no loop. The common keys still apply: `items_field` and `rec
 {"type": "none", "items_field": "data.shop.metafields.edges", "record_field": "node"}
 ```
 
-> **Offset ceilings.** Some APIs refuse an offset beyond a hard limit (NetSuite stops at 100 000). Past that point, split the source into bounded slices — one run per month or per id range, with the bounds in the query — rather than paging further.
+> **Offset ceilings.** Some APIs refuse an offset beyond a hard limit (100 000 is a common one). Past that point, split the source into bounded slices — one run per month or per id range, with the bounds in the query — rather than paging further.
 
 ### Safety bounds
 
@@ -689,6 +693,8 @@ Records are written to Delta in batches of `batch_size` rows (default 50 000) in
 DELETE FROM bronze.my_table WHERE _flume_run_id = '<the failed run_id>'
 ```
 
+For a run over a window you can name — a backfill slice, a reload — [`write.mode: "replace_where"`](#write-mode) removes the need for that cleanup entirely: the rerun replaces the window instead of adding to it.
+
 Sizing `batch_size` is a trade-off: smaller means less memory and finer-grained resumption, but more Delta commits and more small files. Leave it alone unless a run runs out of memory (lower it) or a source is small and frequent (raise it above its row count to keep one commit per run).
 
 ### Resuming with `incremental.checkpoint`
@@ -700,6 +706,59 @@ With `"checkpoint": true`, the watermark is committed after each batch. An inter
 This is only correct if **the source returns its rows sorted by `incremental.field`**. Otherwise a batch could carry a value lower than an already-committed watermark, and resuming would skip rows that were never written. The library checks this: a batch that goes backwards fails the run with an explicit message, before writing anything, rather than advancing a watermark that would silently lose data. Add an `ORDER BY` to the query, or leave `checkpoint` off.
 
 Data is always committed **before** its watermark. If the watermark commit fails after the data commit, the next run replays the window and duplicates — recoverable through `_flume_run_id`. The opposite order would lose the rows for good.
+
+## Write mode
+
+By default every run **appends**. That is the safe behavior and it stays the default, but it makes a backfill a one-shot operation: rerunning a slice that failed halfway, or reloading a month whose source data was corrected, adds a second copy of every row. `write` gives the two ways out.
+
+| Key | Required | Description |
+|---|---|---|
+| `mode` | no (default `append`) | `append`, `overwrite`, or `replace_where`. |
+| `replace_where` | **yes** with `mode: "replace_where"` | SQL predicate over the **target table**. The rows it matches are deleted, and the run's rows written in their place — Delta's `replaceWhere`. |
+| `partition_by` | no | Partition columns of the target table. Fixed at creation. |
+
+```json
+"write": {
+  "mode": "replace_where",
+  "replace_where": "trandate_iso >= '2026-01-01' AND trandate_iso < '2026-02-01'"
+}
+```
+
+Rerunning that configuration leaves exactly one copy of January, however many times it runs. `mode: "overwrite"` does the same for the whole table — a reference table reloaded in full, where the source is the truth and history is not kept.
+
+### The predicate must match what the source returns
+
+delta-rs validates it: if a written row falls outside `replace_where`, the commit is **refused** and the run fails without touching the table. This is a feature — a predicate on January combined with a query returning February would otherwise delete January and write February into it. Derive both from the same bounds, as [examples/sql_over_rest_api.py](../examples/sql_over_rest_api.py) does for its monthly slices.
+
+The predicate runs against the *target* table, so it can only use columns already written there, plus the `_flume_*` lineage columns. Remember that this library writes dates as **strings** — it does no temporal typing — so `trandate >= '2026-01-01'` is a string comparison, and the column has to be projected in an ISO-ordered format for it to mean anything. A window that does not exist in the table yet is not an error: nothing is deleted, the rows are simply written. Backfilling a new month and replaying an old one take the same path.
+
+`replace_where` is **not templated**: a `{month}` marker would stay literal, match no row, and the run would replace nothing. The configuration is a Python dict — build the string in the notebook, one window per run. A placeholder found in it fails validation rather than running.
+
+### A source that returns nothing replaces nothing
+
+If a run loads zero rows, no replacement happens and the target keeps its previous contents. This is deliberate: an API that is down, a filter that is too narrow and a token missing a scope all answer "0 rows", and emptying a window on that signal would destroy data without anything having failed. Because the natural expectation is the opposite, the run says so — `RunResult.warnings` carries an explicit message, and a run reported as `success` with a warning is worth reading.
+
+### What a failed run leaves behind
+
+The replacement is committed with the first batch, so a run that breaks at batch 3 of 10 leaves the window holding those three batches — and the contents it replaced are gone. Delta keeps the previous version (`RESTORE`, or a time-travel read, recovers it until it is vacuumed), but the live table is short of the rest until the run is replayed. Replaying it is exactly what this mode makes safe: rerun the same configuration and the window is rebuilt whole.
+
+A source under `batch_size` writes one batch and never sees this: the replacement and the data land in the same commit, all or nothing.
+
+### Not compatible with `incremental.checkpoint`
+
+The replacement happens **on the first batch only**; later batches of the same run append. Applying the predicate to every batch would make the batches of one run erase each other, leaving a 300 000-row run with only its last 50 000.
+
+That is also why `checkpoint` is refused with a replacing mode: resuming mid-run would restart from the watermark and replace the window a second time, erasing what the interrupted run had already written into it. A backfill is replayed from the start of its window, not from its middle — the combination fails validation.
+
+### Every mode side by side
+
+[examples/write_modes.py](../examples/write_modes.py) runs through all of them against one API: append, full overwrite, a date window, an id range, a rolling window, partitioning, an empty source, a predicate that disagrees with its query, and the `checkpoint` combination the library refuses.
+
+### Partitioning
+
+`partition_by` sets the partition columns **when the table is created**. Delta fixes them at that point: passing them for an existing unpartitioned table fails with an explicit message, since changing them means rewriting the table whole, which this library does not do. Partition on a column a `replace_where` predicate filters on and the replacement only rewrites the matching partitions.
+
+The library performs no `OPTIMIZE` and no `VACUUM`. A table written batch after batch accumulates small files, and the replaced files stay on disk until vacuumed — schedule both out of band if a table grows enough to need them.
 
 ## Incremental (watermark)
 
@@ -720,7 +779,7 @@ The max of each batch is computed **before** that batch is written, so a `field`
 
 `inject: "query_param"` sends the watermark as the **entire value** of one param: it produces `?updated_since=2026-08-01T00:00:00Z`, and cannot build an expression around it. An API whose filter is a composed string — OData's `$filter=lastModifiedDateTime ge 2026-08-01T00:00:00Z`, a SQL `WHERE` clause — needs the value *inside* a string, which is `inject: "body_template"` and therefore a non-`GET` `method`. For a GET endpoint that only accepts a composed filter, the bound has to be computed in the notebook and written into `params` there; [examples/microsoft_graph_odata.py](../examples/microsoft_graph_odata.py) shows that form, and what it costs (re-read overlap, deduplicated downstream on the lineage columns).
 
-Runnable incremental sources: query param in [examples/rest_api_paginated.py](../examples/rest_api_paginated.py), `body_template` into a SQL `WHERE` in [examples/netsuite_suiteql.py](../examples/netsuite_suiteql.py), and into GraphQL `variables` in [examples/shopify_graphql.py](../examples/shopify_graphql.py).
+Runnable incremental sources: query param in [examples/rest_api_paginated.py](../examples/rest_api_paginated.py), `body_template` into a SQL `WHERE` in [examples/sql_over_rest_api.py](../examples/sql_over_rest_api.py), and into GraphQL `variables` in [examples/graphql_cursor_api.py](../examples/graphql_cursor_api.py).
 
 ## Retry
 

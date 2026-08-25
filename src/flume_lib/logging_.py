@@ -1,7 +1,7 @@
 """Écriture des runs dans la table Delta `log_runs` (colonnes : run_id,
 source_name, start_ts, end_ts, status, rows_loaded, error_message)."""
 
-from flume_lib._delta import append_records, table_uri
+from flume_lib._delta import table_uri, write_records
 
 LOG_RUNS_TABLE = "log_runs"
 
@@ -19,7 +19,7 @@ def write_log_run(
     storage_options: dict | None = None,
 ) -> None:
     uri = table_uri(lakehouse_tables_path, schema, LOG_RUNS_TABLE)
-    append_records(
+    write_records(
         uri,
         [
             {

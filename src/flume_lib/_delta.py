@@ -176,24 +176,89 @@ def records_to_table(
     return ac.Table.from_pydict(columns), fallbacks
 
 
-def append_records(
+class DeltaWriteError(Exception):
+    """Écriture Delta refusée. Le message de delta-rs est conservé, précédé de
+    ce qu'il signifie pour la config qui l'a provoqué."""
+
+
+# Bornes du message d'origine recopié dans l'explication : il finit dans
+# log_runs, et delta-rs joint volontiers un aperçu tabulaire des lignes fautives.
+MAX_DELTA_ERROR_CHARS = 300
+
+
+def _explain_write_error(exc: Exception, mode: str, predicate: str | None,
+                         partition_by: list | None) -> str:
+    """Traduit les refus de delta-rs qu'une config peut réellement provoquer.
+    Les autres passent tels quels — inventer une explication à une erreur
+    qu'on n'a pas reconnue serait pire que de la recopier."""
+    raw = str(exc)
+    detail = raw if len(raw) <= MAX_DELTA_ERROR_CHARS else raw[:MAX_DELTA_ERROR_CHARS] + "…"
+
+    if "failed validation check" in raw and predicate:
+        return (
+            f"replace_where : des lignes écrites ne satisfont pas le prédicat "
+            f"{predicate!r}. delta-rs refuse le commit plutôt que de remplacer "
+            "une fenêtre par des lignes qui n'en font pas partie — le prédicat "
+            "doit décrire exactement ce que la source renvoie, sans quoi la "
+            f"fenêtre remplacée et les lignes reçues divergent. Détail : {detail}"
+        )
+    if "No field named" in raw and predicate:
+        return (
+            f"replace_where : le prédicat {predicate!r} référence une colonne "
+            "absente de la table cible. Les colonnes disponibles sont celles "
+            "écrites par les runs précédents, plus les colonnes de traçabilité "
+            f"_flume_*. Détail : {detail}"
+        )
+    if "does not match table partitioning" in raw:
+        return (
+            f"partition_by={partition_by!r} ne correspond pas au partitionnement "
+            "de la table existante. Les colonnes de partition sont figées à la "
+            "création : les changer impose de réécrire la table entière, ce que "
+            f"la lib ne fait pas. Détail : {detail}"
+        )
+    return f"écriture Delta refusée (mode={mode}) : {detail}"
+
+
+def write_records(
     uri: str,
     records: list[dict],
+    mode: str = "append",
+    predicate: str | None = None,
+    partition_by: list | None = None,
     schema_mode: str = "merge",
     storage_options: dict | None = None,
     known_types: dict | None = None,
 ) -> tuple[dict, list[str]]:
-    """Ajoute des enregistrements à une table Delta. Retourne les types Arrow
-    retenus par colonne — à repasser en `known_types` pour le lot suivant du
-    même run — et les dégradations de type subies."""
+    """Écrit des enregistrements dans une table Delta.
+
+    `mode="append"` ajoute. `mode="overwrite"` remplace : la table entière, ou
+    seulement les lignes qui satisfont `predicate` (le `replaceWhere` de
+    Delta). Un `predicate` sur une fenêtre absente de la table écrit sans rien
+    supprimer — un backfill d'une fenêtre neuve et le rejeu d'une fenêtre déjà
+    chargée empruntent donc le même chemin.
+
+    Retourne les types Arrow retenus par colonne — à repasser en `known_types`
+    pour le lot suivant du même run — et les dégradations de type subies.
+    """
+    if predicate is not None and mode != "overwrite":
+        raise ValueError(
+            f"predicate n'a de sens qu'avec mode='overwrite', pas '{mode}'"
+        )
     table, fallbacks = records_to_table(records, known_types)
-    write_deltalake(
-        uri,
-        table,
-        mode="append",
-        schema_mode=schema_mode,
-        storage_options=storage_options_for(uri, storage_options),
-    )
+    try:
+        write_deltalake(
+            uri,
+            table,
+            mode=mode,
+            predicate=predicate,
+            partition_by=partition_by,
+            schema_mode=schema_mode,
+            storage_options=storage_options_for(uri, storage_options),
+        )
+    except Exception as exc:  # noqa: BLE001 — retraduit, puis relevé
+        raise DeltaWriteError(
+            _explain_write_error(exc, mode, predicate, partition_by)
+        ) from exc
     types = {field.name: field.type for field in table.schema}
     return types, fallbacks
 

@@ -15,7 +15,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from flume_lib._delta import append_records, resolve_lakehouse_tables_path, table_uri
+from flume_lib._delta import resolve_lakehouse_tables_path, table_uri, write_records
 from flume_lib.auth import AuthProvider
 from flume_lib.logging_ import write_log_run
 from flume_lib.pagination import _MISSING, get_path, paginate
@@ -41,6 +41,13 @@ LINEAGE_RUN_ID = "_flume_run_id"
 LINEAGE_INGESTED_AT = "_flume_ingested_at"
 
 DRY_RUN_SAMPLE_SIZE = 3
+
+# Modes d'écriture passés à delta-rs. Les trois modes de config (append,
+# overwrite, replace_where) se ramènent à ces deux-là : un remplacement de
+# fenêtre est un overwrite porteur d'un prédicat. "append" reste le défaut,
+# c'est le seul qui ne détruit rien.
+WRITE_APPEND = "append"
+WRITE_OVERWRITE = "overwrite"
 
 # Nombre de lignes tamponnées avant écriture. Borne la mémoire d'un run : elle
 # ne dépend plus du volume de la source. Une source qui tient sous ce seuil
@@ -419,6 +426,12 @@ class _BatchWriter:
     at-least-once. Si le commit du watermark échoue après celui des données,
     le run suivant refait la fenêtre et duplique — récupérable par
     `_flume_run_id`. L'ordre inverse perdrait les lignes, définitivement.
+
+    En mode `overwrite` ou `replace_where`, le remplacement a lieu **au
+    premier lot seulement** ; les suivants s'ajoutent. Faire porter le
+    prédicat à chaque lot ferait s'effacer les lots d'un même run les uns les
+    autres, et un run de 300 000 lignes ne laisserait que ses 50 000
+    dernières.
     """
 
     def __init__(
@@ -431,6 +444,7 @@ class _BatchWriter:
         lakehouse_tables_path: str,
         log_schema: str,
         storage_options: dict | None,
+        write: dict | None = None,
     ):
         self._uri = uri
         self._run_id = run_id
@@ -439,6 +453,13 @@ class _BatchWriter:
         self._lakehouse_tables_path = lakehouse_tables_path
         self._log_schema = log_schema
         self._storage_options = storage_options
+
+        write = write or {}
+        self._write_mode = write.get("mode", WRITE_APPEND)
+        self._replace_where = write.get("replace_where")
+        self._partition_by = write.get("partition_by")
+        # Consommé par le premier lot : voir _delta_write_args.
+        self._replacement_pending = self._write_mode != WRITE_APPEND
 
         self._enabled = bool(incremental.get("enabled"))
         self._field = incremental.get("field")
@@ -466,6 +487,18 @@ class _BatchWriter:
         if self._buffer:
             batch, self._buffer = self._buffer, []
             self._flush(batch)
+        # Une source qui ne renvoie rien ne déclenche aucun lot, donc aucun
+        # remplacement : la fenêtre visée garde son contenu précédent. C'est
+        # délibéré — une API en panne, un filtre trop étroit ou un token sans
+        # droits répondent tous "0 ligne", et vider la cible sur ce signal
+        # détruirait des données sans que rien n'ait échoué. Le dire, en
+        # revanche, est indispensable : l'attente naturelle est l'inverse.
+        if self._replacement_pending:
+            self.warnings.append(
+                f"write.mode='{self._write_mode}' : la source n'a renvoyé "
+                "aucune ligne, rien n'a été remplacé — la cible garde son "
+                "contenu précédent"
+            )
         # Hors mode checkpoint le watermark n'est commité qu'ici, une fois le
         # run complet : la reprise n'est pas offerte, mais un run interrompu
         # ne laisse jamais un watermark avancé au-delà d'une fenêtre partielle.
@@ -488,9 +521,10 @@ class _BatchWriter:
                 )
 
         _add_lineage(batch, self._run_id)
-        types, fallbacks = append_records(
+        types, fallbacks = write_records(
             self._uri,
             batch,
+            **self._delta_write_args(),
             storage_options=self._storage_options,
             known_types=self._types,
         )
@@ -505,6 +539,20 @@ class _BatchWriter:
             self._pending = candidate
         if self._checkpoint:
             self._commit_watermark()
+
+    def _delta_write_args(self) -> dict:
+        """Arguments d'écriture du lot courant. Le remplacement est un
+        événement unique dans un run : il est consommé ici, et tout ce qui
+        suit s'ajoute."""
+        args = {"partition_by": self._partition_by}
+        if not self._replacement_pending:
+            return {"mode": WRITE_APPEND, **args}
+        self._replacement_pending = False
+        return {
+            "mode": WRITE_OVERWRITE,
+            "predicate": self._replace_where,
+            **args,
+        }
 
     def _commit_watermark(self) -> None:
         if self._pending is None or self._pending == self._written:
@@ -548,6 +596,15 @@ def run_source(
     incremental.checkpoint, le watermark est commité après chaque lot et un
     run interrompu reprend là où il s'est arrêté — à condition que la source
     renvoie ses lignes triées par incremental.field, ce que la lib vérifie.
+
+    config['write'] pilote la façon dont la table cible est écrite. Par
+    défaut les lignes s'ajoutent. "mode": "replace_where" avec un prédicat
+    remplace la fenêtre qu'il décrit au lieu de s'y ajouter : un backfill
+    devient rejouable, là où le rejouer en append duplique. "mode":
+    "overwrite" remplace la table entière — un rechargement complet de table
+    de référence. Dans les deux cas, une source qui ne renvoie aucune ligne
+    ne remplace rien : la cible garde son contenu et RunResult.warnings le
+    dit.
 
     Cible exclusivement des lakehouses avec schémas : les données vont dans
     config['target_schema'] (requis), les tables techniques watermark et
@@ -637,6 +694,7 @@ def run_source(
                 lakehouse_tables_path=lakehouse_tables_path,
                 log_schema=log_schema,
                 storage_options=storage_options,
+                write=config.get("write"),
             )
             try:
                 for page in pages:

@@ -2,6 +2,36 @@
 
 All notable changes to this project are documented here. Versions follow [semantic versioning](https://semver.org/); until 1.0.0, minor versions may contain breaking changes — these are always listed first.
 
+## [0.11.0] — 2026-08-25
+
+The first release since 0.10.0 to change the library itself. Until now every write was an `append`, which made a backfill a one-shot operation: rerunning a monthly slice that had failed halfway added a second copy of its rows, and de-duplicating them by hand was the only way back. That mattered more since 0.10.0 made ingestion at-least-once. A run can now replace the window it loads instead of adding to it.
+
+### Added
+
+- **`write` configuration block.** `"mode": "replace_where"` with a SQL predicate replaces the matching rows of the target table with the run's rows (Delta's `replaceWhere`) — rerun the same configuration as often as you like, one copy of the window remains. `"mode": "overwrite"` replaces the table whole, for a reference table reloaded in full. `"partition_by"` sets the partition columns at creation. The default stays `append`, unchanged.
+- **The replacement happens on the first batch only**; later batches of the same run append. Applying the predicate per batch would make the batches of one run erase each other, leaving a 300 000-row run with only its last 50 000.
+- **A run that loads zero rows replaces nothing**, and says so in `RunResult.warnings`. An API that is down, a filter that is too narrow and a token missing a scope all answer "0 rows"; emptying a window on that signal would destroy data without anything having failed. The warning is there because the natural expectation is the opposite.
+- **Delta write errors are explained.** delta-rs reports a predicate the written rows do not satisfy as `Invalid data found: N rows failed validation check` with a truncated table preview. It now arrives as a sentence naming the predicate and what it means — likewise for a predicate over a column the target table does not have, and for `partition_by` on a table already created without it.
+- **[examples/write_modes.py](examples/write_modes.py)**: every write mode side by side — append, full overwrite, `replace_where` over a date window and over an id range, `partition_by`, a rolling window, what an empty source does, what a predicate that disagrees with its query does, and what a failed run leaves behind.
+- **[examples/run_options.py](examples/run_options.py)**: the `run_source` parameters, which had no example of their own — dry runs, bulk validation, writing to another lakehouse or outside Fabric through `storage_options`, isolating the technical tables with `log_schema`, and reading `log_runs` back.
+- **[scripts/check_readme_shas.py](scripts/check_readme_shas.py)** and a CI job for it: the README's SHA table is what makes the install-from-GitHub form usable, and a version missing from it is a version nobody can install without digging through git. v0.10.1 and v0.10.2 were both left out — the step existed in the release procedure and was forgotten twice, which is what happens to a step kept in someone's memory. Both rows have been added. The check knows a commit cannot contain its own SHA, so it ignores the tag being published and only asks from the next commit onwards.
+- **`tests/test_delta_write.py`**: the first tests that actually commit to a Delta table. The rest of the suite mocks the write layer, which checks what the library asks of delta-rs but never what delta-rs does with it — and the whole value of `replaceWhere` is in the latter. Includes two `run_source` calls over the same window, asserting a single copy of the rows.
+
+### Changed
+
+- **Two examples renamed**, and every vendor name dropped from the repository along with them: `netsuite_suiteql.py` is now [examples/sql_over_rest_api.py](examples/sql_over_rest_api.py) and `shopify_graphql.py` is [examples/graphql_cursor_api.py](examples/graphql_cursor_api.py). Both describe an API *shape* rather than a product, which is what they always demonstrated — no library code was ever specific to either. Links in older CHANGELOG entries were repointed; the GitHub Releases already published still carry the previous wording.
+- **The examples now cover every option of every block.** Filling the gaps added `timeout_seconds`, `max_rows`, `incremental.placeholder`, `incremental.checkpoint`, `retry.max_retry_after_seconds`, the `iso_date` and `any` value formats, the environment-variable form of every credential (including the historical `*_env_var` spelling), `oauth1` in its three-legged, two-legged and HMAC-SHA1 variants, `expires_in_json_path`, and the per-auth `timeout_seconds`.
+- **Rejected at validation: `write.mode` other than `append` together with `incremental.checkpoint`.** Resuming mid-run would restart from the watermark and replace the window a second time, erasing what the interrupted run had already written into it. A backfill is replayed from the start of its window, not from its middle.
+- **Rejected at validation: a `{placeholder}` inside `replace_where`.** The predicate is not templated — a marker would stay literal, match no row, and the run would replace nothing at all. Build the string in the notebook, one window per run.
+- **`_delta.append_records()` is now `write_records()`**, taking `mode`, `predicate` and `partition_by`. Internal helper; `run_source` callers are unaffected.
+- **[examples/sql_over_rest_api.py](examples/sql_over_rest_api.py)**: the monthly backfill slices are rerunnable, each replacing its own month. The transaction query now projects `trandate` through `TO_CHAR` as well — the library writes dates as strings, so a predicate over a display-format date would order `3/1/2026` before `3/10/2026` before `3/2/2026`, and replace a window other than the one loaded.
+
+### Known limits
+
+- A run that fails mid-way in a replacing mode leaves the window holding the batches it committed, the previous contents already gone. Delta keeps the prior version until it is vacuumed, and replaying the run rebuilds the window whole — which is what this mode is for. A source under `batch_size` never sees this: replacement and data land in one commit.
+- No row-level `MERGE`. Replacement is per window, not per key.
+- No `OPTIMIZE`, no `VACUUM`. A table written batch after batch accumulates small files, and replaced files stay on disk until vacuumed.
+
 ## [0.10.2] — 2026-08-24
 
 **The library is unchanged** — `src/flume_lib` is identical to 0.10.0. This release closes the gap the 0.10.1 pipeline left open.
@@ -47,8 +77,8 @@ Robustness pass on long runs. A source of a few million rows used to be an all-o
 - **`batch_size`**: rows buffered before each Delta write. A source smaller than one batch still produces a single commit, as before.
 - **`incremental.checkpoint`**: commits the watermark after each batch instead of once at the end, so an interrupted run resumes where it stopped rather than replaying the whole window. Only correct on a source sorted by `incremental.field` — the library checks it, and a batch that goes backwards fails the run **before writing**, rather than advancing a watermark that would silently skip rows.
 - **Mid-run token renewal** for `oauth2_client_credentials` and `token_endpoint`. Proactively when the endpoint announces a lifetime (`expires_in`, or the path given in the new `expires_in_json_path`), 60 seconds before expiry; reactively on a 401 otherwise, replaying the page immediately without backoff. Once per page: a freshly issued token refused again is not an expiry, and the run fails with the 401. Static credentials and `oauth1` are never renewed — their 401 is a configuration error.
-- **`keyset` pagination**: each page is filtered by the key of the last record of the previous one (`id > last`). The cost of a page does not grow with its depth and nothing caps it — the only strategy that reaches the bottom of a table on APIs that bound the offset, NetSuite refusing past 100 000. Requires a source sorted by the key, with unique values; the library verifies the key advances and stops instead of looping.
-- **`pagination.params_in: "body_template"`**: for SQL-over-REST endpoints where the key belongs inside the query. Routing is **per param**: one whose `{placeholder}` appears in `body` is substituted there, every other one goes to the query string — so a SuiteQL source can carry the keyset key in its SQL *and* `limit` in the URL, which is where NetSuite expects it. Nothing is dropped in between. `value_format` is mandatory on the key — it comes back from the API, same rule and same reason as the incremental watermark — and the placeholder it names must exist in `body`, or the config is rejected.
+- **`keyset` pagination**: each page is filtered by the key of the last record of the previous one (`id > last`). The cost of a page does not grow with its depth and nothing caps it — the only strategy that reaches the bottom of a table on APIs that bound the offset, 100 000 being a common ceiling. Requires a source sorted by the key, with unique values; the library verifies the key advances and stops instead of looping.
+- **`pagination.params_in: "body_template"`**: for SQL-over-REST endpoints where the key belongs inside the query. Routing is **per param**: one whose `{placeholder}` appears in `body` is substituted there, every other one goes to the query string — so a SQL-over-REST source can carry the keyset key in its SQL *and* `limit` in the URL, which is where such endpoints expect it. Nothing is dropped in between. `value_format` is mandatory on the key — it comes back from the API, same rule and same reason as the incremental watermark — and the placeholder it names must exist in `body`, or the config is rejected.
 - **`pagination.max_pages` / `pagination.max_rows`**: bounds on a run. Reaching one is an **error**, not a clean stop — truncating silently would produce a `success` run short of part of its data.
 - **`RunResult.warnings`**: degradations a run survived. A `success` run can carry them; that is the point.
 - **`py.typed`**: the library is typed, consumers can now use it.
@@ -75,16 +105,16 @@ Robustness pass on long runs. A source of a few million rows used to be an all-o
 
 ## [0.9.0] — 2026-08-24
 
-GraphQL APIs are now reachable without any endpoint-specific library code. The four additions below are generic; together they cover Relay connections, of which the Shopify Admin API is one — see [examples/shopify_graphql.py](examples/shopify_graphql.py).
+GraphQL APIs are now reachable without any endpoint-specific library code. The four additions below are generic; together they cover the `edges`/`node` connection convention every GraphQL API of this shape uses — see [examples/graphql_cursor_api.py](examples/graphql_cursor_api.py).
 
 ### Added
 
-- **`cursor` pagination**, previously a stub. The next cursor is read from the response by dotted path (`cursor_field`) and sent back in `cursor_param`; the first request goes without one. `has_more_field` — the `pageInfo.hasNextPage` of Relay connections — takes precedence over the empty-page heuristic when present, because a heavily filtered connection can return an empty page in the middle of its results. Optional `limit`/`limit_param` for the page size (GraphQL: `first`).
-- **Dotted paths and unwrapping in record extraction.** `items_field` accepts `data.orders.edges`; `record_field` unwraps each item (`node`), the shape every Relay connection uses. An `items_field` that resolves to something other than a list is now an explicit error instead of whatever came next.
+- **`cursor` pagination**, previously a stub. The next cursor is read from the response by dotted path (`cursor_field`) and sent back in `cursor_param`; the first request goes without one. `has_more_field` — the `pageInfo.hasNextPage` of GraphQL connections — takes precedence over the empty-page heuristic when present, because a heavily filtered connection can return an empty page in the middle of its results. Optional `limit`/`limit_param` for the page size (GraphQL: `first`).
+- **Dotted paths and unwrapping in record extraction.** `items_field` accepts `data.orders.edges`; `record_field` unwraps each item (`node`), the shape every such connection uses. An `items_field` that resolves to something other than a list is now an explicit error instead of whatever came next.
 - **`pagination.params_path`**: with `"params_in": "body"`, nests the pagination params under a dotted path of the payload instead of merging them at the root. GraphQL expects the page size and cursor inside `variables`, beside `query` rather than next to it. The branch is created if the body does not carry it.
 - **`errors`**: declares the application-error envelope of APIs that report failures inside a successful HTTP response (`path`, `code_field`, `message_field`, `retryable_codes`), with defaults matching the GraphQL specification. Codes listed in `retryable_codes` are replayed under the `retry` policy — that is how cost-based throttling arrives when the API does not use a 429. A `Retry-After` header on such a response is still honored.
 - **`template_paths`**: restricts `{placeholder}` substitution to the listed dotted paths of `body`. A body that uses braces for its own syntax cannot be scanned wholesale — a compact GraphQL query (`{orders{edges{node{id}}}}`) contains `{id}`, indistinguishable from a placeholder, and failed the run. A listed path must exist in `body`.
-- **`examples/shopify_graphql.py`**: Shopify Admin GraphQL end to end — token in Key Vault, Relay cursor, incremental on `updatedAt` through Shopify's search syntax, monthly backfill slices, and the scope caveat on orders older than 60 days.
+- **`examples/graphql_cursor_api.py`**: a commerce admin GraphQL API end to end — token in Key Vault, cursor connection, incremental on `updatedAt` through the API's search syntax, monthly backfill slices, and the scope caveat on older records.
 
 ### Fixed
 
@@ -103,7 +133,7 @@ GraphQL APIs are now reachable without any endpoint-specific library code. The f
 ### Known limitations
 
 - An `errors` block is **opt-in**. Without it, behavior is unchanged: a response carrying valid `data` alongside an `errors` entry — one field refused by a missing scope, typically — is still reported `success`, short of part of what was asked for. Existing sources are unaffected; new GraphQL sources should always declare it.
-- Asynchronous bulk-export APIs (Shopify Bulk Operations and equivalents) remain out of scope: they submit a job, poll it and download a JSONL artifact, which does not fit the "one call, one page of JSON" model.
+- Asynchronous bulk-export APIs remain out of scope: they submit a job, poll it and download a JSONL artifact, which does not fit the "one call, one page of JSON" model.
 
 ## [0.8.1] — 2026-08-22
 
@@ -120,7 +150,7 @@ Aucun changement fonctionnel : la bibliothèque installée est identique à la
 ### Added
 
 - **`headers`**: fixed HTTP headers on every data call, for APIs that require a non-authentication header (`Prefer`, `Accept-Language`, tenant selectors). Literal strings only — a secret reference is rejected, credentials belong in `auth`. Auth headers are applied last and cannot be overridden.
-- **`oauth1` auth type**: OAuth 1.0a request signing (RFC 5849, HMAC-SHA256/SHA1), with `realm` support. Unlike the other types the signature depends on the URL and query params of each request, so it is recomputed page after page — `build_auth()` now returns a `(headers, signer)` pair and the signer is installed on the session. Implemented on the standard library, no new dependency. Covers NetSuite Token-Based Authentication and legacy OAuth 1.0a APIs.
+- **`oauth1` auth type**: OAuth 1.0a request signing (RFC 5849, HMAC-SHA256/SHA1), with `realm` support. Unlike the other types the signature depends on the URL and query params of each request, so it is recomputed page after page — `build_auth()` now returns a `(headers, signer)` pair and the signer is installed on the session. Implemented on the standard library, no new dependency. Covers ERP token-based authentication and legacy OAuth 1.0a APIs.
 - **Body templating**: strings in `body` and `params` may contain `{placeholder}` markers. Combined with `incremental.inject: "body_template"`, the watermark lands inside the request body instead of the query string — required for SQL-over-REST endpoints where the filter lives in the query itself. A placeholder with no matching variable fails the run; interpolated values are rejected if they contain characters that could change the structure of the query (`'`, `"`, `;`, `--`, `/*`, backslash, newline).
 - **`incremental.initial_value`**: value used on the very first run, before any watermark exists. Applies to both injection modes.
 - **`incremental.value_format`**: `any` (default), `numeric`, `iso_date` or `iso_datetime` — validates the watermark before it is used.

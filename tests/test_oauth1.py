@@ -3,8 +3,9 @@
 Le test central rejoue le vecteur de référence publié par Twitter (le seul
 jeu consommateur/token/nonce/timestamp complet et vérifiable publiquement) :
 il valide d'un coup la normalisation des paramètres, la construction de la
-base string et le HMAC. Les autres tests couvrent les propriétés dont NetSuite
-dépend : corps JSON non signé, query string signée, realm hors signature."""
+base string et le HMAC. Les autres tests couvrent les propriétés dont dépend
+une API SQL-over-REST signée : corps JSON non signé, query string signée,
+realm hors signature."""
 
 import pytest
 import requests
@@ -53,11 +54,12 @@ class TestReferenceVector:
         assert "status%3DHello%2520Ladies" in base
 
 
-class TestNetsuiteShape:
-    """POST avec corps JSON et pagination en query string — la forme SuiteQL."""
+class TestSqlOverRestShape:
+    """POST avec corps JSON et pagination en query string — la forme des APIs
+    qui transportent une requête SQL dans le corps."""
 
     signer = OAuth1Signer(realm="1234567", **REF)
-    url = "https://1234567.suitetalk.api.netsuite.com/services/rest/query/v1/suiteql?limit=1000&offset=0"
+    url = "https://api.example.com/services/rest/query/v1/sql?limit=1000&offset=0"
 
     def test_json_body_is_not_signed(self):
         params = dict(REF_OAUTH_PARAMS, oauth_signature_method="HMAC-SHA256")
@@ -93,7 +95,7 @@ class TestSignerBehaviour:
     def test_applies_to_a_prepared_request(self):
         signer = OAuth1Signer(realm="ACCT", **REF)
         request = requests.Request(
-            "POST", "https://api.test/suiteql?limit=10", json={"q": "SELECT 1"}
+            "POST", "https://api.test/sql?limit=10", json={"q": "SELECT 1"}
         ).prepare()
         signer(request)
         assert request.headers["Authorization"].startswith('OAuth realm="ACCT", ')

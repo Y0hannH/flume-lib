@@ -404,7 +404,7 @@ class TestCursorPaginationConfig:
         }
         return cfg(method="POST", body=self.GRAPHQL_BODY, pagination=pagination)
 
-    def test_full_relay_config_is_valid(self):
+    def test_full_connection_config_is_valid(self):
         validate_config(self.cursor_cfg())
 
     @pytest.mark.parametrize("key", ["cursor_param", "cursor_field"])
@@ -614,3 +614,94 @@ class TestPaginationBounds:
             validate_config(cfg(pagination={
                 "type": pagination_type, "max_pages": 5, "max_rows": 500,
             }))
+
+
+class TestWrite:
+    def test_absent_is_valid(self):
+        validate_config(cfg())
+
+    def test_append_is_the_default(self):
+        validate_config(cfg(write={}))
+
+    @pytest.mark.parametrize("mode", ["append", "overwrite"])
+    def test_modes_without_a_predicate(self, mode):
+        validate_config(cfg(write={"mode": mode}))
+
+    def test_replace_where_is_valid(self):
+        validate_config(cfg(write={
+            "mode": "replace_where",
+            "replace_where": "trandate >= '2026-01-01' AND trandate < '2026-02-01'",
+        }))
+
+    def test_unknown_mode_lists_the_known_ones(self):
+        with pytest.raises(ConfigError, match="replace_where"):
+            validate_config(cfg(write={"mode": "upsert"}))
+
+    def test_unknown_key_raises(self):
+        with pytest.raises(ConfigError, match="clé inconnue 'replaceWhere'"):
+            validate_config(cfg(write={"replaceWhere": "x = 1"}))
+
+    def test_replace_where_mode_without_predicate_raises(self):
+        # sans prédicat le remplacement porterait sur la table entière : ça se
+        # demande explicitement, ça ne s'obtient pas par omission
+        with pytest.raises(ConfigError, match="'replace_where' requis"):
+            validate_config(cfg(write={"mode": "replace_where"}))
+
+    @pytest.mark.parametrize("mode", ["append", "overwrite"])
+    def test_predicate_without_its_mode_raises(self, mode):
+        # le piège : le prédicat serait ignoré et l'append (ou l'écrasement
+        # total) aurait lieu sans que rien ne le dise
+        with pytest.raises(ConfigError, match="est ignoré"):
+            validate_config(cfg(write={"mode": mode, "replace_where": "m = '01'"}))
+
+    @pytest.mark.parametrize("value", ["", "   ", 42, None])
+    def test_an_empty_predicate_raises(self, value):
+        with pytest.raises(ConfigError, match="replace_where"):
+            validate_config(cfg(write={"mode": "replace_where", "replace_where": value}))
+
+    def test_a_placeholder_in_the_predicate_raises(self):
+        # 'replace_where' n'est pas templaté : un {mois} y resterait littéral,
+        # ne désignerait aucune ligne, et le run remplacerait le vide
+        with pytest.raises(ConfigError, match="n'est pas templaté"):
+            validate_config(cfg(write={
+                "mode": "replace_where", "replace_where": "mois = '{mois}'",
+            }))
+
+    def test_partition_by_is_valid(self):
+        validate_config(cfg(write={"partition_by": ["year", "month"]}))
+
+    @pytest.mark.parametrize("value", ["year", [], ["year", ""], [1]])
+    def test_a_malformed_partition_by_raises(self, value):
+        with pytest.raises(ConfigError, match="partition_by"):
+            validate_config(cfg(write={"partition_by": value}))
+
+    @pytest.mark.parametrize("mode", ["overwrite", "replace_where"])
+    def test_checkpoint_with_a_replacing_mode_raises(self, mode):
+        # reprendre au milieu d'un backfill re-remplacerait la fenêtre et
+        # effacerait ce que le run interrompu y avait déjà écrit
+        write = {"mode": mode}
+        if mode == "replace_where":
+            write["replace_where"] = "m = '01'"
+        with pytest.raises(ConfigError, match="checkpoint"):
+            validate_config(cfg(
+                write=write,
+                incremental={
+                    "enabled": True, "field": "ts", "param_name": "since",
+                    "checkpoint": True,
+                },
+            ))
+
+    def test_checkpoint_stays_valid_in_append(self):
+        validate_config(cfg(
+            write={"mode": "append"},
+            incremental={
+                "enabled": True, "field": "ts", "param_name": "since",
+                "checkpoint": True,
+            },
+        ))
+
+    def test_a_replacing_mode_without_checkpoint_is_valid(self):
+        validate_config(cfg(
+            write={"mode": "replace_where", "replace_where": "m = '01'"},
+            incremental={"enabled": True, "field": "ts", "param_name": "since"},
+        ))

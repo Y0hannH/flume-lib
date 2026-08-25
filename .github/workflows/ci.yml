@@ -22,6 +22,27 @@ jobs:
   tests:
     uses: ./.github/workflows/tests.yml
 
+  # Le tableau des SHA du README est ce qui rend l'install depuis GitHub
+  # utilisable : une version absente n'est installable par personne. Il a été
+  # oublié deux fois de suite, d'où ce contrôle plutôt qu'une ligne de plus
+  # dans la procédure de release. Hors de tests.yml volontairement : Release
+  # s'appuie sur ce workflow-là, et l'état du README n'est pas une propriété
+  # du code qu'on publie.
+  readme-shas:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # l'historique complet et les tags : le contrôle les compare à HEAD
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: SHA table covers the published tags
+        run: python scripts/check_readme_shas.py
+
   audit:
     runs-on: ubuntu-latest
     steps:

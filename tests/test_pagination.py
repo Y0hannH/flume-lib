@@ -190,8 +190,8 @@ class TestPagePagination:
 
 
 class TestCursorPagination:
-    """Forme Relay/GraphQL : enregistrements sous un chemin pointé, enveloppés
-    dans des edges, curseur et hasNextPage dans pageInfo."""
+    """Forme des connexions GraphQL : enregistrements sous un chemin pointé,
+    enveloppés dans des edges, curseur et hasNextPage dans pageInfo."""
 
     CONFIG = {
         "type": "cursor",

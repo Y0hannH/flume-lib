@@ -75,20 +75,28 @@ def delta(monkeypatch):
     """Mocke les écritures/lectures Delta et enregistre les appels."""
     # 'watermark_value' est ce que renverra read_watermark : None simule un
     # premier run, un test peut le remplacer pour simuler un run incremental.
-    # 'append_result' est ce que renverra append_records : (types Arrow
+    # 'write_result' est ce que renverra write_records : (types Arrow
     # retenus, dégradations subies). Un test peut le remplacer pour simuler
     # une colonne repliée sur du texte.
     calls = {
-        "append": [], "log": [], "watermark_write": [], "watermark_read": [],
-        "watermark_value": None, "append_result": ({}, []),
+        "writes": [], "log": [], "watermark_write": [], "watermark_read": [],
+        "watermark_value": None, "write_result": ({}, []),
     }
 
-    def fake_append(uri, records, known_types=None, **kwargs):
+    def fake_write(uri, records, known_types=None, mode="append",
+                   predicate=None, partition_by=None, **kwargs):
         # copie : l'appelant réutilise et mute le même dict d'un lot à l'autre
-        calls["append"].append(
-            {"uri": uri, "records": records, "known_types": dict(known_types or {})}
+        calls["writes"].append(
+            {
+                "uri": uri,
+                "records": records,
+                "known_types": dict(known_types or {}),
+                "mode": mode,
+                "predicate": predicate,
+                "partition_by": partition_by,
+            }
         )
-        return calls["append_result"]
+        return calls["write_result"]
 
     def fake_log(path, **kwargs):
         calls["log"].append(kwargs)
@@ -100,7 +108,7 @@ def delta(monkeypatch):
         calls["watermark_read"].append(source_name)
         return calls["watermark_value"]
 
-    monkeypatch.setattr("flume_lib.source.append_records", fake_append)
+    monkeypatch.setattr("flume_lib.source.write_records", fake_write)
     monkeypatch.setattr("flume_lib.source.write_log_run", fake_log)
     monkeypatch.setattr("flume_lib.source.write_watermark", fake_write_wm)
     monkeypatch.setattr("flume_lib.source.read_watermark", fake_read_wm)
@@ -113,7 +121,7 @@ class TestLineageColumns:
         result = run_source(BASE_CONFIG, lakehouse_tables_path=TABLES_PATH)
 
         assert result.status == "success", result.error_message
-        written = delta["append"][0]["records"]
+        written = delta["writes"][0]["records"]
         assert [r[LINEAGE_RUN_ID] for r in written] == [result.run_id] * 2
         assert all(r[LINEAGE_INGESTED_AT] for r in written)
         # les champs de l'API sont préservés
@@ -127,7 +135,7 @@ class TestLineageColumns:
     def test_target_uri_uses_schema(self, http, delta):
         http.next_payloads = [[{"id": 1}]]
         run_source(BASE_CONFIG, lakehouse_tables_path=TABLES_PATH)
-        assert delta["append"][0]["uri"] == "/tmp/Tables/bronze/items"
+        assert delta["writes"][0]["uri"] == "/tmp/Tables/bronze/items"
 
 
 class TestDryRun:
@@ -139,7 +147,7 @@ class TestDryRun:
 
         assert result.status == "success", result.error_message
         assert result.rows_loaded == 3
-        assert delta["append"] == []
+        assert delta["writes"] == []
         assert delta["log"] == []
         assert delta["watermark_write"] == []
 
@@ -235,7 +243,7 @@ class TestErrorReporting:
         )
         assert result.status == "failed"
         assert "pagination" in result.error_message
-        assert delta["append"] == []
+        assert delta["writes"] == []
 
     def test_failed_run_is_still_logged(self, http, delta):
         run_source({**BASE_CONFIG, "foo": 1}, lakehouse_tables_path=TABLES_PATH)
@@ -396,7 +404,7 @@ class TestWatermarkInBodyTemplate:
 
         assert result.status == "failed"
         assert "interdit" in result.error_message
-        assert delta["append"] == []
+        assert delta["writes"] == []
 
     def test_a_wrongly_formatted_watermark_fails_the_run(self, http, delta):
         delta["watermark_value"] = "22/08/2026"
@@ -483,7 +491,7 @@ class TestResponseErrors:
 
         assert result.status == "failed"
         assert "Access denied for orders field" in result.error_message
-        assert delta["append"] == []
+        assert delta["writes"] == []
 
     def test_partial_error_beside_valid_data_fails_the_run(self, http, delta):
         """Le cas dangereux : des lignes exploitables *et* une erreur. Sans
@@ -497,7 +505,7 @@ class TestResponseErrors:
 
         assert result.status == "failed"
         assert "champ refusé" in result.error_message
-        assert delta["append"] == []
+        assert delta["writes"] == []
 
     def test_without_the_errors_block_the_same_payload_passes_silently(
         self, http, delta
@@ -518,7 +526,7 @@ class TestResponseErrors:
         }]
         result = run_source(self.GRAPHQL, lakehouse_tables_path=TABLES_PATH)
         assert result.status == "success", result.error_message
-        assert delta["append"][0]["records"][0]["id"] == 1
+        assert delta["writes"][0]["records"][0]["id"] == 1
 
     def test_retryable_code_is_replayed(self, http, delta, monkeypatch):
         monkeypatch.setattr("tenacity.nap.time.sleep", lambda _: None)
@@ -626,7 +634,7 @@ class TestNestedBodyParams:
     def test_records_are_unwrapped_before_the_delta_write(self, http, delta):
         http.next_payloads = [self.page([1, 2], "c2", False)]
         run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
-        written = delta["append"][0]["records"]
+        written = delta["writes"][0]["records"]
         assert [r["id"] for r in written] == [1, 2]
         assert "node" not in written[0]
 
@@ -790,7 +798,7 @@ class TestBatchedWrites:
         result = run_source(BASE_CONFIG, lakehouse_tables_path=TABLES_PATH)
 
         assert result.status == "success", result.error_message
-        assert len(delta["append"]) == 1
+        assert len(delta["writes"]) == 1
         assert result.rows_loaded == 3
 
     def test_records_are_flushed_every_batch_size_rows(self, http, delta):
@@ -799,7 +807,7 @@ class TestBatchedWrites:
         result = run_source(config, lakehouse_tables_path=TABLES_PATH)
 
         assert result.status == "success", result.error_message
-        assert [len(c["records"]) for c in delta["append"]] == [2, 2, 1]
+        assert [len(c["records"]) for c in delta["writes"]] == [2, 2, 1]
         assert result.rows_loaded == 5
 
     def test_a_batch_spanning_several_pages_is_written_once(self, http, delta):
@@ -816,7 +824,7 @@ class TestBatchedWrites:
         result = run_source(config, lakehouse_tables_path=TABLES_PATH)
 
         assert result.status == "success", result.error_message
-        assert [len(c["records"]) for c in delta["append"]] == [4, 1]
+        assert [len(c["records"]) for c in delta["writes"]] == [4, 1]
 
     def test_rows_loaded_reports_what_was_really_written(self, http, delta):
         config = {
@@ -865,7 +873,7 @@ class TestWatermarkCoherence:
         result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
 
         assert result.status == "success", result.error_message
-        assert len(delta["append"]) == 2
+        assert len(delta["writes"]) == 2
         assert delta["watermark_write"] == [("s1", 4)]
 
     def test_checkpoint_commits_the_watermark_after_each_batch(self, http, delta):
@@ -918,7 +926,7 @@ class TestWatermarkCoherence:
         assert result.status == "failed"
         assert "trié" in result.error_message
         # le lot fautif n'est pas écrit : le watermark reste cohérent
-        assert len(delta["append"]) == 1
+        assert len(delta["writes"]) == 1
         assert delta["watermark_write"] == [("s1", 6)]
 
     def test_an_unsorted_source_is_fine_without_checkpoint(self, http, delta):
@@ -935,7 +943,7 @@ class TestWatermarkCoherence:
         assert result.status == "failed"
         assert "mélange des types" in result.error_message
         # l'ancien comportement écrivait le lot puis échouait sur le max()
-        assert delta["append"] == []
+        assert delta["writes"] == []
         assert delta["watermark_write"] == []
 
     def test_rows_without_the_field_do_not_block_the_watermark(self, http, delta):
@@ -950,7 +958,7 @@ class TestWatermarkCoherence:
         result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
 
         assert result.status == "success", result.error_message
-        assert delta["append"] == []
+        assert delta["writes"] == []
         assert delta["watermark_write"] == []
 
 
@@ -1065,7 +1073,7 @@ class TestTypeWarnings:
     run `success`."""
 
     def test_a_degraded_column_surfaces_in_the_result(self, http, delta):
-        delta["append_result"] = ({}, ["colonne 'n' : écrite en texte"])
+        delta["write_result"] = ({}, ["colonne 'n' : écrite en texte"])
         http.next_payloads = [[{"n": 1}]]
         result = run_source(BASE_CONFIG, lakehouse_tables_path=TABLES_PATH)
 
@@ -1073,12 +1081,12 @@ class TestTypeWarnings:
         assert result.warnings == ["colonne 'n' : écrite en texte"]
 
     def test_the_same_degradation_is_reported_once_per_run(self, http, delta):
-        delta["append_result"] = ({}, ["colonne 'n' : écrite en texte"])
+        delta["write_result"] = ({}, ["colonne 'n' : écrite en texte"])
         config = {**BASE_CONFIG, "batch_size": 1}
         http.next_payloads = [[{"n": 1}, {"n": 2}, {"n": 3}]]
         result = run_source(config, lakehouse_tables_path=TABLES_PATH)
 
-        assert len(delta["append"]) == 3
+        assert len(delta["writes"]) == 3
         assert result.warnings == ["colonne 'n' : écrite en texte"]
 
     def test_a_clean_run_carries_no_warning(self, http, delta):
@@ -1089,16 +1097,16 @@ class TestTypeWarnings:
     def test_the_types_of_the_first_batch_are_passed_to_the_next(self, http, delta):
         import arro3.core as ac
 
-        delta["append_result"] = ({"n": ac.DataType.int64()}, [])
+        delta["write_result"] = ({"n": ac.DataType.int64()}, [])
         config = {**BASE_CONFIG, "batch_size": 1}
         http.next_payloads = [[{"n": 1}, {"n": 2}]]
         run_source(config, lakehouse_tables_path=TABLES_PATH)
 
-        assert delta["append"][0]["known_types"] == {}
-        assert delta["append"][1]["known_types"] == {"n": ac.DataType.int64()}
+        assert delta["writes"][0]["known_types"] == {}
+        assert delta["writes"][1]["known_types"] == {"n": ac.DataType.int64()}
 
     def test_warnings_survive_a_failed_run(self, http, delta):
-        delta["append_result"] = ({}, ["colonne 'n' : écrite en texte"])
+        delta["write_result"] = ({}, ["colonne 'n' : écrite en texte"])
         config = {
             **BASE_CONFIG,
             "batch_size": 1,
@@ -1321,3 +1329,130 @@ class TestPageSizeIsNotLost:
 
         assert result.status == "success", result.error_message
         assert result.rows_loaded == 2500
+
+
+class TestWriteModes:
+    """Mode d'écriture de la table cible. Le point sensible n'est pas de
+    remplacer, c'est de ne le faire qu'une fois par run : le prédicat appliqué
+    à chaque lot ferait s'effacer les lots les uns les autres."""
+
+    WINDOW = "trandate >= '2026-01-01' AND trandate < '2026-02-01'"
+
+    def test_append_is_the_default(self, http, delta):
+        http.next_payloads = [[{"id": 1}]]
+        run_source(BASE_CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert delta["writes"][0]["mode"] == "append"
+        assert delta["writes"][0]["predicate"] is None
+
+    def test_replace_where_replaces_then_appends(self, http, delta):
+        config = {
+            **BASE_CONFIG,
+            "batch_size": 2,
+            "write": {"mode": "replace_where", "replace_where": self.WINDOW},
+        }
+        http.next_payloads = [[{"id": i} for i in range(5)]]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        modes = [c["mode"] for c in delta["writes"]]
+        assert modes == ["overwrite", "append", "append"]
+        # le prédicat ne porte que sur le premier lot : la fenêtre est vidée
+        # une fois, pas trois
+        assert [c["predicate"] for c in delta["writes"]] == [self.WINDOW, None, None]
+        assert result.rows_loaded == 5
+
+    def test_overwrite_replaces_the_whole_table_once(self, http, delta):
+        config = {**BASE_CONFIG, "batch_size": 2, "write": {"mode": "overwrite"}}
+        http.next_payloads = [[{"id": i} for i in range(3)]]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert [c["mode"] for c in delta["writes"]] == ["overwrite", "append"]
+        assert all(c["predicate"] is None for c in delta["writes"])
+
+    def test_partition_by_reaches_every_write(self, http, delta):
+        config = {
+            **BASE_CONFIG, "batch_size": 2, "write": {"partition_by": ["year"]},
+        }
+        http.next_payloads = [[{"id": i, "year": "2026"} for i in range(3)]]
+        run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert [c["partition_by"] for c in delta["writes"]] == [["year"], ["year"]]
+
+    def test_an_empty_source_replaces_nothing(self, http, delta):
+        # une API en panne, un filtre trop étroit et un token sans droits
+        # répondent tous "0 ligne" : vider la cible sur ce signal détruirait
+        # des données sans que rien n'ait échoué
+        config = {
+            **BASE_CONFIG,
+            "write": {"mode": "replace_where", "replace_where": self.WINDOW},
+        }
+        http.next_payloads = [[]]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert delta["writes"] == []
+        assert result.rows_loaded == 0
+
+    def test_an_empty_source_says_so(self, http, delta):
+        config = {
+            **BASE_CONFIG,
+            "write": {"mode": "replace_where", "replace_where": self.WINDOW},
+        }
+        http.next_payloads = [[]]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        # l'attente naturelle est l'inverse : le silence serait le piège
+        assert any("aucune ligne" in w for w in result.warnings)
+        assert any("replace_where" in w for w in result.warnings)
+
+    def test_an_empty_source_in_append_warns_about_nothing(self, http, delta):
+        http.next_payloads = [[]]
+        result = run_source(BASE_CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.warnings == []
+
+    def test_a_non_empty_source_warns_about_nothing(self, http, delta):
+        config = {
+            **BASE_CONFIG,
+            "write": {"mode": "replace_where", "replace_where": self.WINDOW},
+        }
+        http.next_payloads = [[{"id": 1}]]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.warnings == []
+
+    def test_a_rejected_predicate_fails_the_run(self, http, delta, monkeypatch):
+        from flume_lib._delta import DeltaWriteError
+
+        def refuse(*args, **kwargs):
+            raise DeltaWriteError("replace_where : des lignes écrites ne satisfont pas")
+
+        monkeypatch.setattr("flume_lib.source.write_records", refuse)
+        config = {
+            **BASE_CONFIG,
+            "write": {"mode": "replace_where", "replace_where": self.WINDOW},
+        }
+        http.next_payloads = [[{"id": 1}]]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "failed"
+        assert "replace_where" in result.error_message
+        assert result.rows_loaded == 0
+
+    def test_checkpoint_with_a_replacing_mode_fails_before_any_call(self, http, delta):
+        config = {
+            **BASE_CONFIG,
+            "write": {"mode": "replace_where", "replace_where": self.WINDOW},
+            "incremental": {
+                "enabled": True, "field": "ts", "param_name": "since",
+                "checkpoint": True,
+            },
+        }
+        http.next_payloads = [[{"id": 1}]]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "failed"
+        assert "checkpoint" in result.error_message
+        assert delta["writes"] == []

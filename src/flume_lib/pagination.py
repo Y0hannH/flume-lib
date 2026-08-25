@@ -59,7 +59,7 @@ def extract_records(
 ) -> list:
     """Localise la liste d'enregistrements dans une réponse. `items_field`
     accepte un chemin pointé. `record_field` déballe chaque élément — les
-    connexions Relay (GraphQL) enveloppent chaque enregistrement dans un
+    connexions GraphQL enveloppent chaque enregistrement dans un
     `{cursor, node}` dont seul le `node` porte les données."""
     records = _locate_records(payload, items_field)
     if not record_field:
@@ -173,8 +173,8 @@ def paginate_cursor(
     par chemin pointé dans la réponse ('cursor_field') et renvoyé tel quel
     dans le paramètre 'cursor_param' ; la première requête part sans lui.
 
-    'has_more_field' — le `pageInfo.hasNextPage` des connexions Relay
-    (GraphQL) — fait autorité quand il est renseigné : une page vide au milieu
+    'has_more_field' — le `pageInfo.hasNextPage` des connexions GraphQL —
+    fait autorité quand il est renseigné : une page vide au milieu
     d'une connexion fortement filtrée n'y signifie pas la fin des données,
     alors qu'elle la signifie pour une API qui n'annonce rien.
     """
@@ -251,7 +251,7 @@ def paginate_keyset(
     Contrairement à `offset`, le coût d'une page ne croît pas avec sa
     profondeur et rien ne plafonne : c'est la seule stratégie qui atteint le
     fond d'une table de plusieurs millions de lignes sur les APIs qui bornent
-    l'offset (NetSuite s'arrête à 100 000). En contrepartie, elle exige une
+    l'offset (certaines s'arrêtent à 100 000). En contrepartie, elle exige une
     source **triée par `key_field`**, avec des valeurs uniques : la lib
     vérifie que la clé progresse et s'arrête plutôt que de boucler.
 

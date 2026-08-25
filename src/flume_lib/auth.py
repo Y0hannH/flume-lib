@@ -158,8 +158,8 @@ def _build_oauth1(auth_config: dict) -> OAuth1Signer:
         "realm": auth_config.get("realm"),
         "signature_method": auth_config.get("signature_method", "HMAC-SHA256"),
     }
-    # Le token est optionnel : OAuth 1.0a « two-legged » n'en a pas. NetSuite
-    # (TBA) en fournit toujours un.
+    # Le token est optionnel : OAuth 1.0a « two-legged » n'en a pas. Les APIs
+    # à jetons applicatifs en fournissent toujours un.
     if "token" in auth_config or "token_env_var" in auth_config:
         kwargs["token"] = _resolve(auth_config, "token")
         kwargs["token_secret"] = _resolve(auth_config, "token_secret")

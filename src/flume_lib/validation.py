@@ -15,7 +15,7 @@ _REQUIRED = ("base_url", "target_schema", "target_table")
 _OPTIONAL = (
     "name", "params", "auth", "pagination", "incremental", "retry",
     "timeout_seconds", "method", "body", "body_format", "headers",
-    "errors", "template_paths", "batch_size",
+    "errors", "template_paths", "batch_size", "write",
 )
 
 # Clés autorisées par type d'auth. Les formes historiques *_env_var sont
@@ -96,6 +96,9 @@ _INCREMENTAL_KEYS = (
 )
 _INCREMENTAL_INJECTS = ("query_param", "body_template")
 _RETRY_KEYS = ("max_attempts", "backoff_multiplier", "max_retry_after_seconds")
+
+_WRITE_KEYS = ("mode", "replace_where", "partition_by")
+_WRITE_MODES = ("append", "overwrite", "replace_where")
 
 
 class ConfigError(Exception):
@@ -399,6 +402,67 @@ def validate_config(config: dict) -> None:
                     "incremental : 'param_name' requis quand 'enabled' est vrai "
                     "(ou \"inject\": \"body_template\" pour injecter dans le corps)"
                 )
+
+    write = config.get("write")
+    if write is not None:
+        if not isinstance(write, dict):
+            raise ConfigError("write : doit être un objet")
+        _check_unknown("write", write, _WRITE_KEYS)
+        mode = write.get("mode", "append")
+        if mode not in _WRITE_MODES:
+            known = ", ".join(f"'{m}'" for m in _WRITE_MODES)
+            raise ConfigError(
+                f"write : 'mode' inconnu '{mode}' — attendu l'un de : {known}"
+            )
+        predicate = write.get("replace_where")
+        if mode == "replace_where" and not predicate:
+            raise ConfigError(
+                "write : 'replace_where' requis avec \"mode\": \"replace_where\" — "
+                "sans prédicat, le remplacement porterait sur la table entière, "
+                'ce qui se demande explicitement avec "mode": "overwrite"'
+            )
+        if predicate is not None:
+            if not isinstance(predicate, str) or not predicate.strip():
+                raise ConfigError(
+                    "write : 'replace_where' doit être un prédicat SQL non vide"
+                )
+            if mode != "replace_where":
+                raise ConfigError(
+                    f"write : 'replace_where' est ignoré avec \"mode\": \"{mode}\" — "
+                    "préciser \"mode\": \"replace_where\" pour qu'il soit appliqué"
+                )
+            if "{" in predicate or "}" in predicate:
+                raise ConfigError(
+                    "write : 'replace_where' n'est pas templaté — les "
+                    "placeholders y resteraient littéraux et le prédicat ne "
+                    "désignerait aucune ligne. Construire la chaîne côté "
+                    "appelant, une fenêtre par run"
+                )
+        partition_by = write.get("partition_by")
+        if partition_by is not None:
+            if not isinstance(partition_by, (list, tuple)) or not partition_by:
+                raise ConfigError(
+                    "write : 'partition_by' doit être une liste de colonnes non vide"
+                )
+            if not all(isinstance(col, str) and col for col in partition_by):
+                raise ConfigError(
+                    "write : 'partition_by' doit ne contenir que des noms de "
+                    "colonnes non vides"
+                )
+
+    if config.get("incremental", {}).get("checkpoint") and (
+        config.get("write", {}).get("mode", "append") != "append"
+    ):
+        raise ConfigError(
+            "write : \"mode\": \"{mode}\" est incompatible avec "
+            '"incremental.checkpoint". Le remplacement a lieu au premier lot ; '
+            "une reprise après interruption repartirait du watermark et "
+            "remplacerait à nouveau la fenêtre, effaçant du même coup ce que le "
+            "run interrompu y avait déjà écrit. Rejouer un backfill se fait "
+            "depuis le début de sa fenêtre, pas depuis son milieu.".format(
+                mode=config["write"]["mode"]
+            )
+        )
 
     retry = config.get("retry")
     if retry is not None:

@@ -10,8 +10,8 @@ finale.
 Implémentation stdlib volontaire : aucune dépendance supplémentaire à figer
 dans le lot de wheels Fabric.
 
-Standard générique (NetSuite TBA, Xero historique, WooCommerce…), pas un
-connecteur dédié à un fournisseur.
+Standard générique — les APIs d'ERP à jetons applicatifs et les APIs
+historiques encore en OAuth 1.0a — pas un connecteur dédié à un fournisseur.
 """
 
 import base64
@@ -23,8 +23,8 @@ import urllib.parse
 
 from requests.auth import AuthBase
 
-# NetSuite impose HMAC-SHA256 ; HMAC-SHA1 reste accepté pour les APIs plus
-# anciennes qui ne connaissent que lui.
+# HMAC-SHA256 par défaut, ce qu'exigent les APIs récentes ; HMAC-SHA1 reste
+# accepté pour les plus anciennes qui ne connaissent que lui.
 SIGNATURE_METHODS = {
     "HMAC-SHA256": hashlib.sha256,
     "HMAC-SHA1": hashlib.sha1,
@@ -54,7 +54,7 @@ def _base_uri(url: str) -> str:
 def _collect_params(url, body, content_type, oauth_params) -> list:
     """Paramètres entrant dans la signature : query string + paramètres OAuth,
     plus le corps s'il est en form-urlencoded. Un corps JSON n'est jamais
-    signé (RFC 5849 §3.4.1.3.1) — c'est le cas des requêtes SuiteQL."""
+    signé (RFC 5849 §3.4.1.3.1) — c'est le cas des requêtes SQL-over-REST."""
     parts = urllib.parse.urlsplit(url)
     collected = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
     if body and content_type and FORM_CONTENT_TYPE in content_type.lower():
@@ -74,9 +74,9 @@ def _normalize(params) -> str:
 class OAuth1Signer(AuthBase):
     """Signe chaque requête sortante avec un header `Authorization: OAuth …`.
 
-    `realm` est requis par NetSuite (l'identifiant de compte, ex. `1234567` ou
-    `1234567_SB1`) ; il est transmis dans le header mais n'entre pas dans la
-    signature.
+    `realm` est requis par certaines APIs, qui y attendent l'identifiant de
+    compte (ex. `1234567`) ; il est transmis dans le header mais n'entre pas
+    dans la signature.
     """
 
     def __init__(

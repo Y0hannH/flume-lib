@@ -2,12 +2,13 @@
 #
 # The reference example: one fictional vendor API, `https://api.example.com/v1`,
 # read with each of the five pagination shapes the library supports. Most client
-# APIs are one of these five and need nothing more than the block below — the
-# NetSuite and Shopify examples exist because those two are *not* ordinary.
+# APIs are one of these five and need nothing more than the block below. The
+# SQL-over-REST and GraphQL examples exist because those two shapes are *not*
+# ordinary.
 #
 # Read this one first; the others assume it.
 #
-# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.10.2
+# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.11.0
 
 from flume_lib import ConfigError, run_source, validate_config
 
@@ -135,8 +136,8 @@ NEXT_LINK_SOURCE = {
 # ---------------------------------------------------------------------------
 # 4. `cursor` — an opaque token, without GraphQL.
 #
-# The REST flavor of what the Shopify example does over a Relay connection:
-# same strategy, flat response, params in the query string. The first request
+# The REST flavor of what graphql_cursor_api.py does over a GraphQL
+# connection: same strategy, flat response, params in the query string. The first request
 # goes without a cursor.
 #
 # `has_more_field` is what makes this shape safe on a filtered endpoint: an
@@ -194,7 +195,7 @@ SINGLE_CALL_SOURCE = {
 # value of one param. It fits `?updated_since=2026-08-01T00:00:00Z` and cannot
 # build `?$filter=updated ge 2026-08-01T00:00:00Z` — a composed expression needs
 # the watermark inside a string, which is `inject: "body_template"` and
-# therefore a POST body (see netsuite_suiteql.py, and the note in
+# therefore a POST body (see sql_over_rest_api.py, and the note in
 # microsoft_graph_odata.py for the GET case).
 # ---------------------------------------------------------------------------
 
