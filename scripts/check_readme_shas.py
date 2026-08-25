@@ -87,9 +87,17 @@ def main() -> int:
     floor = min(version_key(tag) for tag in documented)
 
     head = git("rev-parse", "HEAD")
-    missing, wrong = [], []
+    missing, wrong, pending = [], [], []
     for tag, commit in sorted(published_tags().items(), key=lambda kv: version_key(kv[0])):
-        if version_key(tag) < floor or not is_strict_ancestor(commit, head):
+        if version_key(tag) < floor:
+            continue
+        if commit == head and tag not in documented:
+            # Le tag qu'on vient de poser. Sa ligne ne peut pas être dans ce
+            # commit, mais c'est maintenant qu'on en a besoin : l'imprimer
+            # sans faire échouer quoi que ce soit.
+            pending.append((tag, commit))
+            continue
+        if not is_strict_ancestor(commit, head):
             continue
         if tag not in documented:
             missing.append((tag, commit))
@@ -107,6 +115,12 @@ def main() -> int:
         return 1
 
     print(f"README : {len(documented)} versions listées, tableau à jour.")
+    for tag, commit in pending:
+        print(
+            f"\n{tag} vient d'être posé sur HEAD. Ligne à ajouter au tableau, "
+            "dans un commit séparé :\n"
+            f"| {tag} | `{commit}` |"
+        )
     return 0
 
 
