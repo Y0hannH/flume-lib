@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here. Versions follow [semantic versioning](https://semver.org/); until 1.0.0, minor versions may contain breaking changes — these are always listed first.
 
+## [0.13.0] — 2026-08-25
+
+One refusal lifted, and the reason it was worth two guards rather than one. Some APIs read their filter only from the body of a `GET` — the incidents endpoint of SolarWinds Service Desk among them — and the library made that source unloadable.
+
+### Added
+
+- **`allow_body_on_get`, to let a `GET` carry a body.** HTTP gives one no defined semantics and most APIs drop it silently, so the combination stays refused by default: the mistake is common, and a filter that vanishes in transit costs a full reload with nothing to show for it. The flag declares the exception for the APIs that do read one. It was refused in two places, and the second mattered more than the first: validation rejected `body` on `GET` with a clear message, but `_request` set only `params` on that branch and **dropped the body without a word** — anyone who worked around the first check would have sent an unfiltered request, reloaded the whole source, and been told nothing. The `GET` branch no longer short-circuits: once the exception is declared, a `GET` takes exactly the same paths as a `POST`, and `pagination.params_in` decides where parameters go rather than the method. Pagination therefore stays in the query string while the filter lives in the body, with nothing special to write. The rule had no test at all; it now has twelve, including one asserting that a config without the flag is rejected before any HTTP session is opened.
+
 ## [0.12.0] — 2026-08-25
 
 Two changes reach code that already exists. Every message the library raises is now in English, which breaks anything matching on message text — the exception *classes* are untouched, and remain the supported way to branch on a failure. And the incremental watermark, until now reinjected exactly as it was read, can be converted before it is sent: the gap that made an API dating its records in a local offset while filtering in UTC impossible to load incrementally at all. The rest is documentation — a cookbook organised by what an API does rather than by what the library offers, and a key index generated from the source instead of from anyone's memory.

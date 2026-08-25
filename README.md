@@ -30,7 +30,7 @@ No code is fetched from GitHub or PyPI at runtime — the notebook installs exac
 3. In the notebook:
 
    ```python
-   %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.12.0
+   %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.13.0
    ```
 
 `--no-index` guarantees pip resolves only from that folder — nothing is fetched from PyPI or GitHub. The folder layout is entirely up to you: any path works as long as the same path is passed to `--find-links`.

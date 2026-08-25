@@ -15,7 +15,7 @@
 # Every source below hits the same fictional API. The point is not the API, it
 # is what lands in Delta and what a **rerun** does to it.
 #
-# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.12.0
+# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.13.0
 
 from datetime import date, timedelta
 

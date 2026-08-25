@@ -10,7 +10,7 @@
 # the query*. A watermark, or a pagination key, has to be substituted into the
 # SQL rather than appended to the URL — which is what `body_template` does.
 #
-# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.12.0
+# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.13.0
 
 from datetime import date
 

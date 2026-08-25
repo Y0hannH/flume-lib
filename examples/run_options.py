@@ -14,7 +14,7 @@
 # None of them is required. The defaults target the notebook's own default
 # lakehouse, which is what a Fabric notebook wants nine times out of ten.
 #
-# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.12.0
+# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.13.0
 
 import os
 from datetime import date, timedelta
