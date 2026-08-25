@@ -47,6 +47,7 @@ Pin the **full commit SHA** of a release, never a tag — a tag can be re-pointe
 
 | Version | SHA |
 |---|---|
+| v0.13.0 | `cc9194d4de86fb9dc3897e9abfa2f67adadeab1e` |
 | v0.12.0 | `08fa0ee46487ee08cbe791bfd045f1971dbf8b76` |
 | v0.11.1 | `317604e68657fd5cabfe1740863924d7d35583af` |
 | v0.11.0 | `411dfcc762f8ffe3744c1ba494ddf30585cdb9a8` |
