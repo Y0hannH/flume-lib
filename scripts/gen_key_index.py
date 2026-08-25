@@ -42,7 +42,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from flume_lib import validation as V  # noqa: E402
 from flume_lib.oauth1 import SIGNATURE_METHODS  # noqa: E402
-from flume_lib.templating import VALUE_FORMATS  # noqa: E402
+from flume_lib.templating import NORMALIZERS, VALUE_FORMATS  # noqa: E402
 
 COOKBOOK = ROOT / "docs" / "cookbook.md"
 BEGIN = "<!-- BEGIN GENERATED KEY INDEX -->"
@@ -57,6 +57,7 @@ def _enum(values) -> str:
 
 _ENUM_PARAMS_IN = _enum(V._PARAMS_IN)
 _ENUM_VALUE_FORMATS = _enum(VALUE_FORMATS)
+_ENUM_NORMALIZERS = _enum(NORMALIZERS)
 _ENUM_INJECTS = _enum(V._INCREMENTAL_INJECTS)
 _ENUM_WRITE_MODES = _enum(V._WRITE_MODES)
 _ENUM_SIGNATURES = _enum(sorted(SIGNATURE_METHODS))
@@ -305,6 +306,9 @@ _NOTES = {
     ("incremental", "inject"): f"one of {_ENUM_INJECTS}",
     ("incremental", "placeholder"): 'name substituted in `body` with `"inject": "body_template"`',
     ("incremental", "value_format"): f"one of {_ENUM_VALUE_FORMATS}",
+    ("incremental", "normalize"):
+        f"one of {_ENUM_NORMALIZERS}; reshapes the watermark before it is "
+        "**sent**, not as stored",
     ("incremental", "checkpoint"):
         "commits the watermark batch by batch; incompatible with any `write.mode` but `append`",
     ("write", "mode"): f"one of {_ENUM_WRITE_MODES}",
