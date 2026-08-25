@@ -185,6 +185,118 @@ class TestOauth2ClientCredentials:
                 }
             )
 
+    def test_client_auth_basic_sends_authorization_header(self, monkeypatch):
+        monkeypatch.setenv("UMB_KEY", "the-key")
+        monkeypatch.setenv("UMB_SECRET", "the-secret")
+        mock = _mock_token_response(
+            monkeypatch, {"token_type": "bearer", "access_token": "umb-jwt", "expires_in": 3600}
+        )
+
+        headers = build_auth_headers(
+            {
+                "type": "oauth2_client_credentials",
+                "token_url": "https://api.umbrella.com/auth/v2/token",
+                "client_auth": "basic",
+                "client_id": {"env_var": "UMB_KEY"},
+                "client_secret": {"env_var": "UMB_SECRET"},
+            }
+        )
+
+        assert headers == {"Authorization": "Bearer umb-jwt"}
+        expected = base64.b64encode(b"the-key:the-secret").decode()
+        sent = mock.call_args.kwargs["headers"]
+        assert sent["Authorization"] == f"Basic {expected}"
+        # Les credentials ne partent qu'une fois : les redoubler dans le corps
+        # les exposerait dans les logs des IdP qui journalisent les form params.
+        data = mock.call_args.kwargs["data"]
+        assert data == {"grant_type": "client_credentials"}
+
+    def test_client_auth_basic_keeps_scope_in_body(self, monkeypatch):
+        mock = _mock_token_response(monkeypatch, {"access_token": "t"})
+        build_auth_headers(
+            {
+                "type": "oauth2_client_credentials",
+                "token_url": "https://idp.exemple.com/token",
+                "client_auth": "basic",
+                "client_id": "cid",
+                "client_secret": "cs",
+                "scope": "reports.read",
+            }
+        )
+        assert mock.call_args.kwargs["data"]["scope"] == "reports.read"
+
+    def test_client_auth_defaults_to_body(self, monkeypatch):
+        mock = _mock_token_response(monkeypatch, {"access_token": "t"})
+        build_auth_headers(
+            {
+                "type": "oauth2_client_credentials",
+                "token_url": "https://idp.exemple.com/token",
+                "client_id": "cid",
+                "client_secret": "cs",
+            }
+        )
+        assert mock.call_args.kwargs["data"]["client_id"] == "cid"
+        assert "headers" not in mock.call_args.kwargs or not mock.call_args.kwargs["headers"]
+
+    def test_unknown_client_auth_raises(self, monkeypatch):
+        _mock_token_response(monkeypatch, {"access_token": "t"})
+        with pytest.raises(AuthError, match="client_auth"):
+            build_auth_headers(
+                {
+                    "type": "oauth2_client_credentials",
+                    "token_url": "https://idp.exemple.com/token",
+                    "client_auth": "header",
+                    "client_id": "cid",
+                    "client_secret": "cs",
+                }
+            )
+
+    def test_expires_in_is_reported(self, monkeypatch):
+        _mock_token_response(monkeypatch, {"access_token": "t", "expires_in": 3600})
+        provider = AuthProvider(
+            {
+                "type": "oauth2_client_credentials",
+                "token_url": "https://api.umbrella.com/auth/v2/token",
+                "client_auth": "basic",
+                "client_id": "cid",
+                "client_secret": "cs",
+            }
+        )
+        assert provider.refreshable is True
+        provider.headers()
+        assert provider._expires_at is not None
+
+    def test_error_message_carries_the_response_body(self, monkeypatch):
+        response = MagicMock()
+        response.status_code = 401
+        response.text = '{"message":"invalid_client"}'
+        monkeypatch.setattr("flume_lib.auth.requests.post", MagicMock(return_value=response))
+        with pytest.raises(AuthError, match="invalid_client"):
+            build_auth_headers(
+                {
+                    "type": "oauth2_client_credentials",
+                    "token_url": "https://api.umbrella.com/auth/v2/token",
+                    "client_id": "cid",
+                    "client_secret": "cs",
+                }
+            )
+
+    def test_error_body_is_truncated(self, monkeypatch):
+        response = MagicMock()
+        response.status_code = 500
+        response.text = "z" * 5000
+        monkeypatch.setattr("flume_lib.auth.requests.post", MagicMock(return_value=response))
+        with pytest.raises(AuthError) as excinfo:
+            build_auth_headers(
+                {
+                    "type": "oauth2_client_credentials",
+                    "token_url": "https://idp.test/token",
+                    "client_id": "cid",
+                    "client_secret": "cs",
+                }
+            )
+        assert str(excinfo.value).count("z") == 500
+
     def test_missing_tenant_and_url_raises(self):
         with pytest.raises(AuthError, match="token_url.*tenant_id|tenant_id.*token_url"):
             build_auth_headers(

@@ -89,6 +89,39 @@ class TestAuthSection:
                 })
             )
 
+    def test_client_auth_basic_accepted(self):
+        validate_config(
+            cfg(auth={
+                "type": "oauth2_client_credentials",
+                "token_url": "https://api.umbrella.com/auth/v2/token",
+                "client_auth": "basic",
+                "client_id": "c",
+                "client_secret": {"env_var": "S"},
+            })
+        )
+
+    def test_unknown_client_auth_raises(self):
+        with pytest.raises(ConfigError, match="client_auth"):
+            validate_config(
+                cfg(auth={
+                    "type": "oauth2_client_credentials",
+                    "token_url": "https://x/token",
+                    "client_auth": "header",
+                    "client_id": "c",
+                    "client_secret": "s",
+                })
+            )
+
+    def test_client_auth_rejected_on_other_auth_types(self):
+        with pytest.raises(ConfigError, match="unknown key 'client_auth'"):
+            validate_config(
+                cfg(auth={
+                    "type": "token_endpoint",
+                    "token_url": "https://x/token",
+                    "client_auth": "basic",
+                })
+            )
+
     def test_secret_ref_in_get_body_raises(self):
         with pytest.raises(ConfigError, match="GET"):
             validate_config(

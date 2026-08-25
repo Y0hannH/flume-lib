@@ -9,7 +9,7 @@
 # Auth is the other half: an Entra ID service principal, which is
 # `oauth2_client_credentials` with `tenant_id` instead of a token URL.
 #
-# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.13.0
+# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.14.0
 
 from datetime import date, datetime, timedelta, timezone
 

@@ -13,6 +13,16 @@ from flume_lib.secrets_ import SecretResolutionError, resolve_secret
 DEFAULT_TOKEN_TIMEOUT_SECONDS = 30
 ENTRA_TOKEN_URL = "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
 
+# Emplacement des credentials client dans l'appel token OAuth2. La RFC 6749
+# §2.3.1 décrit les deux et recommande 'basic' ; les IdP se partagent entre les
+# deux sans que la doc du fournisseur le dise toujours.
+CLIENT_AUTH_MODES = ("body", "basic")
+
+# Longueur du corps d'une réponse d'erreur repris dans le message. Un token
+# endpoint répond en général quelques dizaines d'octets ; on tronque pour ne
+# pas déverser une page HTML d'erreur dans les logs et dans log_runs.
+ERROR_BODY_MAX_CHARS = 500
+
 # Types d'auth dont le credential est un token obtenu par appel réseau, donc
 # périssable et renouvelable. Les autres portent un credential statique : un
 # 401 y est une erreur de configuration, que rejouer ne corrigerait pas.
@@ -43,6 +53,20 @@ def _resolve(auth_config: dict, field: str) -> str:
         return resolve_secret(ref, field)
     except SecretResolutionError as exc:
         raise AuthError(str(exc)) from exc
+
+
+def _error_detail(response) -> str:
+    """Début du corps d'une réponse d'erreur, pour le message d'exception.
+
+    Sans lui, un token endpoint qui refuse ne dit que son code : le 401 d'une
+    auth client mal placée et celui d'un secret périmé sont alors le même
+    message, alors que le corps de la réponse distingue les deux.
+    """
+    text = getattr(response, "text", None)
+    if not isinstance(text, str) or not text.strip():
+        return ""
+    truncated = text.strip()[:ERROR_BODY_MAX_CHARS]
+    return f" — {truncated}"
 
 
 def _extract_json_path(payload: dict, path: str):
@@ -76,7 +100,14 @@ def _expires_in(payload: dict, path: str | None) -> float | None:
 
 def _fetch_oauth2_client_credentials(auth_config: dict) -> tuple[str, float | None]:
     """Flux OAuth2 client_credentials — couvre les service principals Entra ID
-    (APIs Microsoft : Graph, Fabric, Azure Management…) et tout IdP standard."""
+    (APIs Microsoft : Graph, Fabric, Azure Management…) et tout IdP standard.
+
+    `client_auth` choisit où voyagent les credentials client : dans le corps
+    du POST ('body', défaut, ce que fait Entra ID) ou dans un en-tête
+    `Authorization: Basic` ('basic', ce qu'exigent Cisco Umbrella et d'autres).
+    Un IdP qui attend 'basic' et reçoit 'body' ne voit aucun credential : il
+    répond 401, exactement comme si le secret était faux.
+    """
     token_url = auth_config.get("token_url")
     if not token_url:
         tenant_id = auth_config.get("tenant_id")
@@ -86,19 +117,33 @@ def _fetch_oauth2_client_credentials(auth_config: dict) -> tuple[str, float | No
             )
         token_url = ENTRA_TOKEN_URL.format(tenant_id=tenant_id)
 
-    data = {
-        "grant_type": "client_credentials",
-        "client_id": _resolve(auth_config, "client_id"),
-        "client_secret": _resolve(auth_config, "client_secret"),
-    }
+    client_auth = auth_config.get("client_auth", "body")
+    if client_auth not in CLIENT_AUTH_MODES:
+        raise AuthError(
+            f"oauth2_client_credentials: unknown 'client_auth' '{client_auth}' — "
+            f"expected one of: {', '.join(CLIENT_AUTH_MODES)}"
+        )
+
+    client_id = _resolve(auth_config, "client_id")
+    client_secret = _resolve(auth_config, "client_secret")
+
+    data = {"grant_type": "client_credentials"}
+    headers = {}
+    if client_auth == "basic":
+        encoded = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+        headers["Authorization"] = f"Basic {encoded}"
+    else:
+        data["client_id"] = client_id
+        data["client_secret"] = client_secret
     if auth_config.get("scope"):
         data["scope"] = auth_config["scope"]
 
     timeout = auth_config.get("timeout_seconds", DEFAULT_TOKEN_TIMEOUT_SECONDS)
-    response = requests.post(token_url, data=data, timeout=timeout)
+    response = requests.post(token_url, data=data, headers=headers, timeout=timeout)
     if response.status_code != 200:
         raise AuthError(
-            f"oauth2_client_credentials: HTTP {response.status_code} on {token_url}"
+            f"oauth2_client_credentials: HTTP {response.status_code} on "
+            f"{token_url}{_error_detail(response)}"
         )
     payload = response.json()
     token = payload.get("access_token")
@@ -146,7 +191,10 @@ def _fetch_token_endpoint(auth_config: dict) -> tuple[str, float | None]:
 
     response = requests.request(method, token_url, **kwargs)
     if response.status_code != 200:
-        raise AuthError(f"token_endpoint: HTTP {response.status_code} on {token_url}")
+        raise AuthError(
+            f"token_endpoint: HTTP {response.status_code} on "
+            f"{token_url}{_error_detail(response)}"
+        )
 
     payload = response.json()
     token = _extract_json_path(payload, auth_config.get("token_json_path", "access_token"))

@@ -20,6 +20,7 @@ This page assumes you already know what the library does. It is the one to open 
 | "POST your credentials to `/login`, use the token you get back" | `{"type": "token_endpoint", "token_url": …, "body": {…}, "token_json_path": …}` |
 | "OAuth2 client credentials" / "client id + secret" | `{"type": "oauth2_client_credentials", "token_url": …, "client_id": …, "client_secret": <ref>}` |
 | Any Microsoft API (Graph, Fabric, Business Central) | same, with `"tenant_id"` instead of `token_url` |
+| The vendor's token example reads `curl --user '<key>:<secret>'` (Cisco Umbrella, Secure Access…) | same, plus `"client_auth": "basic"` — without it the token call answers 401 |
 | "OAuth 1.0a", "TBA", "token-based authentication" (NetSuite and other ERPs) | `{"type": "oauth1", "consumer_key": …, "consumer_secret": …, "token": …, "token_secret": …}` |
 | "The API key goes in the query string" | no auth type — [ask for the header form](../examples/rest_api_auth_variants.py); a key in a URL lands in every proxy log |
 | Nothing — the endpoint is public | `{"type": "none"}`, or no `auth` block |
@@ -128,6 +129,18 @@ BASE = {
 
 That is the **standard** flow: a form-encoded `POST` carrying `grant_type=client_credentials`, the token read from `access_token`, sent as `Authorization: Bearer <token>`. Use it whenever the vendor's doc says "OAuth2", "client credentials" or "client id + secret". For any Microsoft API, drop `token_url` and pass `"tenant_id"` instead — the Entra ID token URL is built for you.
 
+**Read the vendor's token example before running it, and look at where the key and secret sit.** The standard leaves that open: they go either in the form body (the default here) or in an `Authorization: Basic` header, and a vendor requiring the second is not exotic — the RFC recommends it. Prose rarely says which; the `curl` does. A `--user '<key>:<secret>'` means `"client_auth": "basic"`, a `-d 'client_id=…'` means the default. Getting it wrong costs a 401 that looks exactly like a bad secret, on credentials that are perfectly valid — Cisco Umbrella:
+
+```python
+    "auth": {
+        "type": "oauth2_client_credentials",
+        "token_url": "https://api.umbrella.com/auth/v2/token",
+        "client_auth": "basic",
+        "client_id": {"keyvault_url": KEYVAULT, "secret_name": "umbrella-key"},
+        "client_secret": {"keyvault_url": KEYVAULT, "secret_name": "umbrella-secret"},
+    },
+```
+
 **When the login call is the vendor's own invention** — a bespoke `POST /auth/login` answering `{"data": {"jwt": …}}` — it is the same idea under `token_endpoint`, where every part of the request and the response path is spelled out:
 
 ```python
@@ -153,6 +166,7 @@ Three things worth knowing about both, because they are what makes a long run su
 - **The token is renewed mid-run.** An API handing out 30-minute tokens no longer breaks a two-hour backfill. With a lifetime known — `expires_in` is standard in OAuth2, and `expires_in_json_path` supplies it for `token_endpoint` — renewal happens 60 seconds *before* expiry, wasting no call. Without one, renewal is reactive: on a 401 the library logs in again and replays the page, once per page. Both work; the first is free.
 - **A `token_endpoint` declared as GET with a secret reference in `body` is refused at validation.** Those values would leave as query params, into every server log and proxy in between. It is a POST or it is nothing.
 - **A wrong client secret fails as `AuthError`, before any data call.** A dry run is therefore a complete credential test, and the cheapest way to check a rotation.
+- **A failed token call quotes the vendor's own error message**, truncated to 500 characters, next to the status code. A bare `HTTP 401` says nothing about *which* 401 it is — misplaced credentials, expired secret, deactivated account — while the body of the response usually names it outright.
 
 ### 2.3 Before the first real run
 
@@ -317,6 +331,7 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `client_id_env_var` | one of | — |  |
 | `client_secret_env_var` | one of | — |  |
 | `scope` | — | — |  |
+| `client_auth` | — | `"body"` |  |
 | `timeout_seconds` | — | `30` | of the token call only |
 
 #### `auth` — `"type": "token_endpoint"`

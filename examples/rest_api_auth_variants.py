@@ -15,7 +15,7 @@
 # A literal string is accepted only for values that are not secret: a public
 # username, a scope, a grant type.
 #
-# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.13.0
+# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.14.0
 
 from flume_lib import run_source
 
@@ -216,6 +216,27 @@ ENTRA_SERVICE_PRINCIPAL = {
     "client_id": secret("sp-client-id"),
     "client_secret": secret("sp-client-secret"),
     "scope": "https://graph.microsoft.com/.default",
+}
+
+# The same flow, with the credentials in an `Authorization: Basic` header
+# instead of the form body. RFC 6749 allows both and recommends this one, so a
+# vendor requiring it is not an edge case: Cisco Umbrella and Secure Access
+# both do. The tell is in the vendor's own example — `curl --user
+# '<key>:<secret>'` means `basic`, `-d 'client_id=...'` means the default.
+#
+# Send it the wrong way and the credentials simply are not there, so the token
+# call answers 401 — the same 401 as an expired secret, on credentials that are
+# perfectly valid. That is why the error now carries the response body: the
+# vendor names the reason, the status code alone never does.
+UMBRELLA = {
+    "type": "oauth2_client_credentials",
+    "token_url": "https://api.umbrella.com/auth/v2/token",
+    "client_auth": "basic",
+    "client_id": secret("umbrella-api-key"),
+    "client_secret": secret("umbrella-api-secret"),
+    # No `scope`: Umbrella derives the permissions from the key itself.
+    # `expires_in: 3600` comes back on its own, so the token is renewed at
+    # T-60s and a backfill longer than an hour survives.
 }
 
 # The same flow with both credentials from the environment, and a timeout on

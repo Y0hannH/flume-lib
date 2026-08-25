@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here. Versions follow [semantic versioning](https://semver.org/); until 1.0.0, minor versions may contain breaking changes — these are always listed first.
 
+## [0.14.0] — 2026-08-25
+
+An OAuth2 flow the library claimed to support and could not complete, and the reason the failure was unreadable. `oauth2_client_credentials` only ever sent the client credentials one of the two ways the standard allows — which made every IdP expecting the other unloadable, behind a 401 that named nothing.
+
+### Added
+
+- **`client_auth`, to put the client credentials in a Basic header rather than the form body.** RFC 6749 §2.3.1 defines both placements and *recommends* the header; the library implemented only the body, the form Entra ID uses. An IdP expecting `client_secret_basic` therefore received a request with no credentials in it at all — Cisco Umbrella and Cisco Secure Access among them — and answered **401, the same 401 as an expired secret**. Nothing in the config could move them: `oauth2_client_credentials` had no lever, and the only way through was `token_endpoint` with a pre-computed `Basic …` string stored in Key Vault, which puts a *derived* value in the vault and turns a key rotation into a base64 exercise. `"client_auth": "basic"` sends `Authorization: Basic base64(id:secret)` and leaves `grant_type` (and `scope`) alone in the body — the credentials go out once, never twice. `body` remains the default and the previous behaviour, and an unknown value is refused at validation rather than at the token call. The tell is in the vendor's own quickstart, not in its prose: a `curl --user '<key>:<secret>'` means `basic`.
+- **The vendor's error message, in the exception.** Both token-fetching strategies raised on the status code alone — `oauth2_client_credentials: HTTP 401 on https://…` — which is the least informative moment to say nothing: a 401 from a token endpoint is misplaced credentials, an expired secret, a deactivated account or a wrong URL, and the response body distinguishes them where the status code cannot. It is now quoted after the URL, truncated to 500 characters so that an HTML error page does not land whole in `log_runs`. This is the diagnosis that a misplaced credential needed and did not have.
+
 ## [0.13.0] — 2026-08-25
 
 One refusal lifted, and the reason it was worth two guards rather than one. Some APIs read their filter only from the body of a `GET` — the incidents endpoint of SolarWinds Service Desk among them — and the library made that source unloadable.

@@ -7,6 +7,7 @@ données seraient perdues sans aucun signal."""
 
 import difflib
 
+from flume_lib.auth import CLIENT_AUTH_MODES
 from flume_lib.oauth1 import SIGNATURE_METHODS
 from flume_lib.templating import NORMALIZERS, VALUE_FORMATS, templated_placeholders
 
@@ -29,7 +30,8 @@ _AUTH_KEYS = {
     ),
     "oauth2_client_credentials": (
         "token_url", "tenant_id", "client_id", "client_secret",
-        "client_id_env_var", "client_secret_env_var", "scope", "timeout_seconds",
+        "client_id_env_var", "client_secret_env_var", "scope", "client_auth",
+        "timeout_seconds",
     ),
     "token_endpoint": (
         "token_url", "method", "body", "body_format", "headers",
@@ -246,6 +248,14 @@ def validate_config(config: dict) -> None:
                 raise ConfigError(
                     "auth: 'token' and 'token_secret' go together — "
                     "omitting both yields two-legged OAuth 1.0a"
+                )
+        if auth_type == "oauth2_client_credentials":
+            client_auth = auth.get("client_auth", "body")
+            if client_auth not in CLIENT_AUTH_MODES:
+                known = ", ".join(CLIENT_AUTH_MODES)
+                raise ConfigError(
+                    f"auth: unknown 'client_auth' '{client_auth}' — "
+                    f"expected one of: {known}"
                 )
         if auth_type == "token_endpoint":
             token_method = str(auth.get("method", "POST")).upper()

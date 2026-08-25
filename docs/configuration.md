@@ -396,7 +396,7 @@ Custom header (API expecting the raw token in a specific header):
 
 ### `oauth2_client_credentials` — standard OAuth2 flow (including Entra ID service principals)
 
-Sends `grant_type=client_credentials` + `client_id` + `client_secret` (+ `scope` if provided) **form-encoded** to the `token_url`, and expects the token under the `access_token` key of the JSON response. If your endpoint deviates from this standard (different key name, JSON body…), use `token_endpoint` instead.
+Sends `grant_type=client_credentials` (+ `scope` if provided) **form-encoded** to the `token_url`, and expects the token under the `access_token` key of the JSON response. If your endpoint deviates from this standard (different key name, JSON body…), use `token_endpoint` instead.
 
 | Key | Required | Default | Description |
 |---|---|---|---|
@@ -404,8 +404,11 @@ Sends `grant_type=client_credentials` + `client_id` + `client_secret` (+ `scope`
 | `tenant_id` | yes, unless `token_url` | — | Entra ID shortcut: derives `token_url = https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token`. |
 | `client_id` | **yes** | — | Secret ref (or literal — an Entra app id is not a secret). |
 | `client_secret` | **yes** | — | Secret ref. |
+| `client_auth` | no | `body` | Where the client credentials travel: `body` (form fields, what Entra ID expects) or `basic` (`Authorization: Basic base64(id:secret)`, what Cisco Umbrella and others require). See below. |
 | `scope` | no | absent | E.g. `https://graph.microsoft.com/.default` (Entra) or a proprietary scope. |
 | `timeout_seconds` | no | `30` | Token call timeout. |
+
+**`client_auth` is the setting to check first on a 401 from the token call.** RFC 6749 §2.3.1 defines two ways to present the client credentials — in the form body, or in an HTTP Basic header — and recommends the second; vendors pick one and rarely say which in prose, the answer usually hiding in a `curl --user '<key>:<secret>'` in their quickstart. An IdP expecting `basic` and receiving `body` sees no credentials at all, so it answers **401 — indistinguishable from a wrong secret**. With `basic`, the credentials go in the header and the body carries only `grant_type` (and `scope`): they are never sent twice.
 
 Service principal against a Microsoft API:
 
@@ -418,6 +421,20 @@ Service principal against a Microsoft API:
   "scope": "https://graph.microsoft.com/.default"
 }
 ```
+
+Cisco Umbrella — the `client_secret_basic` variant, with a one-hour token:
+
+```json
+{
+  "type": "oauth2_client_credentials",
+  "token_url": "https://api.umbrella.com/auth/v2/token",
+  "client_auth": "basic",
+  "client_id": {"keyvault_url": "https://kv.vault.azure.net", "secret_name": "umbrella-key"},
+  "client_secret": {"keyvault_url": "https://kv.vault.azure.net", "secret_name": "umbrella-secret"}
+}
+```
+
+Umbrella answers `expires_in: 3600`, which the provider reads on its own — the token is renewed 60 seconds before expiry, so a backfill longer than an hour does not break. Cisco Secure Access is the same block against `https://api.sse.cisco.com/auth/v2/token`.
 
 Non-Microsoft IdP with a proprietary scope:
 
