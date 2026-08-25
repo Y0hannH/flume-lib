@@ -110,15 +110,15 @@ def _check_unknown(section: str, config: dict, allowed) -> None:
         if key in allowed:
             continue
         suggestion = difflib.get_close_matches(key, sorted(allowed), n=1)
-        hint = f" — vouliez-vous dire '{suggestion[0]}' ?" if suggestion else ""
-        raise ConfigError(f"{section} : clé inconnue '{key}'{hint}")
+        hint = f" — did you mean '{suggestion[0]}'?" if suggestion else ""
+        raise ConfigError(f"{section}: unknown key '{key}'{hint}")
 
 
 def _check_required_groups(section: str, config: dict, groups) -> None:
     for group in groups:
         if not any(key in config for key in group):
-            names = " ou ".join(f"'{k}'" for k in group)
-            raise ConfigError(f"{section} : {names} requis")
+            names = " or ".join(f"'{k}'" for k in group)
+            raise ConfigError(f"{section}: {names} required")
 
 
 def _resolve_body_path(section: str, body, path: str, required: bool):
@@ -132,12 +132,12 @@ def _resolve_body_path(section: str, body, path: str, required: bool):
         if not isinstance(node, dict):
             prefix = ".".join(parts[:depth]) or "body"
             raise ConfigError(
-                f"{section} : '{prefix}' n'est pas un objet dans 'body'"
+                f"{section}: '{prefix}' is not an object inside 'body'"
             )
         if part not in node:
             if required:
                 raise ConfigError(
-                    f"{section} : chemin '{path}' introuvable dans 'body'"
+                    f"{section}: path '{path}' not found in 'body'"
                 )
             return None
         node = node[part]
@@ -146,12 +146,12 @@ def _resolve_body_path(section: str, body, path: str, required: bool):
 
 def _check_type(section: str, config: dict, allowed_types: dict, default: str):
     if not isinstance(config, dict):
-        raise ConfigError(f"{section} : doit être un objet")
+        raise ConfigError(f"{section}: must be an object")
     type_name = config.get("type", default)
     if type_name not in allowed_types:
         known = ", ".join(sorted(allowed_types))
         raise ConfigError(
-            f"{section} : type inconnu '{type_name}' — attendu l'un de : {known}"
+            f"{section}: unknown type '{type_name}' — expected one of: {known}"
         )
     return type_name
 
@@ -160,53 +160,53 @@ def validate_config(config: dict) -> None:
     """Valide la configuration d'une source. Lève ConfigError au premier
     problème rencontré, avec un message actionnable."""
     if not isinstance(config, dict):
-        raise ConfigError("La configuration d'une source doit être un objet")
+        raise ConfigError("A source configuration must be an object")
 
     _check_unknown("config", config, _REQUIRED + _OPTIONAL)
     for key in _REQUIRED:
         if not config.get(key):
-            raise ConfigError(f"config : '{key}' requis")
+            raise ConfigError(f"config: '{key}' required")
 
     method = str(config.get("method", "GET")).upper()
     if method not in ("GET", "POST", "PUT", "PATCH"):
-        raise ConfigError(f"config : méthode HTTP non supportée '{method}'")
+        raise ConfigError(f"config: unsupported HTTP method '{method}'")
     if "body" in config and method == "GET":
         raise ConfigError(
-            "config : 'body' est ignoré en GET — préciser \"method\": \"POST\""
+            "config: 'body' is ignored on GET — set \"method\": \"POST\""
         )
 
     if "batch_size" in config:
         batch_size = config["batch_size"]
         # bool est un int en Python : le laisser passer donnerait batch_size=1
         if not isinstance(batch_size, int) or isinstance(batch_size, bool):
-            raise ConfigError("config : 'batch_size' doit être un entier")
+            raise ConfigError("config: 'batch_size' must be an integer")
         if batch_size < 1:
-            raise ConfigError("config : 'batch_size' doit être supérieur à 0")
+            raise ConfigError("config: 'batch_size' must be greater than 0")
 
     headers = config.get("headers")
     if headers is not None:
         if not isinstance(headers, dict):
-            raise ConfigError("headers : doit être un objet")
+            raise ConfigError("headers: must be an object")
         for key, value in headers.items():
             if not isinstance(key, str) or not isinstance(value, str):
                 raise ConfigError(
-                    f"headers : '{key}' doit être une chaîne littérale — pour un "
-                    "credential, utiliser 'auth' (api_key_header, bearer_token…)"
+                    f"headers: '{key}' must be a literal string — for a "
+                    "credential, use 'auth' (api_key_header, bearer_token…)"
                 )
 
     errors_config = config.get("errors")
     if errors_config is not None:
         if not isinstance(errors_config, dict):
-            raise ConfigError("errors : doit être un objet")
+            raise ConfigError("errors: must be an object")
         _check_unknown("errors", errors_config, _ERRORS_KEYS)
         for key in ("path", "code_field", "message_field"):
             if key in errors_config and not (
                 isinstance(errors_config[key], str) and errors_config[key]
             ):
-                raise ConfigError(f"errors : '{key}' doit être une chaîne non vide")
+                raise ConfigError(f"errors: '{key}' must be a non-empty string")
         codes = errors_config.get("retryable_codes")
         if codes is not None and not isinstance(codes, (list, tuple)):
-            raise ConfigError("errors : 'retryable_codes' doit être une liste")
+            raise ConfigError("errors: 'retryable_codes' must be a list")
 
     template_paths = config.get("template_paths")
     if template_paths is not None:
@@ -214,12 +214,12 @@ def validate_config(config: dict) -> None:
             isinstance(path, str) and path for path in template_paths
         ):
             raise ConfigError(
-                "template_paths : doit être une liste de chemins non vides"
+                "template_paths: must be a list of non-empty paths"
             )
         if not isinstance(config.get("body"), dict):
             raise ConfigError(
-                "template_paths : ne restreint que le templating de 'body', "
-                "absent de la config"
+                "template_paths: only restricts templating of 'body', which is "
+                "absent from the config"
             )
         for path in template_paths:
             _resolve_body_path("template_paths", config["body"], path, required=True)
@@ -234,15 +234,15 @@ def validate_config(config: dict) -> None:
             if signature_method not in SIGNATURE_METHODS:
                 known = ", ".join(sorted(SIGNATURE_METHODS))
                 raise ConfigError(
-                    f"auth : 'signature_method' inconnue '{signature_method}' — "
-                    f"attendu l'une de : {known}"
+                    f"auth: unknown 'signature_method' '{signature_method}' — "
+                    f"expected one of: {known}"
                 )
             has_token = "token" in auth or "token_env_var" in auth
             has_secret = "token_secret" in auth or "token_secret_env_var" in auth
             if has_token != has_secret:
                 raise ConfigError(
-                    "auth : 'token' et 'token_secret' vont par paire — "
-                    "les omettre tous les deux donne un OAuth 1.0a two-legged"
+                    "auth: 'token' and 'token_secret' go together — "
+                    "omitting both yields two-legged OAuth 1.0a"
                 )
         if auth_type == "token_endpoint":
             token_method = str(auth.get("method", "POST")).upper()
@@ -250,8 +250,8 @@ def validate_config(config: dict) -> None:
                 isinstance(v, dict) for v in auth.get("body", {}).values()
             ):
                 raise ConfigError(
-                    "auth : référence de secret interdite dans 'body' en GET — "
-                    "les paramètres partent dans l'URL (logs serveurs, proxies)"
+                    "auth: secret references are not allowed in 'body' on GET — "
+                    "the parameters travel in the URL (server logs, proxies)"
                 )
 
     pagination = config.get("pagination")
@@ -268,18 +268,18 @@ def validate_config(config: dict) -> None:
         if params_in not in _PARAMS_IN:
             known = ", ".join(f"'{v}'" for v in _PARAMS_IN)
             raise ConfigError(
-                f"pagination : 'params_in' doit valoir l'un de {known}, "
-                f"pas '{params_in}'"
+                f"pagination: 'params_in' must be one of {known}, "
+                f"not '{params_in}'"
             )
         if params_in in ("body", "body_template") and method == "GET":
             raise ConfigError(
-                f'pagination : "params_in": "{params_in}" nécessite une méthode POST'
+                f'pagination: "params_in": "{params_in}" requires a POST method'
             )
         if params_in == "body_template":
             if not isinstance(config.get("body"), dict) or not config["body"]:
                 raise ConfigError(
-                    'pagination : "params_in": "body_template" substitue les '
-                    "paramètres dans 'body', absent de la config"
+                    'pagination: "params_in": "body_template" substitutes the '
+                    "parameters into 'body', which is absent from the config"
                 )
 
         for key in ("max_pages", "max_rows"):
@@ -287,49 +287,49 @@ def validate_config(config: dict) -> None:
                 continue
             value = pagination[key]
             if not isinstance(value, int) or isinstance(value, bool):
-                raise ConfigError(f"pagination : '{key}' doit être un entier")
+                raise ConfigError(f"pagination: '{key}' must be an integer")
             if value < 1:
-                raise ConfigError(f"pagination : '{key}' doit être supérieur à 0")
+                raise ConfigError(f"pagination: '{key}' must be greater than 0")
 
         params_path = pagination.get("params_path")
         if params_path is not None:
             if not isinstance(params_path, str) or not params_path:
                 raise ConfigError(
-                    "pagination : 'params_path' doit être un chemin non vide"
+                    "pagination: 'params_path' must be a non-empty path"
                 )
             if params_in != "body":
                 raise ConfigError(
-                    "pagination : 'params_path' imbrique les paramètres dans le "
-                    "corps et nécessite donc \"params_in\": \"body\""
+                    "pagination: 'params_path' nests the parameters inside the "
+                    "body and therefore requires \"params_in\": \"body\""
                 )
             target = _resolve_body_path(
                 "pagination", config.get("body") or {}, params_path, required=False
             )
             if target is not None and not isinstance(target, dict):
                 raise ConfigError(
-                    f"pagination : 'params_path' désigne '{params_path}', qui "
-                    "n'est pas un objet dans 'body'"
+                    f"pagination: 'params_path' points at '{params_path}', which "
+                    "is not an object inside 'body'"
                 )
 
         if pagination_type == "cursor":
             for key in ("cursor_param", "cursor_field"):
                 if not pagination.get(key):
                     raise ConfigError(
-                        f"pagination : '{key}' requis avec \"type\": \"cursor\""
+                        f"pagination: '{key}' required with \"type\": \"cursor\""
                     )
 
         if pagination_type == "keyset":
             for key in ("key_field", "key_param"):
                 if not pagination.get(key):
                     raise ConfigError(
-                        f"pagination : '{key}' requis avec \"type\": \"keyset\""
+                        f"pagination: '{key}' required with \"type\": \"keyset\""
                     )
             value_format = pagination.get("value_format", "any")
             if value_format not in VALUE_FORMATS:
                 known = ", ".join(VALUE_FORMATS)
                 raise ConfigError(
-                    f"pagination : 'value_format' inconnu '{value_format}' — "
-                    f"attendu l'un de : {known}"
+                    f"pagination: unknown 'value_format' '{value_format}' — "
+                    f"expected one of: {known}"
                 )
             if params_in == "body_template":
                 key_param = pagination["key_param"]
@@ -337,129 +337,128 @@ def validate_config(config: dict) -> None:
                     config.get("body") or {}, config.get("template_paths")
                 )
                 if key_param not in available:
-                    known = ", ".join(sorted(available)) or "aucun"
+                    known = ", ".join(sorted(available)) or "none"
                     raise ConfigError(
-                        f"pagination : le placeholder '{{{key_param}}}' est "
-                        "absent de 'body' — la clé de pagination n'aurait nulle "
-                        f"part où être substituée (placeholders trouvés : {known})"
+                        f"pagination: placeholder '{{{key_param}}}' is missing "
+                        "from 'body' — the pagination key would have nowhere to "
+                        f"be substituted (placeholders found: {known})"
                     )
             if params_in == "body_template" and value_format == "any":
                 known = ", ".join(f for f in VALUE_FORMATS if f != "any")
                 raise ConfigError(
-                    "pagination : 'value_format' explicite requis quand la clé "
-                    "est interpolée dans le corps — attendu l'un de : "
-                    f"{known}. La clé vient de la réponse de l'API ; le "
-                    "filtrage des caractères ne protège qu'un placeholder "
-                    "entre quotes, un placeholder nu (WHERE id > {last_key}) "
-                    "accepterait '0 OR 1=1'"
+                    "pagination: an explicit 'value_format' is required when the "
+                    "key is interpolated into the body — expected one of: "
+                    f"{known}. The key comes from the API response; character "
+                    "filtering only protects a quoted placeholder, a bare "
+                    "placeholder (WHERE id > {last_key}) would accept "
+                    "'0 OR 1=1'"
                 )
 
     incremental = config.get("incremental")
     if incremental is not None:
         if not isinstance(incremental, dict):
-            raise ConfigError("incremental : doit être un objet")
+            raise ConfigError("incremental: must be an object")
         _check_unknown("incremental", incremental, _INCREMENTAL_KEYS)
         inject = incremental.get("inject", "query_param")
         if inject not in _INCREMENTAL_INJECTS:
             known = ", ".join(_INCREMENTAL_INJECTS)
             raise ConfigError(
-                f"incremental : 'inject' inconnu '{inject}' — attendu l'un de : {known}"
+                f"incremental: unknown 'inject' '{inject}' — expected one of: {known}"
             )
         value_format = incremental.get("value_format", "any")
         if value_format not in VALUE_FORMATS:
             known = ", ".join(VALUE_FORMATS)
             raise ConfigError(
-                f"incremental : 'value_format' inconnu '{value_format}' — "
-                f"attendu l'un de : {known}"
+                f"incremental: unknown 'value_format' '{value_format}' — "
+                f"expected one of: {known}"
             )
         if incremental.get("checkpoint") and not incremental.get("enabled"):
             raise ConfigError(
-                "incremental : 'checkpoint' commite le watermark lot par lot "
-                "et n'a de sens qu'avec \"enabled\": true"
+                "incremental: 'checkpoint' commits the watermark batch by batch "
+                "and only makes sense with \"enabled\": true"
             )
         if incremental.get("enabled"):
             if not incremental.get("field"):
                 raise ConfigError(
-                    "incremental : 'field' requis quand 'enabled' est vrai"
+                    "incremental: 'field' required when 'enabled' is true"
                 )
             if inject == "body_template":
                 if not config.get("body"):
                     raise ConfigError(
-                        "incremental : \"inject\": \"body_template\" nécessite un "
-                        "'body' contenant le placeholder à substituer"
+                        "incremental: \"inject\": \"body_template\" requires a "
+                        "'body' containing the placeholder to substitute"
                     )
                 if value_format == "any":
                     known = ", ".join(f for f in VALUE_FORMATS if f != "any")
                     raise ConfigError(
-                        "incremental : 'value_format' explicite requis avec "
-                        "\"inject\": \"body_template\" — attendu l'un de : "
-                        f"{known}. Le filtrage des caractères ne protège qu'un "
-                        "placeholder entre quotes ; un placeholder nu "
-                        "(WHERE id > {last_id}) accepterait '0 OR 1=1'"
+                        "incremental: an explicit 'value_format' is required "
+                        "with \"inject\": \"body_template\" — expected one of: "
+                        f"{known}. Character filtering only protects a quoted "
+                        "placeholder; a bare placeholder "
+                        "(WHERE id > {last_id}) would accept '0 OR 1=1'"
                     )
             elif not incremental.get("param_name"):
                 raise ConfigError(
-                    "incremental : 'param_name' requis quand 'enabled' est vrai "
-                    "(ou \"inject\": \"body_template\" pour injecter dans le corps)"
+                    "incremental: 'param_name' required when 'enabled' is true "
+                    "(or \"inject\": \"body_template\" to inject into the body)"
                 )
 
     write = config.get("write")
     if write is not None:
         if not isinstance(write, dict):
-            raise ConfigError("write : doit être un objet")
+            raise ConfigError("write: must be an object")
         _check_unknown("write", write, _WRITE_KEYS)
         mode = write.get("mode", "append")
         if mode not in _WRITE_MODES:
             known = ", ".join(f"'{m}'" for m in _WRITE_MODES)
             raise ConfigError(
-                f"write : 'mode' inconnu '{mode}' — attendu l'un de : {known}"
+                f"write: unknown 'mode' '{mode}' — expected one of: {known}"
             )
         predicate = write.get("replace_where")
         if mode == "replace_where" and not predicate:
             raise ConfigError(
-                "write : 'replace_where' requis avec \"mode\": \"replace_where\" — "
-                "sans prédicat, le remplacement porterait sur la table entière, "
-                'ce qui se demande explicitement avec "mode": "overwrite"'
+                "write: 'replace_where' required with \"mode\": \"replace_where\" — "
+                "without a predicate the replacement would cover the whole table, "
+                'which is requested explicitly with "mode": "overwrite"'
             )
         if predicate is not None:
             if not isinstance(predicate, str) or not predicate.strip():
                 raise ConfigError(
-                    "write : 'replace_where' doit être un prédicat SQL non vide"
+                    "write: 'replace_where' must be a non-empty SQL predicate"
                 )
             if mode != "replace_where":
                 raise ConfigError(
-                    f"write : 'replace_where' est ignoré avec \"mode\": \"{mode}\" — "
-                    "préciser \"mode\": \"replace_where\" pour qu'il soit appliqué"
+                    f"write: 'replace_where' is ignored with \"mode\": \"{mode}\" — "
+                    "set \"mode\": \"replace_where\" for it to be applied"
                 )
             if "{" in predicate or "}" in predicate:
                 raise ConfigError(
-                    "write : 'replace_where' n'est pas templaté — les "
-                    "placeholders y resteraient littéraux et le prédicat ne "
-                    "désignerait aucune ligne. Construire la chaîne côté "
-                    "appelant, une fenêtre par run"
+                    "write: 'replace_where' is not templated — placeholders "
+                    "would stay literal and the predicate would match no row. "
+                    "Build the string on the caller side, one window per run"
                 )
         partition_by = write.get("partition_by")
         if partition_by is not None:
             if not isinstance(partition_by, (list, tuple)) or not partition_by:
                 raise ConfigError(
-                    "write : 'partition_by' doit être une liste de colonnes non vide"
+                    "write: 'partition_by' must be a non-empty list of columns"
                 )
             if not all(isinstance(col, str) and col for col in partition_by):
                 raise ConfigError(
-                    "write : 'partition_by' doit ne contenir que des noms de "
-                    "colonnes non vides"
+                    "write: 'partition_by' must contain only non-empty column "
+                    "names"
                 )
 
     if config.get("incremental", {}).get("checkpoint") and (
         config.get("write", {}).get("mode", "append") != "append"
     ):
         raise ConfigError(
-            "write : \"mode\": \"{mode}\" est incompatible avec "
-            '"incremental.checkpoint". Le remplacement a lieu au premier lot ; '
-            "une reprise après interruption repartirait du watermark et "
-            "remplacerait à nouveau la fenêtre, effaçant du même coup ce que le "
-            "run interrompu y avait déjà écrit. Rejouer un backfill se fait "
-            "depuis le début de sa fenêtre, pas depuis son milieu.".format(
+            "write: \"mode\": \"{mode}\" is incompatible with "
+            '"incremental.checkpoint". The replacement happens on the first '
+            "batch; a restart after an interruption would resume from the "
+            "watermark and replace the window again, wiping out what the "
+            "interrupted run had already written there. Replaying a backfill "
+            "starts from the beginning of its window, not from its middle.".format(
                 mode=config["write"]["mode"]
             )
         )
@@ -467,5 +466,5 @@ def validate_config(config: dict) -> None:
     retry = config.get("retry")
     if retry is not None:
         if not isinstance(retry, dict):
-            raise ConfigError("retry : doit être un objet")
+            raise ConfigError("retry: must be an object")
         _check_unknown("retry", retry, _RETRY_KEYS)

@@ -56,7 +56,7 @@ class TestCheckValue:
         "value", ["2026-01-01'; DROP TABLE t --", 'a" or 1=1', "x; y", "a--b", "a\nb"]
     )
     def test_rejects_structure_breaking_values(self, value):
-        with pytest.raises(TemplateError, match="interdit"):
+        with pytest.raises(TemplateError, match="forbidden character"):
             check_value(value)
 
     def test_accepts_a_plain_timestamp(self):

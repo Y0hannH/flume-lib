@@ -4,7 +4,9 @@ All notable changes to this project are documented here. Versions follow [semant
 
 ## [Unreleased]
 
-**The library is unchanged.** Documentation and tooling only.
+### Changed
+
+- **Every message the library raises is now in English.** The exception text was French throughout — all 104 `raise` sites across the nine modules — while the README, `docs/` and the public repository were English, so a user followed English documentation and then got `ConfigError: pagination : 'page_size' doit être supérieur à 0`. The mismatch also reached further than the console: `error_message` is persisted in the `log_runs` Delta table, which means French prose was landing in the lakehouse for whatever reads it downstream. The three `RunResult.warnings` messages went with them — the empty-source notice under a replacing write mode, and the two column type-degradation notices — for the same reason, and because a run that reports an English failure and a French warning is worse than one that is consistently either. Wording, structure and the actionable second half of each message are unchanged; only the language is. **Code that matches on message text will need updating** — the exception *classes* are untouched, and remain the supported way to branch on a failure.
 
 ### Added
 

@@ -93,7 +93,7 @@ class TestTableUri:
         ],
     )
     def test_invalid_identifiers_raise(self, schema, table):
-        with pytest.raises(ValueError, match="invalide"):
+        with pytest.raises(ValueError, match="invalid (schema|table)"):
             table_uri("/Tables", schema, table)
 
 

@@ -26,8 +26,8 @@ def validate_identifier(name, kind: str) -> str:
     bloque toute traversée (../, /, caractères spéciaux) depuis la config."""
     if not isinstance(name, str) or not _IDENTIFIER_RE.match(name):
         raise ValueError(
-            f"{kind} invalide : {name!r} — uniquement lettres, chiffres et "
-            "underscore, sans commencer par un chiffre"
+            f"invalid {kind}: {name!r} — letters, digits and underscore only, "
+            "and must not start with a digit"
         )
     return name
 
@@ -36,7 +36,7 @@ def table_uri(lakehouse_tables_path: str, schema: str, table_name: str) -> str:
     """URI d'une table dans un lakehouse avec schémas : Tables/<schema>/<table>."""
     return (
         f"{lakehouse_tables_path.rstrip('/')}/"
-        f"{validate_identifier(schema, 'schéma')}/"
+        f"{validate_identifier(schema, 'schema')}/"
         f"{validate_identifier(table_name, 'table')}"
     )
 
@@ -151,16 +151,16 @@ def _build_column(
                     [_normalize(v, inferred) for v in values], type=inferred
                 )
                 fallbacks.append(
-                    f"colonne '{name}' : {expected} sur le lot précédent, "
-                    f"{inferred} sur celui-ci — le commit Delta refusera "
-                    "probablement ce changement de type"
+                    f"column '{name}': {expected} on the previous batch, "
+                    f"{inferred} on this one — the Delta commit will probably "
+                    "refuse this type change"
                 )
                 return array
             except Exception:  # noqa: BLE001
                 pass
         fallbacks.append(
-            f"colonne '{name}' : valeurs non représentables par {dtype}, "
-            "écrite en texte"
+            f"column '{name}': values not representable as {dtype}, "
+            "written as text"
         )
         return ac.Array(
             [_normalize(v, ac.DataType.string()) for v in values],
@@ -212,27 +212,27 @@ def _explain_write_error(exc: Exception, mode: str, predicate: str | None,
 
     if "failed validation check" in raw and predicate:
         return (
-            f"replace_where : des lignes écrites ne satisfont pas le prédicat "
-            f"{predicate!r}. delta-rs refuse le commit plutôt que de remplacer "
-            "une fenêtre par des lignes qui n'en font pas partie — le prédicat "
-            "doit décrire exactement ce que la source renvoie, sans quoi la "
-            f"fenêtre remplacée et les lignes reçues divergent. Détail : {detail}"
+            f"replace_where: some rows being written do not satisfy predicate "
+            f"{predicate!r}. delta-rs refuses the commit rather than replacing "
+            "a window with rows that are not part of it — the predicate must "
+            "describe exactly what the source returns, otherwise the replaced "
+            f"window and the received rows diverge. Detail: {detail}"
         )
     if "No field named" in raw and predicate:
         return (
-            f"replace_where : le prédicat {predicate!r} référence une colonne "
-            "absente de la table cible. Les colonnes disponibles sont celles "
-            "écrites par les runs précédents, plus les colonnes de traçabilité "
-            f"_flume_*. Détail : {detail}"
+            f"replace_where: predicate {predicate!r} references a column "
+            "missing from the target table. The available columns are those "
+            "written by previous runs, plus the _flume_* lineage columns. "
+            f"Detail: {detail}"
         )
     if "does not match table partitioning" in raw:
         return (
-            f"partition_by={partition_by!r} ne correspond pas au partitionnement "
-            "de la table existante. Les colonnes de partition sont figées à la "
-            "création : les changer impose de réécrire la table entière, ce que "
-            f"la lib ne fait pas. Détail : {detail}"
+            f"partition_by={partition_by!r} does not match the partitioning of "
+            "the existing table. Partition columns are frozen at creation: "
+            "changing them requires rewriting the whole table, which the "
+            f"library does not do. Detail: {detail}"
         )
-    return f"écriture Delta refusée (mode={mode}) : {detail}"
+    return f"Delta write refused (mode={mode}): {detail}"
 
 
 def write_records(
@@ -258,7 +258,7 @@ def write_records(
     """
     if predicate is not None and mode != "overwrite":
         raise ValueError(
-            f"predicate n'a de sens qu'avec mode='overwrite', pas '{mode}'"
+            f"predicate only makes sense with mode='overwrite', not '{mode}'"
         )
     table, fallbacks = records_to_table(records, known_types)
     try:

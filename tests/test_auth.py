@@ -103,7 +103,7 @@ class TestResolveSecret:
             resolve_secret({"keyvault_url": "https://kv.vault.azure.net"})
 
     def test_invalid_ref_raises(self):
-        with pytest.raises(SecretResolutionError, match="invalide"):
+        with pytest.raises(SecretResolutionError, match="invalid reference"):
             resolve_secret(42)
 
 

@@ -38,25 +38,26 @@ class TemplateError(Exception):
     pass
 
 
-def check_value(value, value_format: str = "any", label: str = "valeur") -> str:
+def check_value(value, value_format: str = "any", label: str = "value") -> str:
     """Valide une valeur avant interpolation. Retourne sa forme texte."""
     text = str(value)
     for token in _FORBIDDEN_TOKENS:
         if token in text:
             raise TemplateError(
-                f"{label} : caractère interdit {token!r} dans {text!r} — "
-                "une valeur interpolée dans une requête ne peut pas en "
-                "modifier la structure"
+                f"{label}: forbidden character {token!r} in {text!r} — "
+                "a value interpolated into a request cannot alter its "
+                "structure"
             )
     pattern = _VALUE_FORMATS.get(value_format)
     if pattern is None and value_format not in _VALUE_FORMATS:
         known = ", ".join(VALUE_FORMATS)
         raise TemplateError(
-            f"{label} : 'value_format' inconnu '{value_format}' — attendu l'un de : {known}"
+            f"{label}: unknown 'value_format' '{value_format}' — "
+            f"expected one of: {known}"
         )
     if pattern is not None and not pattern.match(text):
         raise TemplateError(
-            f"{label} : {text!r} ne respecte pas le format '{value_format}'"
+            f"{label}: {text!r} does not match format '{value_format}'"
         )
     return text
 
@@ -113,8 +114,8 @@ def render(value, variables: dict):
         if unknown:
             known = ", ".join(sorted(variables))
             raise TemplateError(
-                f"placeholder '{{{unknown[0]}}}' sans variable correspondante "
-                f"(disponibles : {known})"
+                f"placeholder '{{{unknown[0]}}}' has no matching variable "
+                f"(available: {known})"
             )
         return _PLACEHOLDER_RE.sub(lambda m: str(variables[m.group(1)]), value)
     if isinstance(value, dict):

@@ -25,12 +25,12 @@ class TestTopLevel:
             validate_config(config)
 
     def test_unknown_key_raises(self):
-        with pytest.raises(ConfigError, match="clé inconnue 'foo'"):
+        with pytest.raises(ConfigError, match="unknown key 'foo'"):
             validate_config(cfg(foo=1))
 
     def test_typo_suggests_correct_key(self):
         # le bug silencieux d'origine : 'pagintaion' ignoré = appel unique
-        with pytest.raises(ConfigError, match="vouliez-vous dire 'pagination'"):
+        with pytest.raises(ConfigError, match="did you mean 'pagination'"):
             validate_config(cfg(pagintaion={"type": "offset"}))
 
     def test_body_without_post_raises(self):
@@ -68,11 +68,11 @@ class TestAuthSection:
         )
 
     def test_unknown_auth_type_raises(self):
-        with pytest.raises(ConfigError, match="type inconnu 'jwt'"):
+        with pytest.raises(ConfigError, match="unknown type 'jwt'"):
             validate_config(cfg(auth={"type": "jwt"}))
 
     def test_unknown_auth_key_raises(self):
-        with pytest.raises(ConfigError, match="clé inconnue 'tokenn'"):
+        with pytest.raises(ConfigError, match="unknown key 'tokenn'"):
             validate_config(cfg(auth={"type": "bearer_token", "tokenn": "x"}))
 
     def test_missing_credential_raises(self):
@@ -110,11 +110,11 @@ class TestPaginationSection:
         validate_config(cfg(pagination={"type": "next_link", "next_field": "next"}))
 
     def test_unknown_pagination_type_raises(self):
-        with pytest.raises(ConfigError, match="type inconnu 'zigzag'"):
+        with pytest.raises(ConfigError, match="unknown type 'zigzag'"):
             validate_config(cfg(pagination={"type": "zigzag"}))
 
     def test_unknown_pagination_key_raises(self):
-        with pytest.raises(ConfigError, match="clé inconnue"):
+        with pytest.raises(ConfigError, match="unknown key"):
             validate_config(cfg(pagination={"type": "offset", "limitt": 10}))
 
     def test_page_key_on_offset_type_raises(self):
@@ -143,20 +143,20 @@ class TestIncrementalAndRetry:
         )
 
     def test_enabled_without_field_raises(self):
-        with pytest.raises(ConfigError, match="'field' requis"):
+        with pytest.raises(ConfigError, match="'field' required"):
             validate_config(cfg(incremental={"enabled": True, "param_name": "since"}))
 
     def test_disabled_incremental_needs_nothing(self):
         validate_config(cfg(incremental={"enabled": False}))
 
     def test_unknown_incremental_key_raises(self):
-        with pytest.raises(ConfigError, match="clé inconnue"):
+        with pytest.raises(ConfigError, match="unknown key"):
             validate_config(cfg(incremental={
                 "enabled": True, "field": "f", "param_name": "p", "extra": 1,
             }))
 
     def test_unknown_retry_key_raises(self):
-        with pytest.raises(ConfigError, match="clé inconnue"):
+        with pytest.raises(ConfigError, match="unknown key"):
             validate_config(cfg(retry={"max_attempt": 5}))
 
 
@@ -192,7 +192,7 @@ class TestOauth1:
 
     def test_token_without_secret_raises(self):
         auth = {k: v for k, v in self.VALID.items() if k != "token_secret"}
-        with pytest.raises(ConfigError, match="paire"):
+        with pytest.raises(ConfigError, match="go together"):
             validate_config(cfg(auth=auth))
 
     def test_missing_consumer_secret_raises(self):
@@ -208,7 +208,7 @@ class TestOauth1:
         validate_config(cfg(auth={**self.VALID, "signature_method": "HMAC-SHA1"}))
 
     def test_unknown_key_raises(self):
-        with pytest.raises(ConfigError, match="clé inconnue"):
+        with pytest.raises(ConfigError, match="unknown key"):
             validate_config(cfg(auth={**self.VALID, "account_id": "1234567"}))
 
     def test_env_var_forms_are_accepted(self):
@@ -449,12 +449,12 @@ class TestBatchSize:
 
     @pytest.mark.parametrize("value", [0, -1])
     def test_non_positive_raises(self, value):
-        with pytest.raises(ConfigError, match="supérieur à 0"):
+        with pytest.raises(ConfigError, match="greater than 0"):
             validate_config(cfg(batch_size=value))
 
     @pytest.mark.parametrize("value", ["1000", 1000.0, None, True])
     def test_non_integer_raises(self, value):
-        with pytest.raises(ConfigError, match="entier"):
+        with pytest.raises(ConfigError, match="must be an integer"):
             validate_config(cfg(batch_size=value))
 
 
@@ -490,7 +490,7 @@ class TestKeysetPagination:
             validate_config(cfg(pagination=pagination))
 
     def test_unknown_keyset_key_raises(self):
-        with pytest.raises(ConfigError, match="clé inconnue"):
+        with pytest.raises(ConfigError, match="unknown key"):
             validate_config(cfg(pagination=self.keyset(cursor_param="c")))
 
     def test_unknown_value_format_raises(self):
@@ -600,13 +600,13 @@ class TestPaginationBounds:
     @pytest.mark.parametrize("key", ["max_pages", "max_rows"])
     @pytest.mark.parametrize("value", [0, -5])
     def test_non_positive_raises(self, key, value):
-        with pytest.raises(ConfigError, match="supérieur à 0"):
+        with pytest.raises(ConfigError, match="greater than 0"):
             validate_config(cfg(pagination={"type": "offset", key: value}))
 
     @pytest.mark.parametrize("key", ["max_pages", "max_rows"])
     @pytest.mark.parametrize("value", ["10", 1.5, True])
     def test_non_integer_raises(self, key, value):
-        with pytest.raises(ConfigError, match="entier"):
+        with pytest.raises(ConfigError, match="must be an integer"):
             validate_config(cfg(pagination={"type": "offset", key: value}))
 
     def test_bounds_are_accepted_by_every_strategy(self):
@@ -638,20 +638,20 @@ class TestWrite:
             validate_config(cfg(write={"mode": "upsert"}))
 
     def test_unknown_key_raises(self):
-        with pytest.raises(ConfigError, match="clé inconnue 'replaceWhere'"):
+        with pytest.raises(ConfigError, match="unknown key 'replaceWhere'"):
             validate_config(cfg(write={"replaceWhere": "x = 1"}))
 
     def test_replace_where_mode_without_predicate_raises(self):
         # sans prédicat le remplacement porterait sur la table entière : ça se
         # demande explicitement, ça ne s'obtient pas par omission
-        with pytest.raises(ConfigError, match="'replace_where' requis"):
+        with pytest.raises(ConfigError, match="'replace_where' required"):
             validate_config(cfg(write={"mode": "replace_where"}))
 
     @pytest.mark.parametrize("mode", ["append", "overwrite"])
     def test_predicate_without_its_mode_raises(self, mode):
         # le piège : le prédicat serait ignoré et l'append (ou l'écrasement
         # total) aurait lieu sans que rien ne le dise
-        with pytest.raises(ConfigError, match="est ignoré"):
+        with pytest.raises(ConfigError, match="is ignored"):
             validate_config(cfg(write={"mode": mode, "replace_where": "m = '01'"}))
 
     @pytest.mark.parametrize("value", ["", "   ", 42, None])
@@ -662,7 +662,7 @@ class TestWrite:
     def test_a_placeholder_in_the_predicate_raises(self):
         # 'replace_where' n'est pas templaté : un {mois} y resterait littéral,
         # ne désignerait aucune ligne, et le run remplacerait le vide
-        with pytest.raises(ConfigError, match="n'est pas templaté"):
+        with pytest.raises(ConfigError, match="is not templated"):
             validate_config(cfg(write={
                 "mode": "replace_where", "replace_where": "mois = '{mois}'",
             }))

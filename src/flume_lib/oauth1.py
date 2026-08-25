@@ -91,8 +91,8 @@ class OAuth1Signer(AuthBase):
         if signature_method not in SIGNATURE_METHODS:
             known = ", ".join(sorted(SIGNATURE_METHODS))
             raise ValueError(
-                f"oauth1 : 'signature_method' inconnue '{signature_method}' — "
-                f"attendu l'un de : {known}"
+                f"oauth1: unknown 'signature_method' '{signature_method}' — "
+                f"expected one of: {known}"
             )
         self.consumer_key = consumer_key
         self.consumer_secret = consumer_secret

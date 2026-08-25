@@ -31,7 +31,7 @@ def _get_keyvault_secret(vault_url: str, secret_name: str) -> str:
         from azure.keyvault.secrets import SecretClient
     except ImportError as exc:
         raise SecretResolutionError(
-            "Accès Key Vault hors Fabric : installer flume-lib[azure] "
+            "Key Vault access outside Fabric: install flume-lib[azure] "
             "(azure-identity + azure-keyvault-secrets)"
         ) from exc
 
@@ -54,8 +54,8 @@ def resolve_secret(ref, field_name: str = "secret") -> str:
             value = os.environ.get(ref["env_var"])
             if value is None:
                 raise SecretResolutionError(
-                    f"'{field_name}' : variable d'environnement "
-                    f"'{ref['env_var']}' non définie"
+                    f"'{field_name}': environment variable "
+                    f"'{ref['env_var']}' is not set"
                 )
             return value.strip()
 
@@ -63,11 +63,12 @@ def resolve_secret(ref, field_name: str = "secret") -> str:
             secret_name = ref.get("secret_name")
             if not secret_name:
                 raise SecretResolutionError(
-                    f"'{field_name}' : 'secret_name' manquant dans la référence Key Vault"
+                    f"'{field_name}': 'secret_name' missing from the Key Vault "
+                    "reference"
                 )
             return _get_keyvault_secret(ref["keyvault_url"], secret_name).strip()
 
     raise SecretResolutionError(
-        f"'{field_name}' : référence invalide — attendu une chaîne, "
-        "{'env_var': ...} ou {'keyvault_url': ..., 'secret_name': ...}"
+        f"'{field_name}': invalid reference — expected a string, "
+        "{'env_var': ...} or {'keyvault_url': ..., 'secret_name': ...}"
     )

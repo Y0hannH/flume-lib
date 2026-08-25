@@ -36,7 +36,9 @@ def _resolve(auth_config: dict, field: str) -> str:
     elif field in auth_config:
         ref = auth_config[field]
     else:
-        raise AuthError(f"Clé '{field}' (ou '{legacy_key}') manquante dans la config auth")
+        raise AuthError(
+            f"Key '{field}' (or '{legacy_key}') missing from the auth config"
+        )
     try:
         return resolve_secret(ref, field)
     except SecretResolutionError as exc:
@@ -48,7 +50,9 @@ def _extract_json_path(payload: dict, path: str):
     value = payload
     for part in path.split("."):
         if not isinstance(value, dict) or part not in value:
-            raise AuthError(f"Chemin '{path}' introuvable dans la réponse du token endpoint")
+            raise AuthError(
+                f"Path '{path}' not found in the token endpoint response"
+            )
         value = value[part]
     return value
 
@@ -78,7 +82,7 @@ def _fetch_oauth2_client_credentials(auth_config: dict) -> tuple[str, float | No
         tenant_id = auth_config.get("tenant_id")
         if not tenant_id:
             raise AuthError(
-                "oauth2_client_credentials : 'token_url' ou 'tenant_id' requis"
+                "oauth2_client_credentials: 'token_url' or 'tenant_id' required"
             )
         token_url = ENTRA_TOKEN_URL.format(tenant_id=tenant_id)
 
@@ -94,12 +98,14 @@ def _fetch_oauth2_client_credentials(auth_config: dict) -> tuple[str, float | No
     response = requests.post(token_url, data=data, timeout=timeout)
     if response.status_code != 200:
         raise AuthError(
-            f"oauth2_client_credentials : HTTP {response.status_code} sur {token_url}"
+            f"oauth2_client_credentials: HTTP {response.status_code} on {token_url}"
         )
     payload = response.json()
     token = payload.get("access_token")
     if not token:
-        raise AuthError("oauth2_client_credentials : 'access_token' absent de la réponse")
+        raise AuthError(
+            "oauth2_client_credentials: 'access_token' missing from the response"
+        )
     return token, _expires_in(payload, "expires_in")
 
 
@@ -109,15 +115,15 @@ def _fetch_token_endpoint(auth_config: dict) -> tuple[str, float | None]:
     des références de secret (env_var / keyvault_url)."""
     token_url = auth_config.get("token_url")
     if not token_url:
-        raise AuthError("token_endpoint : 'token_url' requis")
+        raise AuthError("token_endpoint: 'token_url' required")
 
     method = auth_config.get("method", "POST").upper()
     if method == "GET" and any(
         isinstance(ref, dict) for ref in auth_config.get("body", {}).values()
     ):
         raise AuthError(
-            "token_endpoint : référence de secret interdite dans 'body' en GET — "
-            "les paramètres partent dans l'URL (logs serveurs, proxies) ; utiliser POST"
+            "token_endpoint: secret references are not allowed in 'body' on GET — "
+            "the parameters travel in the URL (server logs, proxies); use POST"
         )
 
     body = {
@@ -140,12 +146,12 @@ def _fetch_token_endpoint(auth_config: dict) -> tuple[str, float | None]:
 
     response = requests.request(method, token_url, **kwargs)
     if response.status_code != 200:
-        raise AuthError(f"token_endpoint : HTTP {response.status_code} sur {token_url}")
+        raise AuthError(f"token_endpoint: HTTP {response.status_code} on {token_url}")
 
     payload = response.json()
     token = _extract_json_path(payload, auth_config.get("token_json_path", "access_token"))
     if not token:
-        raise AuthError("token_endpoint : token vide dans la réponse")
+        raise AuthError("token_endpoint: empty token in the response")
     return token, _expires_in(payload, auth_config.get("expires_in_json_path"))
 
 
@@ -283,8 +289,8 @@ def _build_headers(auth_config: dict | None) -> tuple[dict[str, str], float | No
 
     if auth_type == "oauth1":
         raise AuthError(
-            "oauth1 signe chaque requête et ne tient pas dans un header fixe — "
-            "utiliser build_auth()"
+            "oauth1 signs every request and does not fit in a fixed header — "
+            "use build_auth()"
         )
 
-    raise AuthError(f"Type d'auth inconnu : '{auth_type}'")
+    raise AuthError(f"Unknown auth type: '{auth_type}'")

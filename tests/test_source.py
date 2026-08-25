@@ -403,7 +403,7 @@ class TestWatermarkInBodyTemplate:
         result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
 
         assert result.status == "failed"
-        assert "interdit" in result.error_message
+        assert "forbidden character" in result.error_message
         assert delta["writes"] == []
 
     def test_a_wrongly_formatted_watermark_fails_the_run(self, http, delta):
@@ -708,7 +708,7 @@ class TestTemplatePaths:
         result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
 
         assert result.status == "failed"
-        assert "interdit" in result.error_message
+        assert "forbidden character" in result.error_message
 
 
 class TestErrorMessagesLeakNothing:
@@ -924,7 +924,7 @@ class TestWatermarkCoherence:
         result = run_source(config, lakehouse_tables_path=TABLES_PATH)
 
         assert result.status == "failed"
-        assert "trié" in result.error_message
+        assert "sorted by" in result.error_message
         # le lot fautif n'est pas écrit : le watermark reste cohérent
         assert len(delta["writes"]) == 1
         assert delta["watermark_write"] == [("s1", 6)]
@@ -941,7 +941,7 @@ class TestWatermarkCoherence:
         result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
 
         assert result.status == "failed"
-        assert "mélange des types" in result.error_message
+        assert "mixes types" in result.error_message
         # l'ancien comportement écrivait le lot puis échouait sur le max()
         assert delta["writes"] == []
         assert delta["watermark_write"] == []
@@ -1073,21 +1073,21 @@ class TestTypeWarnings:
     run `success`."""
 
     def test_a_degraded_column_surfaces_in_the_result(self, http, delta):
-        delta["write_result"] = ({}, ["colonne 'n' : écrite en texte"])
+        delta["write_result"] = ({}, ["column 'n': written as text"])
         http.next_payloads = [[{"n": 1}]]
         result = run_source(BASE_CONFIG, lakehouse_tables_path=TABLES_PATH)
 
         assert result.status == "success", result.error_message
-        assert result.warnings == ["colonne 'n' : écrite en texte"]
+        assert result.warnings == ["column 'n': written as text"]
 
     def test_the_same_degradation_is_reported_once_per_run(self, http, delta):
-        delta["write_result"] = ({}, ["colonne 'n' : écrite en texte"])
+        delta["write_result"] = ({}, ["column 'n': written as text"])
         config = {**BASE_CONFIG, "batch_size": 1}
         http.next_payloads = [[{"n": 1}, {"n": 2}, {"n": 3}]]
         result = run_source(config, lakehouse_tables_path=TABLES_PATH)
 
         assert len(delta["writes"]) == 3
-        assert result.warnings == ["colonne 'n' : écrite en texte"]
+        assert result.warnings == ["column 'n': written as text"]
 
     def test_a_clean_run_carries_no_warning(self, http, delta):
         http.next_payloads = [[{"n": 1}]]
@@ -1106,7 +1106,7 @@ class TestTypeWarnings:
         assert delta["writes"][1]["known_types"] == {"n": ac.DataType.int64()}
 
     def test_warnings_survive_a_failed_run(self, http, delta):
-        delta["write_result"] = ({}, ["colonne 'n' : écrite en texte"])
+        delta["write_result"] = ({}, ["column 'n': written as text"])
         config = {
             **BASE_CONFIG,
             "batch_size": 1,
@@ -1129,7 +1129,7 @@ class TestTypeWarnings:
             source_module.requests.Session = FakeSession
 
         assert result.status == "failed"
-        assert result.warnings == ["colonne 'n' : écrite en texte"]
+        assert result.warnings == ["column 'n': written as text"]
 
 
 class TestKeysetInBody:
@@ -1404,7 +1404,7 @@ class TestWriteModes:
         result = run_source(config, lakehouse_tables_path=TABLES_PATH)
 
         # l'attente naturelle est l'inverse : le silence serait le piège
-        assert any("aucune ligne" in w for w in result.warnings)
+        assert any("returned no" in w for w in result.warnings)
         assert any("replace_where" in w for w in result.warnings)
 
     def test_an_empty_source_in_append_warns_about_nothing(self, http, delta):

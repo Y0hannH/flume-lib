@@ -79,7 +79,7 @@ class RetryableError(Exception):
 class RetryableHTTPError(RetryableError):
     def __init__(self, status_code: int, url: str, retry_after: float | None = None):
         detail = f" (Retry-After: {retry_after:g}s)" if retry_after is not None else ""
-        super().__init__(f"HTTP {status_code} sur {url}{detail}", retry_after)
+        super().__init__(f"HTTP {status_code} on {url}{detail}", retry_after)
         self.status_code = status_code
 
 
@@ -91,7 +91,7 @@ class ExpiredTokenError(RetryableError):
 
     def __init__(self, url: str):
         super().__init__(
-            f"HTTP 401 sur {url} — token renouvelé, requête rejouée",
+            f"HTTP 401 on {url} — token refreshed, request replayed",
             retry_after=0,
         )
 
@@ -222,7 +222,7 @@ def _check_response_errors(
         str(_field(e, message_field) or e) for e in errors[:MAX_ERRORS_REPORTED]
     ]
     detail = " | ".join(messages)[:MAX_ERROR_DETAIL_CHARS]
-    summary = f"{len(errors)} erreur(s) applicative(s) sur {url} : {detail}"
+    summary = f"{len(errors)} application error(s) on {url}: {detail}"
 
     if any(code in retryable_codes for code in codes if code is not None):
         raise RetryableAPIError(summary, retry_after)
@@ -266,7 +266,7 @@ def _render_at_path(container, parts: list[str], variables: dict, full_path: str
     head, *rest = parts
     if not isinstance(container, dict) or head not in container:
         raise ConfigError(
-            f"template_paths : chemin '{full_path}' introuvable dans 'body'"
+            f"template_paths: path '{full_path}' not found in 'body'"
         )
     updated = dict(container)
     updated[head] = (
@@ -357,7 +357,7 @@ def _build_fetch_page(config: dict, variables: dict | None = None):
             raise ExpiredTokenError(_safe_url(url))
         if response.status_code >= 400:
             raise requests.HTTPError(
-                f"HTTP {response.status_code} sur {_safe_url(url)}",
+                f"HTTP {response.status_code} on {_safe_url(url)}",
                 response=response,
             )
         payload = response.json()
@@ -388,8 +388,8 @@ def _max_incremental_value(records: list[dict], field_name: str):
     except TypeError as exc:
         types = ", ".join(sorted({type(v).__name__ for v in values}))
         raise IncrementalError(
-            f"incremental : le champ '{field_name}' mélange des types ({types}) "
-            "— impossible d'en calculer le maximum"
+            f"incremental: field '{field_name}' mixes types ({types}) — "
+            "its maximum cannot be computed"
         ) from exc
 
 
@@ -495,9 +495,9 @@ class _BatchWriter:
         # revanche, est indispensable : l'attente naturelle est l'inverse.
         if self._replacement_pending:
             self.warnings.append(
-                f"write.mode='{self._write_mode}' : la source n'a renvoyé "
-                "aucune ligne, rien n'a été remplacé — la cible garde son "
-                "contenu précédent"
+                f"write.mode='{self._write_mode}': the source returned no "
+                "rows, nothing was replaced — the target keeps its previous "
+                "content"
             )
         # Hors mode checkpoint le watermark n'est commité qu'ici, une fois le
         # run complet : la reprise n'est pas offerte, mais un run interrompu
@@ -512,11 +512,11 @@ class _BatchWriter:
             candidate = _max_incremental_value(batch, self._field)
             if self._checkpoint and _is_regression(candidate, self._pending):
                 raise IncrementalError(
-                    f"incremental : le lot suivant redescend à {candidate!r} "
-                    f"alors que le watermark est déjà à {self._pending!r} — la "
-                    f"source ne renvoie pas ses lignes triées par "
-                    f"'{self._field}'. Reprendre depuis ce watermark sauterait "
-                    "des lignes : trier la source, ou retirer "
+                    f"incremental: the next batch drops back to {candidate!r} "
+                    f"while the watermark is already at {self._pending!r} — the "
+                    f"source does not return its rows sorted by "
+                    f"'{self._field}'. Resuming from that watermark would skip "
+                    "rows: sort the source, or remove "
                     '"checkpoint": true.'
                 )
 
@@ -660,7 +660,7 @@ def run_source(
                     variables[placeholder] = check_value(
                         last_value,
                         incremental.get("value_format", "any"),
-                        label=f"incremental : watermark '{placeholder}'",
+                        label=f"incremental: watermark '{placeholder}'",
                     )
                 else:
                     params[incremental["param_name"]] = last_value

@@ -48,7 +48,7 @@ class TestExtractRecords:
 
     def test_items_field_pointing_at_a_non_list_raises(self):
         # cas GraphQL typique : 'data' est un objet, pas une liste
-        with pytest.raises(PaginationError, match="liste attendue"):
+        with pytest.raises(PaginationError, match="expected a list"):
             extract_records({"data": {"orders": {}}}, "data")
 
     def test_record_field_unwraps_each_item(self):
@@ -152,7 +152,7 @@ class TestPagePagination:
     def test_non_numeric_header_raises(self):
         config = {"type": "page", "total_pages_header": "X-Total-Pages"}
         fetch = make_fetch([([{"id": 1}], {"X-Total-Pages": "beaucoup"})])
-        with pytest.raises(PaginationError, match="non numérique"):
+        with pytest.raises(PaginationError, match="not numeric"):
             list(paginate(fetch, "http://api/x", {}, config))
 
     def test_custom_params_and_start_page(self):
@@ -268,7 +268,7 @@ class TestCursorPagination:
             "pageInfo": {"hasNextPage": True},
         }}}
         fetch = make_fetch([payload])
-        with pytest.raises(PaginationError, match="annonce une page suivante"):
+        with pytest.raises(PaginationError, match="announces a next page"):
             list(paginate(fetch, "http://api/gql", {}, self.CONFIG))
 
     def test_a_stalled_cursor_raises_instead_of_looping(self):
@@ -276,7 +276,7 @@ class TestCursorPagination:
             self.page([1], "c1", True),
             self.page([1], "c1", True),
         ])
-        with pytest.raises(PaginationError, match="ne progresse pas"):
+        with pytest.raises(PaginationError, match="not advancing"):
             list(paginate(fetch, "http://api/gql", {}, self.CONFIG))
 
     def test_limit_is_optional(self):
@@ -374,7 +374,7 @@ class TestKeysetPagination:
             [{"id": 1}, {"id": 5}],
             [{"id": 9}, {"id": 5}],
         ])
-        with pytest.raises(PaginationError, match="n'avance pas"):
+        with pytest.raises(PaginationError, match="not advancing"):
             list(paginate(fetch, "https://api/items", {}, self.CONFIG))
 
     def test_a_missing_key_in_the_last_record_raises(self):
@@ -436,7 +436,7 @@ class TestPaginationBounds:
         première n'a aucune condition d'arrêt naturelle."""
         page = [{"id": 1}, {"id": 2}]
         fetch = make_fetch([list(page) for _ in range(50)])
-        with pytest.raises(PaginationError, match="identique à la précédente"):
+        with pytest.raises(PaginationError, match="identical to the previous one"):
             list(paginate(
                 fetch, "https://api/items", {}, {"type": "page", "page_size": 2}
             ))

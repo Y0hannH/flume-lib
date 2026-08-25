@@ -34,23 +34,23 @@ def _locate_records(payload, items_field: str | None) -> list:
     if isinstance(payload, list):
         return payload
     if not isinstance(payload, dict):
-        raise PaginationError(f"Réponse inattendue de type {type(payload).__name__}")
+        raise PaginationError(f"Unexpected response of type {type(payload).__name__}")
     if items_field:
         records = get_path(payload, items_field)
         if records is _MISSING:
-            raise PaginationError(f"Champ '{items_field}' absent de la réponse")
+            raise PaginationError(f"Field '{items_field}' missing from the response")
         if not isinstance(records, list):
             raise PaginationError(
-                f"Champ '{items_field}' : liste attendue, "
-                f"{type(records).__name__} reçu"
+                f"Field '{items_field}': expected a list, "
+                f"got {type(records).__name__}"
             )
         return records
     for field in _DEFAULT_ITEMS_FIELDS:
         if isinstance(payload.get(field), list):
             return payload[field]
     raise PaginationError(
-        "Impossible de localiser les enregistrements dans la réponse ; "
-        "précisez 'items_field' dans la config pagination"
+        "Unable to locate the records in the response; "
+        "set 'items_field' in the pagination config"
     )
 
 
@@ -69,8 +69,8 @@ def extract_records(
         value = get_path(item, record_field) if isinstance(item, dict) else _MISSING
         if value is _MISSING:
             raise PaginationError(
-                f"Champ '{record_field}' absent d'un enregistrement — "
-                "'record_field' ne correspond pas à la forme de la réponse"
+                f"Field '{record_field}' missing from a record — "
+                "'record_field' does not match the shape of the response"
             )
         unwrapped.append(value)
     return unwrapped
@@ -146,13 +146,13 @@ def paginate_page(
             raw = headers.get(total_pages_header)
             if raw is None:
                 raise PaginationError(
-                    f"Header '{total_pages_header}' absent de la réponse"
+                    f"Header '{total_pages_header}' missing from the response"
                 )
             try:
                 total_pages = int(raw)
             except ValueError as exc:
                 raise PaginationError(
-                    f"Header '{total_pages_header}' non numérique : '{raw}'"
+                    f"Header '{total_pages_header}' is not numeric: '{raw}'"
                 ) from exc
 
         if records:
@@ -182,7 +182,7 @@ def paginate_cursor(
     cursor_field = pagination_config.get("cursor_field")
     if not cursor_param or not cursor_field:
         raise PaginationError(
-            "pagination 'cursor' : 'cursor_param' et 'cursor_field' requis"
+            "pagination 'cursor': 'cursor_param' and 'cursor_field' required"
         )
     has_more_field = pagination_config.get("has_more_field")
     limit = pagination_config.get("limit")
@@ -207,7 +207,7 @@ def paginate_cursor(
             has_more = get_path(payload, has_more_field)
             if has_more is _MISSING:
                 raise PaginationError(
-                    f"Champ '{has_more_field}' absent de la réponse"
+                    f"Field '{has_more_field}' missing from the response"
                 )
             if not has_more:
                 return
@@ -219,14 +219,14 @@ def paginate_cursor(
             if has_more:
                 # Tronquer ici passerait pour un succès partiel silencieux.
                 raise PaginationError(
-                    f"'{has_more_field}' annonce une page suivante mais "
-                    f"'{cursor_field}' est absent de la réponse"
+                    f"'{has_more_field}' announces a next page but "
+                    f"'{cursor_field}' is missing from the response"
                 )
             return
         if next_cursor == cursor:
             raise PaginationError(
-                f"Le curseur '{cursor_field}' ne progresse pas — "
-                "pagination interrompue pour éviter une boucle infinie"
+                f"Cursor '{cursor_field}' is not advancing — "
+                "pagination stopped to avoid an infinite loop"
             )
         cursor = next_cursor
 
@@ -264,14 +264,14 @@ def paginate_keyset(
     key_param = pagination_config.get("key_param")
     if not key_field or not key_param:
         raise PaginationError(
-            "pagination 'keyset' : 'key_field' et 'key_param' requis"
+            "pagination 'keyset': 'key_field' and 'key_param' required"
         )
     value_format = pagination_config.get("value_format", "any")
     limit = pagination_config.get("limit")
     limit_param = pagination_config.get("limit_param", "limit")
     items_field = pagination_config.get("items_field")
     record_field = pagination_config.get("record_field")
-    label = f"pagination keyset : clé '{key_field}'"
+    label = f"pagination keyset: key '{key_field}'"
 
     key = pagination_config.get("initial_value")
     while True:
@@ -290,14 +290,14 @@ def paginate_keyset(
         next_key = get_path(last, key_field) if isinstance(last, dict) else _MISSING
         if next_key is _MISSING or next_key is None:
             raise PaginationError(
-                f"pagination 'keyset' : champ '{key_field}' absent du dernier "
-                "enregistrement — la page suivante ne peut pas être construite"
+                f"pagination 'keyset': field '{key_field}' missing from the last "
+                "record — the next page cannot be built"
             )
         if key is not None and not _advances(next_key, key):
             raise PaginationError(
-                f"pagination 'keyset' : la clé n'avance pas ({key!r} -> "
-                f"{next_key!r}) — la source n'est pas triée par '{key_field}', "
-                "ou ses valeurs ne sont pas uniques"
+                f"pagination 'keyset': the key is not advancing ({key!r} -> "
+                f"{next_key!r}) — the source is not sorted by '{key_field}', "
+                "or its values are not unique"
             )
         # une page incomplète est la dernière, comme en offset
         if limit is not None and len(records) < limit:
@@ -343,9 +343,9 @@ def _bounded(pages: Iterator[list], pagination_config: dict) -> Iterator[list]:
         current = _fingerprint(page) if page else None
         if current is not None and current == previous:
             raise PaginationError(
-                f"pagination : la page {pages_seen + 1} est identique à la "
-                "précédente — la source ne progresse pas, arrêt pour éviter "
-                "une boucle infinie"
+                f"pagination: page {pages_seen + 1} is identical to the "
+                "previous one — the source is not advancing, stopping to avoid "
+                "an infinite loop"
             )
         previous = current
         pages_seen += 1
@@ -354,17 +354,15 @@ def _bounded(pages: Iterator[list], pagination_config: dict) -> Iterator[list]:
 
         if max_pages is not None and pages_seen >= max_pages:
             raise PaginationError(
-                f"pagination : plafond 'max_pages' de {max_pages} atteint "
-                f"({rows_seen} lignes lues) — run interrompu avant d'avoir "
-                "constaté la fin de la source. Relever la borne, ou "
-                "restreindre la fenêtre de la source."
+                f"pagination: 'max_pages' cap of {max_pages} reached "
+                f"({rows_seen} rows read) — run stopped before reaching the end "
+                "of the source. Raise the cap, or narrow the source window."
             )
         if max_rows is not None and rows_seen >= max_rows:
             raise PaginationError(
-                f"pagination : plafond 'max_rows' de {max_rows} atteint "
-                f"({pages_seen} pages lues) — run interrompu avant d'avoir "
-                "constaté la fin de la source. Relever la borne, ou "
-                "restreindre la fenêtre de la source."
+                f"pagination: 'max_rows' cap of {max_rows} reached "
+                f"({pages_seen} pages read) — run stopped before reaching the end "
+                "of the source. Raise the cap, or narrow the source window."
             )
 
 
@@ -390,7 +388,7 @@ def paginate(
     strategy = _STRATEGIES.get(pagination_config["type"])
     if strategy is None:
         raise PaginationError(
-            f"Type de pagination inconnu : '{pagination_config['type']}'"
+            f"Unknown pagination type: '{pagination_config['type']}'"
         )
     yield from _bounded(
         strategy(fetch_page, base_url, params, pagination_config),

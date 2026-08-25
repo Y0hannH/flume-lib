@@ -65,7 +65,7 @@ class TestReplaceWhere:
 
     def test_rows_outside_the_predicate_are_refused(self, uri):
         write_records(uri, recs(("01", 1)))
-        with pytest.raises(DeltaWriteError, match="ne satisfont pas le prédicat"):
+        with pytest.raises(DeltaWriteError, match="do not satisfy predicate"):
             write_records(
                 uri, recs(("03", 3)), mode="overwrite", predicate="m = '01'"
             )
@@ -74,7 +74,7 @@ class TestReplaceWhere:
 
     def test_an_unknown_column_in_the_predicate_is_explained(self, uri):
         write_records(uri, recs(("01", 1)))
-        with pytest.raises(DeltaWriteError, match="colonne absente"):
+        with pytest.raises(DeltaWriteError, match="column missing"):
             write_records(
                 uri, recs(("01", 2)), mode="overwrite", predicate="nawak = '1'"
             )
@@ -105,7 +105,7 @@ class TestPartitioning:
 
     def test_partitioning_an_existing_table_is_explained(self, uri):
         write_records(uri, recs(("01", 1)))
-        with pytest.raises(DeltaWriteError, match="figées à la création"):
+        with pytest.raises(DeltaWriteError, match="frozen at creation"):
             write_records(uri, recs(("02", 2)), partition_by=["m"])
 
 
@@ -187,4 +187,4 @@ class TestBackfillEndToEnd:
 
         assert result.status == "success", result.error_message
         assert values(target) == [("01", 1)]
-        assert any("aucune ligne" in w for w in result.warnings)
+        assert any("returned no" in w for w in result.warnings)
