@@ -8,7 +8,7 @@
 #
 # Read this one first; the others assume it.
 #
-# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.14.0
+# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.15.0
 
 from flume_lib import ConfigError, run_source, validate_config
 
@@ -70,11 +70,15 @@ OFFSET_SOURCE = {
 # ---------------------------------------------------------------------------
 # 2. `page` — `?page=3&per_page=100`.
 #
-# Two stop conditions, and the choice matters. With `total_pages_header` the
+# Two stop conditions, and the choice matters. With an announced total the
 # count is read from the first response and the loop stops exactly there —
 # one call per page, no probing call at the end. Without it, the loop stops on
 # an empty or partial page, which costs one extra call whenever the last page
-# happens to be full.
+# happens to be full, and — worse — mistakes a short intermediate page for the
+# end of the data.
+#
+# The total lives in a response header (`total_pages_header`) or in the body
+# (`total_pages_field`); PAGE_BODY_TOTAL_SOURCE below shows the second form.
 #
 # Set `start_page: 0` for the zero-based APIs.
 # ---------------------------------------------------------------------------
@@ -96,6 +100,37 @@ PAGE_SOURCE = {
         # no fallback once it has been told to trust a total.
         "total_pages_header": "X-Total-Pages",
         "items_field": "results",
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# 2 bis. `page`, total announced in the body — the Rails/Kaminari envelope.
+#
+# {"pagination": {"current_page": 1, "total_pages": 4, "total_entries": 187,
+#                 "per_page": 50},
+#  "bookings": [ ... ]}
+#
+# Same strategy, same guarantee; only the place where the count is read
+# changes. `total_pages_field` is a dotted path into the body, and it excludes
+# `total_pages_header` — declaring both would leave it unsaid which one decides.
+# ---------------------------------------------------------------------------
+
+PAGE_BODY_TOTAL_SOURCE = {
+    **BASE,
+    "name": "example_bookings",
+    "base_url": f"{API}/recent/bookings",
+    "target_table": "bookings",
+    "pagination": {
+        "type": "page",
+        "page_param": "page",
+        "size_param": "per_page",
+        "page_size": 50,
+        # Absent from the response, or not a number, fails the run — same rule
+        # as the header form: once told to trust a total, the loop has no
+        # fallback.
+        "total_pages_field": "pagination.total_pages",
+        "items_field": "bookings",
     },
 }
 
@@ -219,6 +254,7 @@ def incremental(config: dict, field: str, param_name: str) -> dict:
 SOURCES = [
     incremental(OFFSET_SOURCE, "updated_at", "updated_since"),
     incremental(PAGE_SOURCE, "updated_at", "modified_after"),
+    incremental(PAGE_BODY_TOTAL_SOURCE, "updated_at", "since"),
     incremental(NEXT_LINK_SOURCE, "occurred_at", "since"),
     incremental(CURSOR_SOURCE, "updated_at", "updated_since"),
     # Reference data: a few dozen rows, reloaded whole every time. An

@@ -34,6 +34,7 @@ This page assumes you already know what the library does. It is the one to open 
 | `?limit=100&offset=200`, or `$top`/`$skip`, or `count`/`start` | `{"type": "offset", "limit_param": …, "offset_param": …}` |
 | `?page=3`, and you want to stop on an empty page | `{"type": "page", "page_param": "page"}` |
 | `?page=3`, and the total is in a **response header** | same + `"total_pages_header": "X-Total-Pages"` — stops exactly, no probing call |
+| `?page=3`, and the total is in the **body** (`{"pagination": {"total_pages": 4}, …}`) | same + `"total_pages_field": "pagination.total_pages"` — dotted path, same guarantee |
 | The response carries the **full URL** of the next page | `{"type": "next_link", "next_field": "next"}` |
 | The response carries an **opaque token** (`next_cursor`, `endCursor`) | `{"type": "cursor", "cursor_param": …, "cursor_field": …}` |
 | …and also a `has_more` boolean | same + `"has_more_field"` — **set it**, see below |
@@ -42,7 +43,7 @@ This page assumes you already know what the library does. It is the one to open 
 
 Two traps worth naming, because both fail silently rather than loudly:
 
-- **The API filters server-side *after* cutting the page.** It then returns short pages, and sometimes empty ones, in the middle of the results. Every stop-on-empty heuristic reads that as the end and the run succeeds with a fraction of the data. You need an explicit end-of-stream signal: `has_more_field` with `cursor`, or `total_pages_header` with `page`.
+- **The API filters server-side *after* cutting the page.** It then returns short pages, and sometimes empty ones, in the middle of the results. Every stop-on-empty heuristic reads that as the end and the run succeeds with a fraction of the data. You need an explicit end-of-stream signal: `has_more_field` with `cursor`, or `total_pages_header` / `total_pages_field` with `page`.
 - **`items_field` is worth naming even when the probe finds it.** Left out, the library probes `data`, `items`, `results`, `value`. Named, a vendor who renames the envelope in v2 fails the run instead of loading nothing.
 
 ### Reload strategy — what a rerun should do
@@ -194,7 +195,7 @@ It exercises the credential, the pagination and the response shape, and touches 
 | `HTTPError: HTTP 403` | accepted, but the scope or role is short | vendor-side permissions |
 | `RetryableHTTPError: HTTP 429` | rate limited past `retry.max_attempts` | raise `max_attempts`; a `Retry-After` is already honored |
 | `RetryableHTTPError: HTTP 5xx` | the vendor stayed down for every attempt | the vendor |
-| `PaginationError:` | the loop lost its footing | `items_field`, `cursor_field`, a missing `total_pages_header` |
+| `PaginationError:` | the loop lost its footing | `items_field`, `cursor_field`, a missing `total_pages_header` / `total_pages_field` |
 | `IncrementalError:` | the watermark did not advance, or does not sort | `incremental.field`, `value_format` |
 | `APIError:` | the API returned an error inside a 200 | your `errors` block |
 
@@ -266,6 +267,7 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `size_param` | — | — | no effect unless `page_size` is set too — the pair goes together |
 | `page_size` | — | — | no effect unless `size_param` is set too |
 | `total_pages_header` | — | — | read from the first response; absent or non-numeric fails the run |
+| `total_pages_field` | — | — | same, read by dotted path in the body; excludes `total_pages_header` |
 
 #### `pagination` — `"type": "cursor"`
 

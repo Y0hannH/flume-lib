@@ -552,7 +552,7 @@ Stops on: empty page, or partial page (`< limit`).
 
 Runnable source: [examples/rest_api_paginated.py](../examples/rest_api_paginated.py).
 
-### `page` — page number (header-provided total supported)
+### `page` — page number (announced total supported)
 
 | Key | Default | Description |
 |---|---|---|
@@ -561,12 +561,23 @@ Runnable source: [examples/rest_api_paginated.py](../examples/rest_api_paginated
 | `size_param` | absent | Name of the page-size query param; only sent if `page_size` is also set. |
 | `page_size` | absent | Requested page size. |
 | `total_pages_header` | absent | Response header carrying the total page count (e.g. `X-Total-Pages`). Read on the first response; explicit error if missing or non-numeric. |
+| `total_pages_field` | absent | Dotted path to the total page count **inside the body** (e.g. `pagination.total_pages`). Same rules; mutually exclusive with `total_pages_header`. |
 
-Stops after: `total_pages` pages when `total_pages_header` is set; otherwise empty page, or partial page when `page_size` is known.
+Stops after: `total_pages` pages when either is set; otherwise empty page, or partial page when `page_size` is known.
 
 ```json
 {"type": "page", "page_param": "page", "size_param": "per_page", "page_size": 100, "total_pages_header": "X-Total-Pages"}
 ```
+
+The Rails/Kaminari envelope puts that count in the body instead, next to the records:
+
+```json
+{"type": "page", "page_param": "page", "size_param": "per_page", "page_size": 50, "items_field": "bookings", "total_pages_field": "pagination.total_pages"}
+```
+
+for a response shaped like `{"pagination": {"current_page": 1, "total_pages": 4, "per_page": 50}, "bookings": [...]}`.
+
+Either one is worth the trouble over the stop-on-partial-page fallback: it saves the probing call that discovers an empty page — which counts against a daily API quota — and, more importantly, it does not mistake a short *intermediate* page for the end of the data.
 
 Runnable source: [examples/rest_api_paginated.py](../examples/rest_api_paginated.py).
 

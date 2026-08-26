@@ -119,17 +119,47 @@ def paginate_next_link(
         page_params = {}
 
 
+def _read_total_pages(payload, headers, header_name, field_path) -> int:
+    """Nombre total de pages annoncé par la première réponse, lu dans un
+    header ('total_pages_header') ou dans le corps ('total_pages_field', un
+    chemin pointé — `pagination.total_pages`).
+
+    Déclaré mais absent, c'est une erreur : l'arrêt de la pagination en
+    dépend, et poursuivre sans lui reviendrait à retomber sans le dire sur
+    l'arrêt par page partielle, qui tronque dès qu'une page intermédiaire
+    fait moins que 'page_size'."""
+    if header_name:
+        label = f"Header '{header_name}'"
+        raw = headers.get(header_name)
+    else:
+        label = f"Field '{field_path}'"
+        raw = get_path(payload, field_path)
+        if raw is _MISSING:
+            raw = None
+    if raw is None:
+        raise PaginationError(f"{label} missing from the response")
+    # bool est un int en Python : `true` deviendrait 1 page sans ce garde-fou
+    if isinstance(raw, bool):
+        raise PaginationError(f"{label} is not numeric: '{raw}'")
+    try:
+        return int(raw)
+    except (TypeError, ValueError) as exc:
+        raise PaginationError(f"{label} is not numeric: '{raw}'") from exc
+
+
 def paginate_page(
     fetch_page: Callable, base_url: str, params: dict, pagination_config: dict
 ) -> Iterator[list]:
-    """Pagination par numéro de page. Si 'total_pages_header' est renseigné,
-    le nombre total de pages est lu dans les headers de la première réponse ;
+    """Pagination par numéro de page. Si 'total_pages_header' ou
+    'total_pages_field' est renseigné, le nombre total de pages est lu dans
+    la première réponse — respectivement dans ses headers ou dans son corps ;
     sinon, arrêt sur page vide (ou partielle si 'page_size' est connu)."""
     page_param = pagination_config.get("page_param", "page")
     start_page = pagination_config.get("start_page", 1)
     size_param = pagination_config.get("size_param")
     page_size = pagination_config.get("page_size")
     total_pages_header = pagination_config.get("total_pages_header")
+    total_pages_field = pagination_config.get("total_pages_field")
     items_field = pagination_config.get("items_field")
     record_field = pagination_config.get("record_field")
 
@@ -142,18 +172,10 @@ def paginate_page(
         payload, headers = fetch_page(base_url, page_params)
         records = extract_records(payload, items_field, record_field)
 
-        if total_pages is None and total_pages_header:
-            raw = headers.get(total_pages_header)
-            if raw is None:
-                raise PaginationError(
-                    f"Header '{total_pages_header}' missing from the response"
-                )
-            try:
-                total_pages = int(raw)
-            except ValueError as exc:
-                raise PaginationError(
-                    f"Header '{total_pages_header}' is not numeric: '{raw}'"
-                ) from exc
+        if total_pages is None and (total_pages_header or total_pages_field):
+            total_pages = _read_total_pages(
+                payload, headers, total_pages_header, total_pages_field
+            )
 
         if records:
             yield records

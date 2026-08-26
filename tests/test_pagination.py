@@ -175,6 +175,96 @@ class TestPagePagination:
             {"p": 1, "per_page": 50},
         ]
 
+    def test_total_pages_from_body_field(self):
+        """La forme Rails/Kaminari : le compte total est dans le corps, sous
+        un objet 'pagination', pas dans un header."""
+        config = {
+            "type": "page",
+            "total_pages_field": "pagination.total_pages",
+            "items_field": "bookings",
+            "size_param": "per_page",
+            "page_size": 50,
+        }
+        fetch = make_fetch([
+            {"pagination": {"current_page": 1, "total_pages": 2,
+                            "total_entries": 60, "per_page": 50},
+             "bookings": [{"id": i} for i in range(50)]},
+            {"pagination": {"current_page": 2, "total_pages": 2,
+                            "total_entries": 60, "per_page": 50},
+             "bookings": [{"id": i} for i in range(50, 60)]},
+        ])
+        pages = list(paginate(fetch, "http://api/x", {}, config))
+        assert [len(p) for p in pages] == [50, 10]
+        assert [c[1] for c in fetch.calls] == [
+            {"page": 1, "per_page": 50},
+            {"page": 2, "per_page": 50},
+        ]
+
+    def test_body_field_single_page_stops_without_probing(self):
+        """Le cas qui motive l'option : une page pleine mais unique. Sans le
+        compte total, l'arrêt sur page partielle demanderait une page 2 pour
+        découvrir qu'elle est vide — un appel de plus sur un quota borné."""
+        config = {
+            "type": "page",
+            "total_pages_field": "pagination.total_pages",
+            "items_field": "bookings",
+            "size_param": "per_page",
+            "page_size": 2,
+        }
+        fetch = make_fetch([
+            {"pagination": {"total_pages": 1}, "bookings": [{"id": 1}, {"id": 2}]},
+        ])
+        pages = list(paginate(fetch, "http://api/x", {}, config))
+        assert pages == [[{"id": 1}, {"id": 2}]]
+        assert len(fetch.calls) == 1
+
+    def test_body_field_full_intermediate_page_is_not_truncated(self):
+        """Une page intermédiaire plus courte que 'page_size' — filtrage
+        appliqué après la pagination — n'arrête plus la lecture."""
+        config = {
+            "type": "page",
+            "total_pages_field": "pagination.total_pages",
+            "items_field": "bookings",
+            "size_param": "per_page",
+            "page_size": 3,
+        }
+        fetch = make_fetch([
+            {"pagination": {"total_pages": 2}, "bookings": [{"id": 1}]},
+            {"pagination": {"total_pages": 2}, "bookings": [{"id": 2}, {"id": 3}]},
+        ])
+        pages = list(paginate(fetch, "http://api/x", {}, config))
+        assert pages == [[{"id": 1}], [{"id": 2}, {"id": 3}]]
+
+    def test_missing_body_field_raises(self):
+        config = {"type": "page", "total_pages_field": "pagination.total_pages"}
+        fetch = make_fetch([{"data": [{"id": 1}]}])
+        with pytest.raises(PaginationError, match="pagination.total_pages"):
+            list(paginate(fetch, "http://api/x", {}, config))
+
+    def test_non_numeric_body_field_raises(self):
+        config = {"type": "page", "total_pages_field": "meta.pages"}
+        fetch = make_fetch([{"meta": {"pages": "beaucoup"}, "data": [{"id": 1}]}])
+        with pytest.raises(PaginationError, match="not numeric"):
+            list(paginate(fetch, "http://api/x", {}, config))
+
+    def test_boolean_body_field_raises(self):
+        # bool est un int en Python : `true` passerait pour 1 page
+        config = {"type": "page", "total_pages_field": "meta.pages"}
+        fetch = make_fetch([{"meta": {"pages": True}, "data": [{"id": 1}]}])
+        with pytest.raises(PaginationError, match="not numeric"):
+            list(paginate(fetch, "http://api/x", {}, config))
+
+    def test_body_field_read_once_on_the_first_page(self):
+        """Le compte est lu sur la première réponse ; une page suivante qui
+        ne le reprend pas ne fait pas échouer le run."""
+        config = {"type": "page", "total_pages_field": "meta.pages"}
+        fetch = make_fetch([
+            {"meta": {"pages": 2}, "data": [{"id": 1}]},
+            {"data": [{"id": 2}]},
+        ])
+        pages = list(paginate(fetch, "http://api/x", {}, config))
+        assert pages == [[{"id": 1}], [{"id": 2}]]
+
     def test_without_header_stops_on_empty(self):
         config = {"type": "page"}
         fetch = make_fetch([[{"id": 1}], [{"id": 2}], []])

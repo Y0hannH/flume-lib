@@ -15,7 +15,7 @@
 # A literal string is accepted only for values that are not secret: a public
 # username, a scope, a grant type.
 #
-# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.14.0
+# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.15.0
 
 from flume_lib import run_source
 

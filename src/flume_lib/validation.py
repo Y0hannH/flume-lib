@@ -76,7 +76,7 @@ _PAGINATION_KEYS = {
     "offset": ("limit", "limit_param", "offset_param"),
     "page": (
         "page_param", "start_page", "size_param", "page_size",
-        "total_pages_header",
+        "total_pages_header", "total_pages_field",
     ),
     "next_link": ("next_field",),
     "cursor": (
@@ -327,6 +327,23 @@ def validate_config(config: dict) -> None:
                     f"pagination: 'params_path' points at '{params_path}', which "
                     "is not an object inside 'body'"
                 )
+
+        if pagination_type == "page":
+            if pagination.get("total_pages_header") and pagination.get(
+                "total_pages_field"
+            ):
+                raise ConfigError(
+                    "pagination: 'total_pages_header' and 'total_pages_field' "
+                    "are mutually exclusive — the total page count is read "
+                    "either from the headers or from the body, and declaring "
+                    "both leaves it unsaid which one decides"
+                )
+            for key in ("total_pages_header", "total_pages_field"):
+                value = pagination.get(key)
+                if value is not None and (not isinstance(value, str) or not value):
+                    raise ConfigError(
+                        f"pagination: '{key}' must be a non-empty string"
+                    )
 
         if pagination_type == "cursor":
             for key in ("cursor_param", "cursor_field"):

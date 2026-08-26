@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here. Versions follow [semantic versioning](https://semver.org/); until 1.0.0, minor versions may contain breaking changes — these are always listed first.
 
+## [0.15.0] — 2026-08-26
+
+One pagination signal the library could read from a header and not from the body — which left the most ordinary page-number envelope of all relying on a heuristic that truncates.
+
+### Added
+
+- **`pagination.total_pages_field`, to read the total page count from the response body.** The `page` strategy could be told to trust a total only when it arrived in a *header* (`total_pages_header`); an API returning it in the JSON — `{"pagination": {"current_page": 1, "total_pages": 4, "per_page": 50}, "bookings": [...]}`, the Rails/Kaminari envelope, and the shape of Winddle's API among others — had nothing to declare it with, and silently fell back to the stop-on-empty-or-partial-page heuristic. That fallback is wrong in two ways at once, and only the second one costs data: it spends **one extra call** to discover an empty page whenever the last page happens to be full, which is not free against a vendor quota counting every page as a call; and it reads a short *intermediate* page — what an API that filters server-side after cutting the page returns — as the end of the data, so the run reports `success` with a fraction of the rows. `total_pages_field` takes a dotted path into the body and gives the `page` strategy the same exact stop condition the header form already had. It is mutually exclusive with `total_pages_header`: declaring both would leave it unsaid which one decides, so validation refuses the pair rather than picking. Declared but absent from the response, or non-numeric, fails the run — once told to trust a total, the loop has no fallback, and quietly reverting to the heuristic would reintroduce exactly the truncation the option exists to prevent. A JSON `true` is refused too: `bool` is an `int` in Python, and would otherwise have passed for one page.
+
 ## [0.14.0] — 2026-08-25
 
 An OAuth2 flow the library claimed to support and could not complete, and the reason the failure was unreadable. `oauth2_client_credentials` only ever sent the client credentials one of the two ways the standard allows — which made every IdP expecting the other unloadable, behind a 401 that named nothing.

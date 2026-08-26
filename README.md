@@ -30,7 +30,7 @@ No code is fetched from GitHub or PyPI at runtime — the notebook installs exac
 3. In the notebook:
 
    ```python
-   %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.14.0
+   %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.15.0
    ```
 
 `--no-index` guarantees pip resolves only from that folder — nothing is fetched from PyPI or GitHub. The folder layout is entirely up to you: any path works as long as the same path is passed to `--find-links`.
@@ -156,7 +156,7 @@ Beyond authentication, `headers` adds fixed headers to every data call (literal 
 | Type | Purpose |
 |---|---|
 | `offset` | Offset/limit query params; stops on empty or partial page |
-| `page` | Page number; total page count read from a response header (`total_pages_header`) or stop on empty/partial page |
+| `page` | Page number; total page count read from a response header (`total_pages_header`) or from the body (`total_pages_field`), or stop on empty/partial page |
 | `next_link` | Follows a next-page URL from the response body (e.g. `@odata.nextLink`) |
 | `cursor` | Opaque cursor read from the response; `has_more_field` covers GraphQL connections |
 | `keyset` | Filters each page by the key of the last record seen (`id > last`); the only strategy that gets past an offset cap |

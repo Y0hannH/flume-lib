@@ -298,6 +298,8 @@ _NOTES = {
     ("pagination.page", "page_size"): "no effect unless `size_param` is set too",
     ("pagination.page", "total_pages_header"):
         "read from the first response; absent or non-numeric fails the run",
+    ("pagination.page", "total_pages_field"):
+        "same, read by dotted path in the body; excludes `total_pages_header`",
     ("pagination.cursor", "has_more_field"):
         "set it whenever the API provides it — an empty mid-result page otherwise reads as the end",
     ("pagination.next_link", "next_field"): "top-level key, not a dotted path",

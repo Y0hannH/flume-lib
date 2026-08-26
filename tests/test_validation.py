@@ -142,6 +142,39 @@ class TestPaginationSection:
         validate_config(cfg(pagination={"type": "page", "total_pages_header": "X-Total"}))
         validate_config(cfg(pagination={"type": "next_link", "next_field": "next"}))
 
+    def test_total_pages_field_accepted(self):
+        validate_config(
+            cfg(pagination={
+                "type": "page",
+                "total_pages_field": "pagination.total_pages",
+            })
+        )
+
+    def test_total_pages_header_and_field_together_raise(self):
+        with pytest.raises(ConfigError, match="mutually exclusive"):
+            validate_config(
+                cfg(pagination={
+                    "type": "page",
+                    "total_pages_header": "X-Total",
+                    "total_pages_field": "pagination.total_pages",
+                })
+            )
+
+    def test_empty_total_pages_field_raises(self):
+        with pytest.raises(ConfigError, match="total_pages_field"):
+            validate_config(
+                cfg(pagination={"type": "page", "total_pages_field": ""})
+            )
+
+    def test_total_pages_field_on_offset_type_raises(self):
+        with pytest.raises(ConfigError, match="total_pages_field"):
+            validate_config(
+                cfg(pagination={
+                    "type": "offset",
+                    "total_pages_field": "pagination.total_pages",
+                })
+            )
+
     def test_unknown_pagination_type_raises(self):
         with pytest.raises(ConfigError, match="unknown type 'zigzag'"):
             validate_config(cfg(pagination={"type": "zigzag"}))
