@@ -205,7 +205,65 @@ A `success` is worth reading too — `RunResult.warnings` carries the empty-sour
 
 ---
 
-## 4. Key index
+## 4. Operating the watermark
+
+The incremental watermark lives in `<log_schema>.watermark` (default `flume.watermark`), one row per write: `source_name`, `last_value`, `updated_ts`. The table is **append-only** and `read_watermark` takes the most recent row of a source — so *setting* a value means appending one, and *resetting* means deleting the source's rows so that nothing is found and `initial_value` takes over again.
+
+Both are operations you run **between** two runs, from a notebook cell. A successful run appends its own row at the end; do this while one is in flight and the run wins.
+
+```python
+from flume_lib._delta import query_table, resolve_lakehouse_tables_path, table_uri
+from flume_lib.watermark import read_watermark, write_watermark
+
+# Same resolution run_source does: in Fabric the local mount cannot commit a
+# Delta log, so the path becomes the lakehouse's OneLake ABFSS URI.
+TABLES = resolve_lakehouse_tables_path("/lakehouse/default/Tables")
+SCHEMA = "flume"            # log_schema
+SOURCE = "my_source"        # exactly config["name"]
+
+read_watermark(TABLES, SOURCE, schema=SCHEMA)          # current value, or None
+
+uri = table_uri(TABLES, SCHEMA, "watermark")
+query_table(uri, "select * from wm order by updated_ts desc", alias="wm")
+
+write_watermark(TABLES, SOURCE, "2026-01-01T00:00:00Z", schema=SCHEMA)
+```
+
+Both take `storage_options=` for a lakehouse other than the default, like `run_source`.
+
+### Resetting
+
+Appending is not a reset: as long as one row exists, `initial_value` is never read again. Look at what you are about to delete, then delete it.
+
+```python
+from deltalake import DeltaTable
+from flume_lib._delta import sql_quote, storage_options_for
+
+predicate = f"source_name = {sql_quote(SOURCE)}"
+
+for row in query_table(uri, f"select * from wm where {predicate}", alias="wm"):
+    print(row)                                          # look first
+
+dt = DeltaTable(uri, storage_options=storage_options_for(uri, None))
+dt.delete(predicate)                                    # {'num_deleted_rows': N}
+read_watermark(TABLES, SOURCE, schema=SCHEMA)           # None
+```
+
+| Trap | Why it bites |
+|---|---|
+| **The predicate is not optional** | `dt.delete()` with no argument empties the table for *every* source, not just yours. That is the reason for the read-first cell. |
+| **`source_name` must match `config["name"]` exactly** | A typo writes a second, unrelated entry without a word, and the run keeps reading the old one. |
+| **`initial_value` becomes the floor again** | After a reset the next run starts there — if it holds today's date, you reload today and the history never comes back. Move it before rerunning. |
+| **A rerun replays and appends** | Rows already loaded do not disappear. Reload a window with `write.replace_where` over the same bounds, or de-duplicate on `_flume_run_id`. |
+| **The value must be shaped the way the API expects** | It is reinjected verbatim into the filter param. A malformed timestamp is not caught by `validate_config` — `value_format` only guards the `body_template` injection — and leaves as-is. |
+
+A wrong delete is recoverable: Delta keeps the history. `dt.history(5)` lists the versions and `dt.restore(<version>)` puts the table back as it was.
+
+`flume_lib._delta` is private and `watermark` is not exported in `__all__` — these signatures carry no stability guarantee across versions.
+
+---
+
+## 5. Key index
 
 Every key the validator accepts, its block, whether it is required, and its default. **Generated from the source** by `scripts/gen_key_index.py` and checked in CI, so it cannot drift from what the library actually does.
 

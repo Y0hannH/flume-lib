@@ -828,6 +828,10 @@ The flag only lifts a refusal; it changes nothing for a config that does not set
 
 Behavior: the last watermark is read from `<log_schema>.watermark` at run start (`initial_value` is used on the very first run, and no param is sent if neither exists); the new watermark is written **only if the run succeeded** and at least one record was loaded — unless [`checkpoint`](#resuming-with-incrementalcheckpoint) is on, in which case it advances batch by batch.
 
+Sending no param at all is the right default for an API whose filter is optional, and a trap on one that requires it: such an endpoint answers 4xx on the very first run, no watermark is ever written, and every rerun repeats it. `initial_value` is what breaks that loop — treat it as mandatory whenever the vendor makes the incremental filter mandatory.
+
+Reading, forcing or resetting that watermark between two runs: [cookbook.md, "Operating the watermark"](cookbook.md#4-operating-the-watermark).
+
 The max of each batch is computed **before** that batch is written, so a `field` whose values cannot be compared (mixed types) fails the run without leaving rows behind an unadvanced watermark. Comparison uses Python `max()` — works for ISO 8601 timestamps and numerics; beware of date formats that don't sort lexicographically.
 
 `normalize` exists because the watermark makes a round trip: it is **read** from a record and **sent back** as a filter, and an API is free to disagree with itself about the format between the two. One that returns `2026-08-25T14:57:44.000+02:00` but only accepts `...Z` in its filter could not be loaded incrementally at all, since the value is otherwise reinjected verbatim. `"normalize": "utc_iso"` closes that gap, and applies to `initial_value` as well, so the first run and every run after it send the same shape. A value carrying no offset is read as UTC — the convention of `pandas.to_datetime(..., utc=True)`, and the only stable one: binding it to the machine's timezone would make a run's bound depend on where the notebook happens to execute. A value that is not an ISO 8601 instant fails the run before the first HTTP call.
