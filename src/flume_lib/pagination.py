@@ -3,6 +3,7 @@ listes d'enregistrements page par page, via une fonction fetch_page injectée
 (fetch_page(url, params) -> (JSON parsé, headers de réponse)) — le retry et
 l'auth sont gérés par l'appelant."""
 
+import hashlib
 from collections.abc import Callable, Iterator
 
 from flume_lib.templating import check_value
@@ -421,8 +422,20 @@ _STRATEGIES = {
 
 def _fingerprint(page: list):
     """Empreinte bon marché d'une page, calculée avant qu'elle ne soit livrée
-    (l'appelant y ajoute ensuite les colonnes de traçabilité)."""
-    return len(page), repr(page[0])[:200], repr(page[-1])[:200]
+    (l'appelant y ajoute ensuite les colonnes de traçabilité).
+
+    Un digest, et non un préfixe : `repr(...)[:200]` faisait collisionner deux
+    pages pourtant différentes dès qu'un champ verbeux précédait
+    l'identifiant dans l'ordre des clés JSON. La lib refusait alors des runs
+    légitimes sur une fausse détection de boucle.
+
+    Premier et dernier enregistrement, pas la page entière : ce qu'on cherche
+    est une API qui resert la même page, et elle la resert en entier.
+    """
+    digest = hashlib.blake2b(digest_size=16)
+    for record in (page[0], page[-1]):
+        digest.update(repr(record).encode("utf-8", "replace"))
+    return len(page), digest.hexdigest()
 
 
 def _bounded(pages: Iterator[list], pagination_config: dict) -> Iterator[list]:

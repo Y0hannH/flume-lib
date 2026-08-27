@@ -637,3 +637,38 @@ class TestPageStrategyCappedPageSize:
         pages = list(paginate(fetch_page, "http://api/x", {}, self.CONFIG, warnings))
         assert sum(len(p) for p in pages) == 250
         assert len(warnings) == 1
+
+
+class TestPageFingerprint:
+    """La detection de page repetee comparait `repr(...)[:200]` : deux pages
+    differentes collisionnaient des qu'un champ verbeux precedait
+    l'identifiant dans l'ordre des cles JSON, et le run tombait sur une
+    fausse detection de boucle."""
+
+    CONFIG = {"type": "offset", "limit": 1}
+
+    def test_two_pages_sharing_a_long_prefix_are_not_confused(self):
+        long_field = "x" * 300
+        fetch = make_fetch([
+            [{"description": long_field, "id": 1}],
+            [{"description": long_field, "id": 2}],
+            [],
+        ])
+        pages = list(paginate(fetch, "http://api/x", {}, self.CONFIG))
+        assert [p[0]["id"] for p in pages] == [1, 2]
+
+    def test_a_genuinely_repeated_page_is_still_caught(self):
+        page = [{"description": "x" * 300, "id": 1}]
+        fetch = make_fetch([list(page), list(page)])
+        with pytest.raises(PaginationError, match="identical to the previous one"):
+            list(paginate(fetch, "http://api/x", {}, self.CONFIG))
+
+    def test_pages_differing_only_by_their_last_record_are_not_confused(self):
+        fetch = make_fetch([
+            [{"id": 1}, {"id": 2}],
+            [{"id": 1}, {"id": 3}],
+            [],
+        ])
+        config = {"type": "offset", "limit": 2}
+        pages = list(paginate(fetch, "http://api/x", {}, config))
+        assert len(pages) == 2
