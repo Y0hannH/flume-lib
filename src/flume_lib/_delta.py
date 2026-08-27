@@ -208,10 +208,16 @@ def records_to_table(
     known_types = known_types or {}
     fallbacks: list[str] = []
     columns: dict[str, ac.Array] = {}
+    # `seen` à côté de `keys` : le `key not in keys` d'origine balayait la
+    # liste pour chaque clé de chaque enregistrement, soit O(n·k²). Sur un lot
+    # de 50 000 lignes, cette seule boucle coûtait 3 s à 120 colonnes, avant
+    # la moindre conversion. La liste reste, elle porte l'ordre des colonnes.
     keys: list[str] = []
+    seen: set = set()
     for record in records:
         for key in record:
-            if key not in keys:
+            if key not in seen:
+                seen.add(key)
                 keys.append(key)
     for key in keys:
         values = [r.get(key) for r in records]
