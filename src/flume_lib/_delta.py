@@ -121,6 +121,16 @@ def _infer_type(values: list) -> ac.DataType:
     return ac.DataType.string()
 
 
+def _type_name(dtype: ac.DataType) -> str:
+    """Nom lisible d'un type Arrow. `str()` d'un DataType arro3 rend
+    `arro3.core.DataType<Float64>` suivi d'un retour à la ligne — le recopier
+    tel quel dans un message qui finit dans `RunResult.warnings` et dans
+    `log_runs` le rend illisible."""
+    rendered = str(dtype).strip()
+    _, _, inner = rendered.partition("<")
+    return inner.rstrip(">") if inner else rendered
+
+
 def _normalize(value, dtype: ac.DataType):
     if value is None:
         return None
@@ -141,6 +151,22 @@ def _build_column(
     colonne produiraient un conflit de schéma au commit Delta."""
     expected = known_types.get(name)
     dtype = expected if expected is not None else _infer_type(values)
+    if expected == ac.DataType.string():
+        # Une colonne figée en texte par un lot précédent absorbe sans broncher
+        # les valeurs scalaires des suivants : `_normalize` les convertit, la
+        # construction réussit, et personne n'apprend que la colonne de
+        # montants est du texte. Le cas courant est un premier lot où la
+        # colonne n'a que des nuls — elle est alors typée texte faute de
+        # mieux, et la décision vaut pour tout le run.
+        inferred = _infer_type(values)
+        if inferred != ac.DataType.string():
+            fallbacks.append(
+                f"column '{name}': text according to a previous batch, but "
+                f"this one holds {_type_name(inferred)} values — they are written as "
+                "text. A column holding only nulls in the first batch is "
+                "typed text by default, and that choice is frozen for the "
+                "rest of the run."
+            )
     try:
         return ac.Array([_normalize(v, dtype) for v in values], type=dtype)
     except Exception:  # noqa: BLE001 — le type retenu ne recouvre pas les valeurs
@@ -151,15 +177,16 @@ def _build_column(
                     [_normalize(v, inferred) for v in values], type=inferred
                 )
                 fallbacks.append(
-                    f"column '{name}': {expected} on the previous batch, "
-                    f"{inferred} on this one — the Delta commit will probably "
+                    f"column '{name}': {_type_name(expected)} on the previous "
+                    f"batch, {_type_name(inferred)} on this one — the Delta "
+                    f"commit will probably "
                     "refuse this type change"
                 )
                 return array
             except Exception:  # noqa: BLE001
                 pass
         fallbacks.append(
-            f"column '{name}': values not representable as {dtype}, "
+            f"column '{name}': values not representable as {_type_name(dtype)}, "
             "written as text"
         )
         return ac.Array(

@@ -161,3 +161,47 @@ class TestKnownTypes:
         assert values["id"] == ["A-1"]
         assert len(fallbacks) == 1
         assert "'id'" in fallbacks[0]
+
+
+class TestAnAllNullFirstBatchIsNoLongerSilent:
+    """Une colonne sans aucune valeur non nulle au premier lot est typee texte
+    faute de mieux. Les lots suivants s'y conforment sans broncher :
+    `_normalize` convertit, la construction reussit, et personne n'apprenait
+    que la colonne de montants etait devenue du texte."""
+
+    def test_the_degradation_is_reported(self):
+        first, _, _ = typed([{"amount": None}, {"amount": None}])
+        types, values, fallbacks = typed(
+            [{"amount": 10.5}, {"amount": 20}], first
+        )
+        assert values["amount"] == ["10.5", "20"]
+        assert len(fallbacks) == 1
+        assert "'amount'" in fallbacks[0]
+        assert "Float64" in fallbacks[0]
+
+    def test_the_type_name_is_readable(self):
+        """`str()` d'un DataType arro3 rend `arro3.core.DataType<Float64>`
+        suivi d'un retour a la ligne : illisible dans log_runs."""
+        first, _, _ = typed([{"n": None}])
+        _, _, fallbacks = typed([{"n": 1}], first)
+        assert "arro3" not in fallbacks[0]
+        assert "\n" not in fallbacks[0]
+
+    def test_a_batch_still_all_null_says_nothing(self):
+        first, _, _ = typed([{"n": None}])
+        _, _, fallbacks = typed([{"n": None}], first)
+        assert fallbacks == []
+
+    def test_a_genuinely_textual_column_says_nothing(self):
+        """Une colonne texte alimentee par du texte n'est pas une
+        degradation."""
+        first, _, _ = typed([{"label": "a"}])
+        _, _, fallbacks = typed([{"label": "b"}], first)
+        assert fallbacks == []
+
+    def test_an_int_to_float_widening_is_not_reported_as_text(self):
+        """Le type retenu n'est pas du texte : rien a signaler ici."""
+        first, _, _ = typed([{"amount": 1}, {"amount": 2.5}])
+        _, values, fallbacks = typed([{"amount": 3}], first)
+        assert values["amount"] == [3.0]
+        assert fallbacks == []
