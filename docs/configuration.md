@@ -544,7 +544,7 @@ The type is selected by `pagination.type`. All strategies accept:
 | `limit_param` | `limit` | Name of the size query param (e.g. `top`). |
 | `offset_param` | `offset` | Name of the offset query param (e.g. `skip`). |
 
-Stops on: empty page, or partial page (`< limit`).
+Stops on: empty page, or partial page (`< limit`) — see [When the API does not honour the requested size](#when-the-api-does-not-honour-the-requested-size). The offset advances by the number of rows actually received, never by `limit`.
 
 ```json
 {"type": "offset", "limit": 500, "limit_param": "top", "offset_param": "skip"}
@@ -563,7 +563,7 @@ Runnable source: [examples/rest_api_paginated.py](../examples/rest_api_paginated
 | `total_pages_header` | absent | Response header carrying the total page count (e.g. `X-Total-Pages`). Read on the first response; explicit error if missing or non-numeric. |
 | `total_pages_field` | absent | Dotted path to the total page count **inside the body** (e.g. `pagination.total_pages`). Same rules; mutually exclusive with `total_pages_header`. |
 
-Stops after: `total_pages` pages when either is set; otherwise empty page, or partial page when `page_size` is known.
+Stops after: `total_pages` pages when either is set; otherwise empty page, or partial page when `page_size` is known — see [When the API does not honour the requested size](#when-the-api-does-not-honour-the-requested-size).
 
 ```json
 {"type": "page", "page_param": "page", "size_param": "per_page", "page_size": 100, "total_pages_header": "X-Total-Pages"}
@@ -711,6 +711,12 @@ A single HTTP call, no loop. The common keys still apply: `items_field` and `rec
 `max_pages` and `max_rows` bound a run whose order of magnitude is known. Reaching one is an **error**, not a clean stop: truncating silently would produce a `success` run short of part of its data, which is the failure mode this library exists to avoid. Rows already written stay written, and the message says what happened. The bound fires on the count alone — a source that happens to end exactly on it still fails, because the run stopped before observing the end.
 
 Independently of any configuration, a page **identical to the one before it** stops the run. An API that clamps an out-of-range page number and serves the first page again has no natural stop condition — the notebook used to run until its timeout, memory climbing. The strategies that read a cursor, a next link or a keyset key have their own no-progress checks on top.
+
+#### When the API does not honour the requested size
+
+A page smaller than the requested size ends the pagination — unless no full page has been seen yet, in which case one more request is made before concluding. The two situations that produce a first short page are indistinguishable from that page alone: a source of 100 rows, and an API capping pages at 100 while `limit` asks for 1000. The library used to read both as "the end", so a `limit` the API refused truncated the load after a single page and the run was still reported as `success`.
+
+If that extra request comes back with rows, the cap is real: pagination continues at the size actually served, and `RunResult.warnings` says which size the API imposes so the config can be corrected. If it comes back empty, the source was simply short and nothing is reported. A run that has already seen one full page never pays for the extra request, which is the common case.
 
 ## Batched writes
 
@@ -871,7 +877,7 @@ Objects and lists are serialized to a JSON string. Dates and timestamps arrive a
 
 A column whose values fit none of those types — an integer beyond `bigint`, say — is still written, as text, and the degradation is reported in `RunResult.warnings`. A run can be `success` and carry warnings; that is the point. It used to be silent, which is how a column of amounts became a column of text without anyone noticing.
 
-Within a run, the types chosen by the first batch are applied to the following ones, so a source whose later rows look different cannot produce two incompatible schemas for the same table. Across runs, Delta's `schema_mode=merge` handles new columns, but not a column that changes type from one run to the next — that is a `SchemaMismatchError` at commit time.
+Within a run, the types chosen by the first batch are applied to the following ones, so a source whose later rows look different cannot produce two incompatible schemas for the same table. One case deserves attention: a column holding only nulls in the first batch is typed `string`, for want of anything to go on, and later batches conform to that — their numbers are written as text. The type cannot be revised without breaking the commit, and the table would carry it anyway, so the library reports it in `RunResult.warnings` instead of failing. A source with sparse optional fields and a small `batch_size` makes this more likely; a larger first batch makes it rarer. Across runs, Delta's `schema_mode=merge` handles new columns, but not a column that changes type from one run to the next — that is a `SchemaMismatchError` at commit time.
 
 ## Technical tables
 
