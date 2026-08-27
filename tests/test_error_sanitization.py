@@ -8,9 +8,13 @@ la lib reprenne la main.
 import pytest
 import requests
 
+# Import à plat, pas `tests.test_source` : pytest met le dossier des tests sur
+# `sys.path`, jamais la racine du dépôt. Cette dernière n'y arrive que par
+# `python -m pytest`, qui y ajoute le répertoire courant — la CI lance `pytest`.
+from test_source import BASE_CONFIG, TABLES_PATH, delta, http  # noqa: F401
+
 from flume_lib.source import run_source
 from flume_lib.urls_ import REDACTED, safe_url, sanitized_request_error, scrub_query
-from tests.test_source import BASE_CONFIG, TABLES_PATH, delta, http  # noqa: F401
 
 # Message tel qu'urllib3 le forme réellement : l'URL demandée y est recopiée
 # avec sa query string.
