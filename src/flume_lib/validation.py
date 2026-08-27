@@ -146,6 +146,32 @@ def _resolve_body_path(section: str, body, path: str, required: bool):
     return node
 
 
+def _check_number(
+    section: str, config: dict, key: str, *, integer: bool = True,
+    allow_zero: bool = False,
+) -> None:
+    """Contrôle la valeur d'une clé numérique optionnelle.
+
+    Jusqu'ici la validation ne regardait que les *noms* des clés de `retry` et
+    de `timeout_seconds`. Un `"timeout_seconds": null` dans le JSON passait,
+    `requests` recevait `timeout=None`, et le notebook attendait
+    indéfiniment — sans timeout, donc sans le retry qui aurait dû suivre.
+    """
+    if key not in config:
+        return
+    value = config[key]
+    # bool est un int en Python : le laisser passer donnerait 1 ou 0
+    expected = int if integer else (int, float)
+    if isinstance(value, bool) or not isinstance(value, expected):
+        kind = "an integer" if integer else "a number"
+        raise ConfigError(f"{section}: '{key}' must be {kind}")
+    if allow_zero:
+        if value < 0:
+            raise ConfigError(f"{section}: '{key}' must not be negative")
+    elif value <= 0:
+        raise ConfigError(f"{section}: '{key}' must be greater than 0")
+
+
 def _check_type(section: str, config: dict, allowed_types: dict, default: str):
     if not isinstance(config, dict):
         raise ConfigError(f"{section}: must be an object")
@@ -180,13 +206,8 @@ def validate_config(config: dict) -> None:
             "config: 'body' is ignored on GET — set \"method\": \"POST\""
         )
 
-    if "batch_size" in config:
-        batch_size = config["batch_size"]
-        # bool est un int en Python : le laisser passer donnerait batch_size=1
-        if not isinstance(batch_size, int) or isinstance(batch_size, bool):
-            raise ConfigError("config: 'batch_size' must be an integer")
-        if batch_size < 1:
-            raise ConfigError("config: 'batch_size' must be greater than 0")
+    _check_number("config", config, "batch_size")
+    _check_number("config", config, "timeout_seconds", integer=False)
 
     headers = config.get("headers")
     if headers is not None:
@@ -234,6 +255,7 @@ def validate_config(config: dict) -> None:
         auth_type = _check_type("auth", auth, _AUTH_KEYS, "none")
         _check_unknown("auth", auth, ("type",) + _AUTH_KEYS[auth_type])
         _check_required_groups("auth", auth, _AUTH_REQUIRED.get(auth_type, ()))
+        _check_number("auth", auth, "timeout_seconds", integer=False)
         if auth_type == "oauth1":
             signature_method = auth.get("signature_method", "HMAC-SHA256")
             if signature_method not in SIGNATURE_METHODS:
@@ -299,14 +321,10 @@ def validate_config(config: dict) -> None:
                     "parameters into 'body', which is absent from the config"
                 )
 
-        for key in ("max_pages", "max_rows"):
-            if key not in pagination:
-                continue
-            value = pagination[key]
-            if not isinstance(value, int) or isinstance(value, bool):
-                raise ConfigError(f"pagination: '{key}' must be an integer")
-            if value < 1:
-                raise ConfigError(f"pagination: '{key}' must be greater than 0")
+        for key in ("max_pages", "max_rows", "limit", "page_size"):
+            _check_number("pagination", pagination, key)
+        # une API indexée à partir de 0 est légitime
+        _check_number("pagination", pagination, "start_page", allow_zero=True)
 
         params_path = pagination.get("params_path")
         if params_path is not None:
@@ -509,3 +527,10 @@ def validate_config(config: dict) -> None:
         if not isinstance(retry, dict):
             raise ConfigError("retry: must be an object")
         _check_unknown("retry", retry, _RETRY_KEYS)
+        _check_number("retry", retry, "max_attempts")
+        _check_number("retry", retry, "backoff_multiplier", integer=False)
+        # 0 est valide : il désactive l'attente dictée par le serveur
+        _check_number(
+            "retry", retry, "max_retry_after_seconds",
+            integer=False, allow_zero=True,
+        )

@@ -827,3 +827,69 @@ class TestBodyOnGet:
         with pytest.raises(ConfigError, match="must be a boolean"):
             validate_config(cfg(allow_body_on_get=value))
 
+
+
+class TestNumericValues:
+    """La validation ne contrôlait que les *noms* des clés de `retry` et de
+    `timeout_seconds`. Un `null` y passait, et `requests` recevait
+    `timeout=None` : le notebook attendait indéfiniment."""
+
+    @pytest.mark.parametrize("value", [None, "30", [], {}, True])
+    def test_a_non_numeric_timeout_is_refused(self, value):
+        with pytest.raises(ConfigError, match="'timeout_seconds' must be a number"):
+            validate_config(cfg(timeout_seconds=value))
+
+    @pytest.mark.parametrize("value", [0, -1])
+    def test_a_non_positive_timeout_is_refused(self, value):
+        with pytest.raises(ConfigError, match="greater than 0"):
+            validate_config(cfg(timeout_seconds=value))
+
+    def test_a_float_timeout_is_accepted(self):
+        validate_config(cfg(timeout_seconds=2.5))
+
+    @pytest.mark.parametrize("value", [None, "3", 0, -1, True])
+    def test_a_bad_max_attempts_is_refused(self, value):
+        with pytest.raises(ConfigError):
+            validate_config(cfg(retry={"max_attempts": value}))
+
+    @pytest.mark.parametrize("value", [None, "1.5", 0, -1])
+    def test_a_bad_backoff_multiplier_is_refused(self, value):
+        with pytest.raises(ConfigError):
+            validate_config(cfg(retry={"backoff_multiplier": value}))
+
+    def test_max_retry_after_seconds_accepts_zero(self):
+        """0 désactive l'attente dictée par le serveur — c'est un réglage,
+        pas une erreur."""
+        validate_config(cfg(retry={"max_retry_after_seconds": 0}))
+
+    def test_a_negative_max_retry_after_is_refused(self):
+        with pytest.raises(ConfigError, match="must not be negative"):
+            validate_config(cfg(retry={"max_retry_after_seconds": -1}))
+
+    def test_a_valid_retry_block_passes(self):
+        validate_config(cfg(retry={
+            "max_attempts": 5, "backoff_multiplier": 1.5,
+            "max_retry_after_seconds": 120,
+        }))
+
+    def test_a_non_numeric_auth_timeout_is_refused(self):
+        with pytest.raises(ConfigError, match="auth: 'timeout_seconds'"):
+            validate_config(cfg(auth={
+                "type": "oauth2_client_credentials",
+                "token_url": "https://idp.test/token",
+                "client_id": "id", "client_secret": "shh",
+                "timeout_seconds": None,
+            }))
+
+    @pytest.mark.parametrize("key", ["limit", "page_size"])
+    def test_a_bad_page_bound_is_refused(self, key):
+        with pytest.raises(ConfigError, match=f"'{key}'"):
+            validate_config(cfg(pagination={"type": "page", key: 0}))
+
+    def test_start_page_accepts_zero(self):
+        """Une API indexée à partir de 0 est légitime."""
+        validate_config(cfg(pagination={"type": "page", "start_page": 0}))
+
+    def test_a_negative_start_page_is_refused(self):
+        with pytest.raises(ConfigError, match="must not be negative"):
+            validate_config(cfg(pagination={"type": "page", "start_page": -1}))
