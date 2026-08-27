@@ -5,7 +5,6 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from urllib.parse import urlsplit, urlunsplit
 
 import requests
 from tenacity import (
@@ -25,6 +24,7 @@ from flume_lib.templating import (
     render,
     templated_placeholders,
 )
+from flume_lib.urls_ import safe_url, sanitized_request_error
 from flume_lib.validation import ConfigError, validate_config
 from flume_lib.watermark import read_watermark, write_watermark
 
@@ -119,9 +119,12 @@ def _safe_url(url: str) -> str:
     persisté dans la table Delta log_runs, lisible par tout le lakehouse : une
     URL complète y recopierait les query params, et donc un secret qu'une
     config mal écrite y aurait placé. La position du run reste lisible via
-    RunResult.rows_loaded."""
-    parts = urlsplit(url)
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    RunResult.rows_loaded.
+
+    Ne couvre que les messages rédigés par la lib. Ceux que requests forme
+    lui-même sont traités par `sanitized_request_error` — voir urls_.py.
+    """
+    return safe_url(url)
 
 
 def _parse_retry_after(raw: str | None) -> float | None:
@@ -351,7 +354,13 @@ def _build_fetch_page(config: dict, variables: dict | None = None):
         else:
             kwargs["params"] = params
             kwargs[body_key] = dict(base_body)
-        response = session.request(method, url, **kwargs)
+        try:
+            response = session.request(method, url, **kwargs)
+        except requests.RequestException as exc:
+            # urllib3 recopie l'URL demandée dans le message d'une
+            # ConnectionError, query comprise. Le type est conservé : c'est
+            # lui qui décide du rejeu.
+            raise sanitized_request_error(exc, url, kwargs.get("params")) from None
         retry_after = _parse_retry_after(response.headers.get("Retry-After"))
         if response.status_code == 429 or response.status_code >= 500:
             raise RetryableHTTPError(response.status_code, _safe_url(url), retry_after)

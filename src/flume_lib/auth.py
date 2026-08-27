@@ -9,6 +9,7 @@ import requests
 
 from flume_lib.oauth1 import OAuth1Signer
 from flume_lib.secrets_ import SecretResolutionError, resolve_secret
+from flume_lib.urls_ import safe_url, sanitized_request_error
 
 DEFAULT_TOKEN_TIMEOUT_SECONDS = 30
 ENTRA_TOKEN_URL = "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
@@ -139,11 +140,18 @@ def _fetch_oauth2_client_credentials(auth_config: dict) -> tuple[str, float | No
         data["scope"] = auth_config["scope"]
 
     timeout = auth_config.get("timeout_seconds", DEFAULT_TOKEN_TIMEOUT_SECONDS)
-    response = requests.post(token_url, data=data, headers=headers, timeout=timeout)
+    try:
+        response = requests.post(
+            token_url, data=data, headers=headers, timeout=timeout
+        )
+    except requests.RequestException as exc:
+        # Type conservé — une ConnectionError sur l'IdP reste rejouable ; la
+        # convertir en AuthError ferait échouer un run sur un incident réseau.
+        raise sanitized_request_error(exc, token_url) from None
     if response.status_code != 200:
         raise AuthError(
             f"oauth2_client_credentials: HTTP {response.status_code} on "
-            f"{token_url}{_error_detail(response)}"
+            f"{safe_url(token_url)}{_error_detail(response)}"
         )
     payload = response.json()
     token = payload.get("access_token")
@@ -189,11 +197,16 @@ def _fetch_token_endpoint(auth_config: dict) -> tuple[str, float | None]:
     elif body:
         kwargs["params"] = body
 
-    response = requests.request(method, token_url, **kwargs)
+    try:
+        response = requests.request(method, token_url, **kwargs)
+    except requests.RequestException as exc:
+        # Type conservé — une ConnectionError sur l'IdP reste rejouable ; la
+        # convertir en AuthError ferait échouer un run sur un incident réseau.
+        raise sanitized_request_error(exc, token_url) from None
     if response.status_code != 200:
         raise AuthError(
             f"token_endpoint: HTTP {response.status_code} on "
-            f"{token_url}{_error_detail(response)}"
+            f"{safe_url(token_url)}{_error_detail(response)}"
         )
 
     payload = response.json()
