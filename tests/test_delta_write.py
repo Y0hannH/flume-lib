@@ -129,6 +129,10 @@ class FakeSession:
 
     def __init__(self):
         self.headers = {}
+        self.closed = False
+
+    def close(self):
+        self.closed = True
 
     def request(self, method, url, **kwargs):
         return FakeResponse(FakeSession.payload)

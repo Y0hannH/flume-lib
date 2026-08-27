@@ -50,8 +50,12 @@ class FakeSession:
     def __init__(self):
         self.headers = {}
         self.calls = []
+        self.closed = False
         self.payloads = list(FakeSession.next_payloads)
         FakeSession.instances.append(self)
+
+    def close(self):
+        self.closed = True
 
     def request(self, method, url, **kwargs):
         self.calls.append({"method": method, "url": url, **kwargs})
@@ -1643,3 +1647,35 @@ class TestPaginationWarningsReachTheResult:
         result = run_source(config, lakehouse_tables_path=TABLES_PATH, dry_run=True)
 
         assert any("not honoured" in w for w in result.warnings)
+
+
+class TestSessionLifecycle:
+    """La session porte le pool de connexions. Un notebook qui enchaine les
+    sources en laissait un par run, jusqu'au ramasse-miettes."""
+
+    def test_the_session_is_closed_after_a_successful_run(self, http, delta):
+        http.next_payloads = [[{"id": 1}]]
+        run_source(BASE_CONFIG, lakehouse_tables_path=TABLES_PATH)
+        assert http.instances[0].closed is True
+
+    def test_the_session_is_closed_after_a_failed_run(self, http, delta,
+                                                      monkeypatch):
+        def explode(self, method, url, **kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(http, "request", explode)
+        result = run_source(BASE_CONFIG, lakehouse_tables_path=TABLES_PATH)
+        assert result.status == "failed"
+        assert http.instances[0].closed is True
+
+    def test_a_dry_run_closes_it_too(self, http, delta):
+        http.next_payloads = [[{"id": 1}]]
+        run_source(BASE_CONFIG, lakehouse_tables_path=TABLES_PATH, dry_run=True)
+        assert http.instances[0].closed is True
+
+    def test_a_config_refused_before_any_session_does_not_crash(self, http, delta):
+        """Aucune session n'a ete creee : la fermeture ne doit pas devenir
+        elle-meme la cause de l'echec."""
+        result = run_source({"name": "x"}, lakehouse_tables_path=TABLES_PATH)
+        assert result.status == "failed"
+        assert "ConfigError" in result.error_message

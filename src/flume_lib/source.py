@@ -428,6 +428,10 @@ def _build_fetch_page(config: dict, variables: dict | None = None):
     def fetch_page(url: str, params: dict):
         return retryer(_request, url, params, {"refreshed": False})
 
+    # La session porte le pool de connexions : `run_source` la ferme en
+    # sortant, plutôt que d'attendre le ramasse-miettes. Un notebook qui
+    # enchaîne les sources en laissait un par run.
+    fetch_page.session = session
     return fetch_page
 
 
@@ -688,6 +692,7 @@ def run_source(
     error_message = None
     sample = None
     warnings: list[str] = []
+    fetch_page = None
 
     try:
         lakehouse_tables_path = resolve_lakehouse_tables_path(lakehouse_tables_path)
@@ -739,8 +744,9 @@ def run_source(
         # `warnings` est alimentée par la pagination, puis complétée par le
         # writer : les deux signalent des dégradations qui ne font pas
         # échouer le run.
+        fetch_page = _build_fetch_page(config, variables)
         pages = paginate(
-            _build_fetch_page(config, variables),
+            fetch_page,
             config["base_url"],
             params,
             config.get("pagination"),
@@ -784,6 +790,10 @@ def run_source(
         status = "success"
     except Exception as exc:  # noqa: BLE001 — contrat : ne jamais lever
         error_message = f"{type(exc).__name__}: {exc}"
+    finally:
+        session = getattr(fetch_page, "session", None)
+        if session is not None:
+            session.close()
 
     end_ts = _utc_now()
     result = RunResult(
