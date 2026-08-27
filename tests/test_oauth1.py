@@ -178,3 +178,39 @@ class TestBuildAuth:
         del config["token_secret"]
         with pytest.raises(AuthError, match="token_secret"):
             build_auth(config)
+
+
+class TestRealmEscaping:
+    """`realm` voyage dans un quoted-string du header et n'entre pas dans la
+    signature. Il était interpolé brut."""
+
+    def test_a_quote_in_the_realm_does_not_break_the_header(self):
+        signer = OAuth1Signer("key", "secret", realm='acc"1')
+        header = signer.authorization_header("GET", "https://api.test/items")
+        assert header.startswith('OAuth realm="acc\\"1"')
+
+    def test_a_backslash_is_escaped_first(self):
+        signer = OAuth1Signer("key", "secret", realm="a\\b")
+        header = signer.authorization_header("GET", "https://api.test/items")
+        assert header.startswith('OAuth realm="a\\\\b"')
+
+    def test_an_ordinary_realm_is_untouched(self):
+        signer = OAuth1Signer("key", "secret", realm="1234567")
+        header = signer.authorization_header("GET", "https://api.test/items")
+        assert header.startswith('OAuth realm="1234567"')
+
+    @pytest.mark.parametrize("realm", ["a\rb", "a\nb", "a\x00b"])
+    def test_a_control_character_is_refused(self, realm):
+        with pytest.raises(ValueError, match="control characters"):
+            OAuth1Signer("key", "secret", realm=realm)
+
+    def test_the_realm_still_stays_out_of_the_signature(self):
+        """Deux realms différents, même signature : le realm n'entre pas dans
+        la base string (RFC 5849 §3.4.1)."""
+        base = OAuth1Signer("key", "secret").signature_base_string(
+            "GET", "https://api.test/items", None, None, {"oauth_version": "1.0"}
+        )
+        with_realm = OAuth1Signer("key", "secret", realm='x"y').signature_base_string(
+            "GET", "https://api.test/items", None, None, {"oauth_version": "1.0"}
+        )
+        assert base == with_realm

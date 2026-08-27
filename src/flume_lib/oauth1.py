@@ -17,6 +17,7 @@ historiques encore en OAuth 1.0a — pas un connecteur dédié à un fournisseur
 import base64
 import hashlib
 import hmac
+import re
 import secrets
 import time
 import urllib.parse
@@ -32,6 +33,21 @@ SIGNATURE_METHODS = {
 
 FORM_CONTENT_TYPE = "application/x-www-form-urlencoded"
 _DEFAULT_PORTS = {"http": 80, "https": 443}
+
+# `realm` voyage dans un quoted-string du header et n'entre pas dans la
+# signature (RFC 5849 §3.5.1). Un caractère de contrôle y serait une tentative
+# d'injection de header : urllib3 la refuse déjà, mais sur un message qui ne
+# dit pas d'où elle vient. La refuser ici le dit.
+_REALM_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def quote_realm(realm: str) -> str:
+    """Échappe `realm` pour le quoted-string du header (RFC 9110 §5.6.4).
+
+    Il était interpolé brut : un guillemet dans un identifiant de compte
+    coupait le header en deux, et le serveur lisait un `realm` tronqué.
+    """
+    return realm.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _quote(value) -> str:
@@ -88,6 +104,11 @@ class OAuth1Signer(AuthBase):
         realm: str | None = None,
         signature_method: str = "HMAC-SHA256",
     ):
+        if realm is not None and _REALM_CONTROL_RE.search(realm):
+            raise ValueError(
+                "oauth1: 'realm' must not contain control characters — it "
+                "travels in the Authorization header"
+            )
         if signature_method not in SIGNATURE_METHODS:
             known = ", ".join(sorted(SIGNATURE_METHODS))
             raise ValueError(
@@ -141,7 +162,7 @@ class OAuth1Signer(AuthBase):
         )
         pairs = [f'{_quote(k)}="{_quote(v)}"' for k, v in sorted(oauth_params.items())]
         if self.realm:
-            pairs.insert(0, f'realm="{self.realm}"')
+            pairs.insert(0, f'realm="{quote_realm(self.realm)}"')
         return "OAuth " + ", ".join(pairs)
 
     def __call__(self, request):
