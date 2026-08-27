@@ -285,6 +285,37 @@ def _render_at_path(container, parts: list[str], variables: dict, full_path: str
     return updated
 
 
+def _scope_auth_headers(session, header_names: set) -> None:
+    """Fait retirer par la session ses headers d'authentification lorsqu'une
+    redirection l'emmène vers un autre hôte.
+
+    `requests.Session.rebuild_auth` ne supprime que le header littéral
+    `Authorization`. Un `api_key_header` (défaut `X-API-Key`), ou un
+    `bearer_token` porté par un `header_name` custom, repartait donc tel quel
+    vers l'hôte de destination d'un 302 — y compris avec les stratégies de
+    pagination qui n'appellent pourtant que `base_url`, puisque c'est le
+    serveur, pas la config, qui décide de rediriger.
+
+    `header_names` est partagé par référence : un renouvellement de token qui
+    change de header le fait suivre.
+
+    Posé sur l'instance plutôt que par sous-classe : la classe serait figée à
+    l'import, avant que les tests puissent substituer leur propre session.
+    """
+    inherited = getattr(session, "rebuild_auth", None)
+    should_strip = getattr(session, "should_strip_auth", None)
+    if inherited is None or should_strip is None:
+        return  # session factice : elle ne suit aucune redirection
+
+    def rebuild_auth(prepared_request, response):
+        inherited(prepared_request, response)
+        if should_strip(response.request.url, prepared_request.url):
+            for name in header_names:
+                prepared_request.headers.pop(name, None)
+
+    session.rebuild_auth = rebuild_auth
+
+
 def _build_fetch_page(config: dict, variables: dict | None = None):
     auth = AuthProvider(config.get("auth"))
     retry_config = config.get("retry", {})
@@ -313,7 +344,12 @@ def _build_fetch_page(config: dict, variables: dict | None = None):
     session = requests.Session()
     # headers de la config d'abord : l'auth ne doit jamais être écrasée par eux
     session.headers.update(config.get("headers", {}))
-    session.headers.update(auth.headers())
+    auth_headers = auth.headers()
+    session.headers.update(auth_headers)
+    # Les headers de `config['headers']` sont des littéraux non sensibles
+    # (la validation le garantit) : seuls ceux de l'auth sont suivis.
+    auth_header_names = set(auth_headers)
+    _scope_auth_headers(session, auth_header_names)
     if auth.signer is not None:
         session.auth = auth.signer
     body_key = "json" if body_format == "json" else "data"
@@ -327,7 +363,9 @@ def _build_fetch_page(config: dict, variables: dict | None = None):
     def _request(url: str, params: dict, state: dict):
         if auth.refreshable:
             # renouvellement anticipé quand le endpoint annonce une expiration
-            session.headers.update(auth.headers())
+            renewed = auth.headers()
+            session.headers.update(renewed)
+            auth_header_names.update(renewed)
         kwargs = {"timeout": timeout}
         if method == "GET" and not allow_body_on_get:
             kwargs["params"] = params
@@ -373,7 +411,9 @@ def _build_fetch_page(config: dict, variables: dict | None = None):
             # persiste avec un token neuf, ce n'est pas une expiration et
             # rejouer ne ferait que retarder le diagnostic.
             state["refreshed"] = True
-            session.headers.update(auth.refresh())
+            renewed = auth.refresh()
+            session.headers.update(renewed)
+            auth_header_names.update(renewed)
             raise ExpiredTokenError(_safe_url(url))
         if response.status_code >= 400:
             raise requests.HTTPError(
