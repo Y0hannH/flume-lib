@@ -90,13 +90,13 @@ class TestOffsetPagination:
         assert pages == [[{"id": 1}, {"id": 2}]]
 
     def test_preserves_base_params(self):
-        fetch = make_fetch([[{"id": 1}]])
+        fetch = make_fetch([[{"id": 1}], []])
         list(paginate(fetch, "http://api/x", {"updated_since": "2024-01-01"}, self.CONFIG))
         assert fetch.calls[0][1] == {"updated_since": "2024-01-01", "limit": 2, "offset": 0}
 
     def test_custom_param_names(self):
         config = {"type": "offset", "limit": 5, "limit_param": "top", "offset_param": "skip"}
-        fetch = make_fetch([[{"id": 1}]])
+        fetch = make_fetch([[{"id": 1}], []])
         list(paginate(fetch, "http://api/x", {}, config))
         assert fetch.calls[0][1] == {"top": 5, "skip": 0}
 
@@ -437,17 +437,28 @@ class TestKeysetPagination:
         assert all(p["limit"] == 2 for p in sent)
 
     def test_an_initial_value_seeds_the_first_page(self):
-        fetch = make_fetch([[{"id": 11}]])
+        fetch = make_fetch([[{"id": 11}], []])
         list(paginate(
             fetch, "https://api/items", {}, {**self.CONFIG, "initial_value": 10}
         ))
         assert fetch.calls[0][1]["since_id"] == "10"
 
     def test_a_partial_page_ends_the_pagination(self):
-        fetch = make_fetch([[{"id": 1}]])
+        """Une page partielle jamais precedee d'une page pleine demande une
+        confirmation : elle peut aussi bien signaler une API qui plafonne le
+        `limit` demande. La page suivante, vide, tranche."""
+        fetch = make_fetch([[{"id": 1}], []])
         pages = list(paginate(fetch, "https://api/items", {}, self.CONFIG))
         assert len(pages) == 1
-        assert len(fetch.calls) == 1
+        assert len(fetch.calls) == 2
+
+    def test_a_partial_page_after_a_full_one_ends_it_without_confirmation(self):
+        """Une page pleine deja vue prouve que le `limit` est honore : la
+        confirmation devient inutile, et c'est le cas courant."""
+        fetch = make_fetch([[{"id": 1}, {"id": 2}], [{"id": 3}]])
+        pages = list(paginate(fetch, "https://api/items", {}, self.CONFIG))
+        assert [len(p) for p in pages] == [2, 1]
+        assert len(fetch.calls) == 2
 
     def test_an_empty_page_ends_the_pagination(self):
         fetch = make_fetch([[]])
@@ -537,3 +548,92 @@ class TestPaginationBounds:
         ])
         pages = list(paginate(fetch, "https://api/items", {}, self.OFFSET))
         assert [len(p) for p in pages] == [2, 2, 1]
+
+
+class TestAPICappedPageSize:
+    """Une API qui plafonne la taille de page sous le `limit` demande renvoyait
+    une premiere page « partielle » : la pagination s'arretait au bout d'une
+    page, run marque success, sur une source qui en avait des millions."""
+
+    def _capped(self, cap, total):
+        """API qui sert `cap` lignes par page quoi qu'on lui demande."""
+        def fetch_page(url, params):
+            offset = params["offset"]
+            rows = [{"id": i} for i in range(offset, min(offset + cap, total))]
+            fetch_page.calls.append(dict(params))
+            return {"data": rows}, {}
+        fetch_page.calls = []
+        return fetch_page
+
+    CONFIG = {"type": "offset", "limit": 1000, "items_field": "data"}
+
+    def test_the_whole_source_is_read_despite_the_cap(self):
+        fetch = self._capped(cap=100, total=250)
+        pages = list(paginate(fetch, "http://api/x", {}, self.CONFIG))
+        assert sum(len(p) for p in pages) == 250
+        assert [r["id"] for p in pages for r in p] == list(range(250))
+
+    def test_the_offset_advances_by_what_was_served(self):
+        """`offset += limit` sautait la difference a chaque page, en silence."""
+        fetch = self._capped(cap=100, total=250)
+        list(paginate(fetch, "http://api/x", {}, self.CONFIG))
+        assert [c["offset"] for c in fetch.calls] == [0, 100, 200]
+
+    def test_the_cap_is_reported_as_a_warning(self):
+        warnings = []
+        fetch = self._capped(cap=100, total=250)
+        list(paginate(fetch, "http://api/x", {}, self.CONFIG, warnings))
+        assert len(warnings) == 1
+        assert "100" in warnings[0] and "1000" in warnings[0]
+        assert "not honoured" in warnings[0]
+
+    def test_the_warning_is_emitted_once(self):
+        warnings = []
+        fetch = self._capped(cap=10, total=95)
+        list(paginate(fetch, "http://api/x", {}, self.CONFIG, warnings))
+        assert len(warnings) == 1
+
+    def test_a_source_smaller_than_the_limit_warns_about_nothing(self):
+        """Une source de 42 lignes face a `limit: 1000` produit exactement la
+        meme premiere page qu'une API qui plafonne. Seule la page suivante,
+        vide, les distingue — et il n'y a la aucune degradation."""
+        warnings = []
+        fetch = self._capped(cap=1000, total=42)
+        pages = list(paginate(fetch, "http://api/x", {}, self.CONFIG, warnings))
+        assert sum(len(p) for p in pages) == 42
+        assert warnings == []
+
+
+class TestKeysetCappedPageSize:
+    CONFIG = {
+        "type": "keyset", "key_field": "id", "key_param": "since_id", "limit": 1000,
+    }
+
+    def test_the_whole_source_is_read_despite_the_cap(self):
+        total, cap = 250, 100
+
+        def fetch_page(url, params):
+            since = int(params.get("since_id", -1))
+            rows = [{"id": i} for i in range(since + 1, min(since + 1 + cap, total))]
+            return rows, {}
+
+        warnings = []
+        pages = list(paginate(fetch_page, "http://api/x", {}, self.CONFIG, warnings))
+        assert sum(len(p) for p in pages) == 250
+        assert len(warnings) == 1
+
+
+class TestPageStrategyCappedPageSize:
+    CONFIG = {"type": "page", "size_param": "per_page", "page_size": 1000}
+
+    def test_the_whole_source_is_read_despite_the_cap(self):
+        total, cap = 250, 100
+
+        def fetch_page(url, params):
+            start = (params["page"] - 1) * cap
+            return [{"id": i} for i in range(start, min(start + cap, total))], {}
+
+        warnings = []
+        pages = list(paginate(fetch_page, "http://api/x", {}, self.CONFIG, warnings))
+        assert sum(len(p) for p in pages) == 250
+        assert len(warnings) == 1

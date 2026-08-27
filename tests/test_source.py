@@ -1608,3 +1608,38 @@ class TestBodyOnGet:
         assert "ignored on GET" in result.error_message
         assert http.instances == []
 
+
+
+class TestPaginationWarningsReachTheResult:
+    """Une API qui n'honore pas la taille de page demandee est une degradation,
+    pas un echec : le run reste success et le dit."""
+
+    def test_a_capped_page_size_lands_in_run_result_warnings(self, http, delta):
+        http.next_payloads = [[{"id": 1}], [{"id": 2}], []]
+        config = {**BASE_CONFIG, "pagination": {"type": "offset", "limit": 50}}
+
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert result.rows_loaded == 2
+        assert any("not honoured" in w for w in result.warnings)
+
+    def test_pagination_and_writer_warnings_coexist(self, http, delta):
+        """Les deux canaux alimentent la meme liste : l'un ne doit pas
+        effacer l'autre."""
+        http.next_payloads = [[{"id": 1}], [{"id": 2}], []]
+        delta["write_result"] = ({}, ["column 'x': written as text"])
+        config = {**BASE_CONFIG, "pagination": {"type": "offset", "limit": 50}}
+
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert any("not honoured" in w for w in result.warnings)
+        assert any("written as text" in w for w in result.warnings)
+
+    def test_a_dry_run_reports_them_too(self, http, delta):
+        http.next_payloads = [[{"id": 1}], [{"id": 2}], []]
+        config = {**BASE_CONFIG, "pagination": {"type": "offset", "limit": 50}}
+
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH, dry_run=True)
+
+        assert any("not honoured" in w for w in result.warnings)

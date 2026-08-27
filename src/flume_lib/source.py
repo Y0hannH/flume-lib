@@ -736,11 +736,15 @@ def run_source(
 
         params = render(params, variables)
 
+        # `warnings` est alimentée par la pagination, puis complétée par le
+        # writer : les deux signalent des dégradations qui ne font pas
+        # échouer le run.
         pages = paginate(
             _build_fetch_page(config, variables),
             config["base_url"],
             params,
             config.get("pagination"),
+            warnings,
         )
 
         if dry_run:
@@ -773,7 +777,9 @@ def run_source(
                 # Ce que l'appelant voit doit être ce qui est réellement dans
                 # la table, y compris quand le run casse en cours de route.
                 rows_loaded = writer.rows_written
-                warnings = writer.warnings
+                # extend, pas une affectation : celles de la pagination sont
+                # déjà dans la liste
+                warnings.extend(writer.warnings)
 
         status = "success"
     except Exception as exc:  # noqa: BLE001 — contrat : ne jamais lever

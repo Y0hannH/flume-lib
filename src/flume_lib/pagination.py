@@ -76,8 +76,67 @@ def extract_records(
     return unwrapped
 
 
+class _PartialPageRule:
+    """Décide si une page plus petite que demandé termine la pagination.
+
+    Une page partielle est la dernière — sauf quand l'API n'honore pas la
+    taille demandée. Les deux cas sont indiscernables sur une seule page :
+    `limit: 1000` face à une API qui plafonne à 100 renvoie exactement ce que
+    renvoie une source de 100 lignes. La lib s'arrêtait donc au bout d'une
+    page, run marqué `success`, sur une source qui en avait des millions.
+
+    Une requête de plus tranche, et seulement quand le doute existe : une
+    page pleine déjà vue prouve que la taille est honorée, et c'est le cas
+    courant. Le surcoût est donc d'un appel, sur les seules sources qui n'ont
+    jamais rempli une page.
+    """
+
+    def __init__(self, requested: int, param_name: str, warnings: list | None):
+        self._requested = requested
+        self._param_name = param_name
+        self._warnings = warnings
+        # taille réellement servie : la demandée jusqu'à preuve du contraire
+        self._served = requested
+        self._seen_full = False
+        self._unconfirmed = False
+
+    def stop_after(self, count: int) -> bool:
+        """Cette page termine-t-elle la pagination ? Appelé après chaque page
+        **non vide**, une fois qu'elle a été livrée."""
+        if self._unconfirmed:
+            # une page non vide derrière une page partielle : la partielle
+            # n'était pas la fin, l'API plafonne bien la taille demandée
+            self._unconfirmed = False
+            self._warn()
+        if count >= self._served:
+            self._seen_full = True
+            return False
+        if self._seen_full or self._served != self._requested:
+            # taille honorée, ou plafond déjà constaté : une page partielle
+            # est alors bien la dernière
+            return True
+        self._served = count
+        self._unconfirmed = True
+        return False
+
+    def _warn(self) -> None:
+        if self._warnings is None:
+            return
+        self._warnings.append(
+            f"pagination: the source serves pages of {self._served} rows while "
+            f"'{self._param_name}' asks for {self._requested} — the requested "
+            "size is not honoured. Pagination continued at the size actually "
+            f"served; setting '{self._param_name}' to {self._served} saves the "
+            "extra request it took to establish that."
+        )
+
+
 def paginate_offset(
-    fetch_page: Callable, base_url: str, params: dict, pagination_config: dict
+    fetch_page: Callable,
+    base_url: str,
+    params: dict,
+    pagination_config: dict,
+    warnings: list | None = None,
 ) -> Iterator[list]:
     limit = pagination_config.get("limit", 100)
     limit_param = pagination_config.get("limit_param", "limit")
@@ -85,6 +144,7 @@ def paginate_offset(
     items_field = pagination_config.get("items_field")
     record_field = pagination_config.get("record_field")
 
+    rule = _PartialPageRule(limit, limit_param, warnings)
     offset = 0
     while True:
         page_params = {**params, limit_param: limit, offset_param: offset}
@@ -93,13 +153,19 @@ def paginate_offset(
         if not records:
             return
         yield records
-        if len(records) < limit:
+        # jamais `+= limit` : une API qui sert moins que demandé ferait sauter
+        # la différence à chaque page, en silence
+        offset += len(records)
+        if rule.stop_after(len(records)):
             return
-        offset += limit
 
 
 def paginate_next_link(
-    fetch_page: Callable, base_url: str, params: dict, pagination_config: dict
+    fetch_page: Callable,
+    base_url: str,
+    params: dict,
+    pagination_config: dict,
+    warnings: list | None = None,
 ) -> Iterator[list]:
     next_field = pagination_config.get("next_field", "next")
     items_field = pagination_config.get("items_field")
@@ -148,7 +214,11 @@ def _read_total_pages(payload, headers, header_name, field_path) -> int:
 
 
 def paginate_page(
-    fetch_page: Callable, base_url: str, params: dict, pagination_config: dict
+    fetch_page: Callable,
+    base_url: str,
+    params: dict,
+    pagination_config: dict,
+    warnings: list | None = None,
 ) -> Iterator[list]:
     """Pagination par numéro de page. Si 'total_pages_header' ou
     'total_pages_field' est renseigné, le nombre total de pages est lu dans
@@ -163,6 +233,7 @@ def paginate_page(
     items_field = pagination_config.get("items_field")
     record_field = pagination_config.get("record_field")
 
+    rule = _PartialPageRule(page_size, size_param or "page_size", warnings)
     total_pages = None
     page = start_page
     while True:
@@ -183,13 +254,19 @@ def paginate_page(
         if total_pages is not None:
             if page - start_page + 1 >= total_pages:
                 return
-        elif not records or (page_size and len(records) < page_size):
+        elif not records:
+            return
+        elif page_size and rule.stop_after(len(records)):
             return
         page += 1
 
 
 def paginate_cursor(
-    fetch_page: Callable, base_url: str, params: dict, pagination_config: dict
+    fetch_page: Callable,
+    base_url: str,
+    params: dict,
+    pagination_config: dict,
+    warnings: list | None = None,
 ) -> Iterator[list]:
     """Pagination par curseur opaque. Le curseur de la page suivante est lu
     par chemin pointé dans la réponse ('cursor_field') et renvoyé tel quel
@@ -264,7 +341,11 @@ def _advances(new_key, previous_key) -> bool:
 
 
 def paginate_keyset(
-    fetch_page: Callable, base_url: str, params: dict, pagination_config: dict
+    fetch_page: Callable,
+    base_url: str,
+    params: dict,
+    pagination_config: dict,
+    warnings: list | None = None,
 ) -> Iterator[list]:
     """Pagination par clé (keyset / seek). Chaque page est filtrée par la
     valeur de `key_field` du dernier enregistrement de la page précédente,
@@ -295,6 +376,7 @@ def paginate_keyset(
     record_field = pagination_config.get("record_field")
     label = f"pagination keyset: key '{key_field}'"
 
+    rule = _PartialPageRule(limit, limit_param, warnings) if limit else None
     key = pagination_config.get("initial_value")
     while True:
         page_params = dict(params)
@@ -321,8 +403,9 @@ def paginate_keyset(
                 f"{next_key!r}) — the source is not sorted by '{key_field}', "
                 "or its values are not unique"
             )
-        # une page incomplète est la dernière, comme en offset
-        if limit is not None and len(records) < limit:
+        # une page incomplète est la dernière, comme en offset — sous la même
+        # réserve : encore faut-il que l'API honore la taille demandée
+        if rule is not None and rule.stop_after(len(records)):
             return
         key = next_key
 
@@ -393,9 +476,15 @@ def paginate(
     base_url: str,
     params: dict,
     pagination_config: dict | None,
+    warnings: list | None = None,
 ) -> Iterator[list]:
     """Point d'entrée : sélectionne la stratégie selon pagination_config['type'].
-    Sans config de pagination, effectue un appel unique."""
+    Sans config de pagination, effectue un appel unique.
+
+    `warnings` est alimenté par les stratégies qui constatent une dégradation
+    sans avoir à échouer — une API qui n'honore pas la taille de page
+    demandée. Le run reste `success`, et le dit.
+    """
     if not pagination_config or pagination_config.get("type") in (None, "none"):
         payload, _ = fetch_page(base_url, params)
         records = extract_records(
@@ -413,6 +502,6 @@ def paginate(
             f"Unknown pagination type: '{pagination_config['type']}'"
         )
     yield from _bounded(
-        strategy(fetch_page, base_url, params, pagination_config),
+        strategy(fetch_page, base_url, params, pagination_config, warnings),
         pagination_config,
     )
