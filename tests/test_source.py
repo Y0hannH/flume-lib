@@ -2,6 +2,7 @@
 Aucun appel réseau ni écriture Delta réels — requests.Session et les helpers
 Delta sont mockés."""
 
+import json
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from unittest.mock import MagicMock
@@ -12,6 +13,7 @@ from flume_lib.oauth1 import OAuth1Signer
 from flume_lib.source import (
     LINEAGE_INGESTED_AT,
     LINEAGE_RUN_ID,
+    MAX_ERROR_DETAIL_CHARS,
     RetryableHTTPError,
     _build_wait,
     _parse_retry_after,
@@ -28,10 +30,13 @@ TABLES_PATH = "/tmp/Tables"  # chemin non-Fabric : renvoyé tel quel
 
 
 class FakeResponse:
-    def __init__(self, payload, headers=None, status_code=200):
+    def __init__(self, payload, headers=None, status_code=200, text=None):
         self._payload = payload
         self.headers = headers or {}
         self.status_code = status_code
+        # Une réponse réelle porte toujours un corps, y compris en erreur :
+        # le message d'un 4xx en reprend un extrait.
+        self.text = json.dumps(payload) if text is None else text
 
     def json(self):
         return self._payload
@@ -802,6 +807,91 @@ class TestTemplatePaths:
 
         assert result.status == "failed"
         assert "forbidden character" in result.error_message
+
+
+def _failing_run(status_code, body, config=None):
+    """Joue un run dont le premier appel échoue avec ce statut et ce corps."""
+
+    class Failing(FakeSession):
+        def request(self, method, url, **kwargs):
+            self.calls.append({"method": method, "url": url})
+            return FakeResponse({}, status_code=status_code, text=body)
+
+    import flume_lib.source as source_module
+
+    source_module.requests.Session = Failing
+    Failing.next_payloads = []
+    try:
+        return run_source(config or BASE_CONFIG, lakehouse_tables_path=TABLES_PATH)
+    finally:
+        source_module.requests.Session = FakeSession
+
+
+class TestHTTPErrorDetail:
+    """Un 4xx n'est pas rejoué : le corps de la réponse est la seule chose
+    qui dise pourquoi l'API refuse. error_message doit le porter, sinon
+    diagnostiquer impose de rejouer la requête à la main."""
+
+    def test_the_api_explanation_reaches_error_message(self, http, delta):
+        result = _failing_run(400, '{"error": "unknown field created_at"}')
+
+        assert result.status == "failed"
+        assert "400" in result.error_message
+        assert "unknown field created_at" in result.error_message
+
+    def test_an_indented_body_does_not_spend_its_budget_on_newlines(
+        self, http, delta
+    ):
+        body = """{
+    "error": {
+        "message": "bad range"
+    }
+}"""
+
+        result = _failing_run(400, body)
+
+        assert '"message": "bad range"' in result.error_message
+        assert "\n" not in result.error_message
+
+    def test_a_verbose_body_is_truncated(self, http, delta):
+        result = _failing_run(422, "x" * 5_000)
+
+        assert "422" in result.error_message
+        assert result.error_message.count("x") == MAX_ERROR_DETAIL_CHARS
+
+    def test_an_empty_body_leaves_the_message_untouched(self, http, delta):
+        result = _failing_run(404, "")
+
+        assert result.error_message.endswith("HTTP 404 on https://api.test/items")
+
+    def test_a_body_that_cannot_be_read_does_not_mask_the_status(self, http, delta):
+        class Undecodable:
+            """Ne peut pas hériter de FakeResponse : `text` y est un attribut,
+            et le remplacer par une property le rendrait inassignable."""
+
+            status_code = 400
+            headers: dict = {}
+
+            @property
+            def text(self):
+                raise UnicodeDecodeError("utf-8", b"", 0, 1, "boom")
+
+        class Failing(FakeSession):
+            def request(self, method, url, **kwargs):
+                self.calls.append({"method": method, "url": url})
+                return Undecodable()
+
+        import flume_lib.source as source_module
+
+        source_module.requests.Session = Failing
+        Failing.next_payloads = []
+        try:
+            result = run_source(BASE_CONFIG, lakehouse_tables_path=TABLES_PATH)
+        finally:
+            source_module.requests.Session = FakeSession
+
+        assert result.status == "failed"
+        assert "400" in result.error_message
 
 
 class TestErrorMessagesLeakNothing:

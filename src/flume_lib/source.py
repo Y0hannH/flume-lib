@@ -114,6 +114,27 @@ class RetryableAPIError(RetryableError):
     """Même chose, mais annoncée comme transitoire par l'API (throttling)."""
 
 
+def _response_detail(response) -> str:
+    """Corps d'une réponse d'erreur, tronqué, pour le message d'exception.
+
+    Un 4xx est définitif : il n'est pas rejoué, et le seul endroit où l'API
+    dit *pourquoi* elle refuse est son corps. Sans lui, `error_message` se
+    réduit à un code et une URL, et le diagnostic impose de rejouer la
+    requête à la main.
+
+    Même borne que les erreurs applicatives de `_check_response_errors` : le
+    message part dans log_runs, et une réponse d'erreur recopie volontiers la
+    requête entière. Les blancs sont écrasés pour qu'un corps indenté ne
+    dépense pas sa troncature en retours à la ligne.
+    """
+    try:
+        body = response.text
+    except Exception:  # noqa: BLE001 — un corps illisible ne masque pas le statut
+        return ""
+    body = " ".join((body or "").split())
+    return f": {body[:MAX_ERROR_DETAIL_CHARS]}" if body else ""
+
+
 def _safe_url(url: str) -> str:
     """URL sans query string, pour les messages d'erreur. `error_message` est
     persisté dans la table Delta log_runs, lisible par tout le lakehouse : une
@@ -417,7 +438,8 @@ def _build_fetch_page(config: dict, variables: dict | None = None):
             raise ExpiredTokenError(_safe_url(url))
         if response.status_code >= 400:
             raise requests.HTTPError(
-                f"HTTP {response.status_code} on {_safe_url(url)}",
+                f"HTTP {response.status_code} on {_safe_url(url)}"
+                f"{_response_detail(response)}",
                 response=response,
             )
         payload = response.json()

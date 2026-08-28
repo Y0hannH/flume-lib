@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here. Versions follow [semantic versioning](https://semver.org/); until 1.0.0, minor versions may contain breaking changes — these are always listed first.
 
+## [0.17.0] — 2026-08-28
+
+A `4xx` said that it had failed, never why. The response body — the only place an API explains an error it will not replay — was not read.
+
+### Changed
+
+- **A `4xx` now says what the API objected to.** The message read `HTTP 400 on https://api.test/items` and stopped there: the status, the path, nothing else. But a client error is not retried — it is a permanent verdict on the request — and the only place the API explains that verdict is the response body, which was never read. Diagnosing a `400` therefore meant leaving `run_source` and replaying the call by hand with a patched session, for a source whose URL, auth and body the library had just built. The body is now appended to the message, whitespace collapsed, capped at the 500 characters that already bound the application errors of a `200` — the same reasoning, applied to the case that had been left out. Statuses that *are* retried (`429`, `5xx`) are unchanged: they carry no verdict to read, and their body would be stored once per attempt. The URL keeps its query string stripped; what is new in `log_runs` is the body, and `docs/security.md` says so — an error response often quotes the request it rejected, so a filter sent in the body can come back in the table.
+
+### Fixed
+
+- **The `%pip install` pins name the version being released.** The 0.16.0 release commit bumped `pyproject.toml` and `__init__.py` but not the pinned versions in the README and the eight `examples/`, which still read `flume-lib==0.15.0` — step 1 of the release procedure, and the reason it insists these belong to the release commit: the tagged tree tells readers to install the previous version, and so does every artifact built from it. They are on 0.17.0 here.
+
 ## [0.16.0] — 2026-08-27
 
 A full audit of the library, and what it turned up. Two silent data-loss paths, one credential leak into a table the whole lakehouse can read, one guard that failed legitimate runs, and a conversion loop asking the same question six million times per batch. Nothing here is a new feature; everything here is something the code claimed and did not do.
