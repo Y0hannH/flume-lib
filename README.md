@@ -174,11 +174,13 @@ Some APIs cap how far an offset may go (100 000 is a common ceiling). `keyset` i
 
 ### Incremental (watermark)
 
-When `incremental.enabled`, the last watermark is read from `<log_schema>.watermark` and sent as a query param (`param_name`). After a **successful** run only, the max of `incremental.field` over the loaded records becomes the new watermark.
+When `incremental.enabled`, the last watermark is read from `<log_schema>.watermark` and sent as a query param (`param_name`). After a **successful** run only, the max of `incremental.field` over the loaded records becomes the new watermark — and the watermark only ever moves forward (`allow_regression` to opt out).
 
 With `"inject": "body_template"` the watermark is substituted into the `{placeholder}` markers of `body` instead — for APIs whose filter lives inside the request payload, such as an SQL-over-REST endpoint. `initial_value` provides the floor used on the very first run, and `value_format` validates the watermark before it is used.
 
 `"checkpoint": true` commits the watermark after each batch instead of at the end of the run, so an interrupted run resumes where it stopped — see [Batched writes](#batched-writes).
+
+APIs filtered by a date window (`Date_From`/`Date_To`) get `incremental.window` and `advance` — the watermark follows the window that was requested rather than the data returned — plus `lookback` for late-recorded events and `run_source_windows` to walk a long period. `RunResult.watermark_before` / `watermark_after` say whether a run moved the source at all. See [docs/configuration.md#reading-the-source-by-window](docs/configuration.md#reading-the-source-by-window).
 
 ### Batched writes
 
@@ -198,6 +200,8 @@ By default a run appends, which makes a backfill a one-shot: rerunning a slice t
 ```
 
 The window described by the predicate is replaced rather than appended to, so the run is **rerunnable** — however many times it runs, one copy of January remains. `mode: "overwrite"` does the same for the whole table, for a reference table reloaded in full. `partition_by` sets the partition columns at creation.
+
+`mode: "merge"` with `merge_keys` is the third way: a row whose key exists is updated, the others are inserted, so an object that comes back changed is held once, in its latest version — see [docs/configuration.md#merge--keep-the-latest-version-of-each-object](docs/configuration.md#merge--keep-the-latest-version-of-each-object).
 
 delta-rs refuses to commit rows falling outside the predicate, so a predicate and a query that disagree fail the run instead of replacing the wrong window — derive both from the same bounds. A run that returns zero rows replaces nothing and says so in `RunResult.warnings`: an API that is down answers "0 rows" too, and emptying a window on that signal would destroy data without anything having failed. Details, and why this cannot be combined with `incremental.checkpoint`: [docs/configuration.md#write-mode](docs/configuration.md#write-mode).
 

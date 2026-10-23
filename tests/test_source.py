@@ -2032,7 +2032,6 @@ class TestWindowedAdvance:
 
 
 class TestRunResultProgress:
-
     def test_positions_on_a_first_run_start_at_initial_value(self, http, delta):
         config = _date_window_config()
         http.next_payloads = [_entries("2026-09-10")]

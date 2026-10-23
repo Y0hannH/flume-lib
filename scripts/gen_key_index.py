@@ -34,6 +34,7 @@ Sans dépendance : stdlib seule, plus la lib elle-même.
 
 import argparse
 import ast
+import copy
 import pathlib
 import sys
 
@@ -60,6 +61,7 @@ _ENUM_VALUE_FORMATS = _enum(VALUE_FORMATS)
 _ENUM_NORMALIZERS = _enum(NORMALIZERS)
 _ENUM_INJECTS = _enum(V._INCREMENTAL_INJECTS)
 _ENUM_WRITE_MODES = _enum(V._WRITE_MODES)
+_ENUM_ADVANCES = _enum(V._INCREMENTAL_ADVANCES)
 _ENUM_SIGNATURES = _enum(sorted(SIGNATURE_METHODS))
 
 
@@ -244,7 +246,23 @@ _REQUIRED_INLINE = (
         "incremental": {"enabled": True, "field": "updated_at", "param_name": "since"}}),
     ("write", "replace_where", {
         "write": {"mode": "replace_where", "replace_where": "id > 0"}}),
+    ("write", "merge_keys", {
+        "write": {"mode": "merge", "merge_keys": ["id"]}}),
+    # `incremental.window` est un sous-bloc : voir _NESTED_SCOPES. Le fragment
+    # porte aussi `params`, que la fenêtre doit pouvoir désigner.
+    ("incremental.window", "upper_param", {
+        "params": {"d": "2026-01-31"},
+        "incremental": {"enabled": True, "field": "ts", "param_name": "since",
+                        "window": {"upper_param": "d", "upper_value": "2026-01-31"}}}),
+    ("incremental.window", "upper_value", {
+        "params": {"d": "2026-01-31"},
+        "incremental": {"enabled": True, "field": "ts", "param_name": "since",
+                        "window": {"upper_param": "d", "upper_value": "2026-01-31"}}}),
 )
+
+# Portées qui désignent un sous-bloc d'un bloc du config : le chemin à suivre
+# dans le fragment pour atteindre l'objet dont on retire la clé.
+_NESTED_SCOPES = {"incremental.window": ("incremental", "window")}
 
 
 def prove_required() -> set[tuple[str, str]]:
@@ -253,8 +271,19 @@ def prove_required() -> set[tuple[str, str]]:
     générer plutôt que de publier l'erreur."""
     proven = set()
     for scope, key, fragment in _REQUIRED_INLINE:
-        block = next(iter(fragment))
-        broken = {**_BASE, **{block: {k: v for k, v in fragment[block].items() if k != key}}}
+        if scope in _NESTED_SCOPES:
+            broken = copy.deepcopy(fragment)
+            node = broken
+            for part in _NESTED_SCOPES[scope]:
+                node = node[part]
+            del node[key]
+            broken = {**_BASE, **broken}
+        else:
+            block = next(iter(fragment))
+            broken = {
+                **_BASE,
+                **{block: {k: v for k, v in fragment[block].items() if k != key}},
+            }
         try:
             V.validate_config(broken)
         except V.ConfigError:
@@ -284,6 +313,8 @@ _NOTES = {
     ("config", "batch_size"): "rows per Delta commit; caps the memory a run uses",
     ("config", "allow_body_on_get"):
         "lets a GET carry a body — refused by default, most APIs ignore it",
+    ("config", "fail_on_empty"):
+        "fails the run when no row was loaded, before the watermark moves",
     ("pagination.*", "items_field"):
         "dotted path; without it, `data`/`items`/`results`/`value` are probed",
     ("pagination.*", "record_field"): "extracts a sub-object out of each record",
@@ -314,10 +345,26 @@ _NOTES = {
         f"one of {_ENUM_NORMALIZERS}; reshapes the watermark before it is "
         "**sent**, not as stored",
     ("incremental", "checkpoint"):
-        "commits the watermark batch by batch; incompatible with any `write.mode` but `append`",
+        "commits the watermark batch by batch; incompatible with a replacing `write.mode`",
+    ("incremental", "allow_regression"):
+        "lets a run lower the stored watermark; off, it only ever moves forward",
+    ("incremental", "window"):
+        "declares the upper bound sent in `params`; needed by any `advance` but `field_max`",
+    ("incremental", "advance"):
+        f"one of {_ENUM_ADVANCES}; what the watermark becomes — the last two need `window`",
+    ("incremental", "lookback"):
+        "days; sends `watermark - lookback`, stores the watermark unshifted; "
+        "needs a `yyyy-MM-dd` watermark",
+    ("incremental.window", "upper_param"):
+        "must be a key of `params`",
+    ("incremental.window", "upper_value"):
+        "must equal `params[upper_param]`; at least the watermark, checked at run time",
     ("write", "mode"): f"one of {_ENUM_WRITE_MODES}",
     ("write", "replace_where"): "SQL predicate over the target table; not templated",
     ("write", "partition_by"): "Delta partition columns",
+    ("write", "merge_keys"):
+        "columns identifying a row; required with `merge`, which accepts `checkpoint`",
+    ("write", "when_matched"): "only `update` for now, which is also the default",
     ("retry", "max_retry_after_seconds"): "ceiling on a `Retry-After` the server asks for",
     ("errors", "path"): "where the error envelope sits in a 200 response",
     ("errors", "retryable_codes"): "codes retried like a 5xx instead of failing the run",
@@ -341,6 +388,7 @@ _NOTES = {
 _BLOCK_KEYS = {
     ("config", "auth"), ("config", "pagination"), ("config", "incremental"),
     ("config", "retry"), ("config", "errors"), ("config", "write"),
+    ("incremental", "window"),
 }
 
 
@@ -371,6 +419,10 @@ def _scopes() -> list[tuple[str, tuple[str, ...], set[str]]]:
         required = {k for group in V._AUTH_REQUIRED.get(name, ()) for k in group}
         out.append((f"auth.{name}", keys, required))
     out.append(("incremental", V._INCREMENTAL_KEYS, set()))
+    out.append((
+        "incremental.window", V._INCREMENTAL_WINDOW_KEYS,
+        set(V._INCREMENTAL_WINDOW_KEYS),
+    ))
     out.append(("write", V._WRITE_KEYS, set()))
     out.append(("retry", V._RETRY_KEYS, set()))
     out.append(("errors", V._ERRORS_KEYS, set()))

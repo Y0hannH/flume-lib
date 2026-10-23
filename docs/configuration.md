@@ -39,7 +39,8 @@ Looking something up rather than reading through? [cookbook.md](cookbook.md) map
 | `incremental` | object | no | disabled | See [Incremental](#incremental-watermark). |
 | `target_schema` | string | **yes** | — | Destination schema for the data (schema-enabled lakehouse required). Letters/digits/underscore only. |
 | `target_table` | string | **yes** | — | Destination table, written with `schema_mode=merge`. Letters/digits/underscore only. |
-| `write` | object | no | append | How the target table is written: append, full overwrite, or replacement of one window. See [Write mode](#write-mode). |
+| `write` | object | no | append | How the target table is written: append, full overwrite, replacement of one window, or merge on a key. See [Write mode](#write-mode). |
+| `fail_on_empty` | boolean | no | `false` | Fails the run when it loads no row — before the watermark moves. See [Incremental](#incremental-watermark). |
 | `batch_size` | integer | no | `50000` | Rows buffered before each Delta write. Bounds the memory of a run. See [Batched writes](#batched-writes). |
 | `retry` | object | no | see [Retry](#retry) | HTTP retry policy. |
 | `timeout_seconds` | number | no | `60` | Timeout of each data HTTP request. |
@@ -295,7 +296,16 @@ run_source(config, lakehouse_tables_path=..., storage_options=..., log_schema=..
 | `log_schema` | str | `flume` | Schema of the technical tables `watermark` and `log_runs`. |
 | `dry_run` | bool | `False` | See [Dry run](#dry-run). |
 
-Returns a `RunResult` with `source_name`, `status` (`success`/`failed`), `rows_loaded`, `error_message` (None on success), `start_ts`, `end_ts` (ISO 8601 UTC), `run_id` (UUID), and `sample` (dry run only). **Never raises.**
+Returns a `RunResult` with `source_name`, `status` (`success`/`failed`), `rows_loaded`, `error_message` (None on success), `start_ts`, `end_ts` (ISO 8601 UTC), `run_id` (UUID), `warnings`, and `sample` (dry run only). **Never raises.**
+
+| Field | Set when | Content |
+|---|---|---|
+| `watermark_before` | `incremental.enabled` | Where the run started: the stored watermark, or `initial_value` on a first run (text). |
+| `watermark_after` | `incremental.enabled` | Where the next run will start. **Equal to `watermark_before` means the run did not advance the source**, whatever `rows_loaded` says. After a failed run it is the last watermark actually committed. |
+| `window_end` | `incremental.window` | The upper bound the request carried (`window.upper_value`). |
+| `rows_inserted`, `rows_updated` | `write.mode: "merge"` | Rows the merge added and rows it updated. `rows_loaded` stays "rows processed" — before in-batch de-duplication. |
+
+The same functions are importable beside `run_source`: `read_watermark`, `write_watermark`, `reset_watermark`, `resolve_lakehouse_tables_path` and `run_source_windows` (see [Reading the source by window](#reading-the-source-by-window)).
 
 All four parameters worked through, with the cases each one exists for: [examples/run_options.py](../examples/run_options.py).
 
@@ -746,12 +756,14 @@ Data is always committed **before** its watermark. If the watermark commit fails
 
 ## Write mode
 
-By default every run **appends**. That is the safe behavior and it stays the default, but it makes a backfill a one-shot operation: rerunning a slice that failed halfway, or reloading a month whose source data was corrected, adds a second copy of every row. `write` gives the two ways out.
+By default every run **appends**. That is the safe behavior and it stays the default, but it makes a backfill a one-shot operation: rerunning a slice that failed halfway, or reloading a month whose source data was corrected, adds a second copy of every row. `write` gives three ways out.
 
 | Key | Required | Description |
 |---|---|---|
-| `mode` | no (default `append`) | `append`, `overwrite`, or `replace_where`. |
+| `mode` | no (default `append`) | `append`, `overwrite`, `replace_where`, or `merge`. |
 | `replace_where` | **yes** with `mode: "replace_where"` | SQL predicate over the **target table**. The rows it matches are deleted, and the run's rows written in their place — Delta's `replaceWhere`. |
+| `merge_keys` | **yes** with `mode: "merge"` | Columns that identify a row. A row whose key exists is updated, the others are inserted. |
+| `when_matched` | no (default `update`) | What a matching row does. Only `update` exists for now. |
 | `partition_by` | no | Partition columns of the target table. Fixed at creation. |
 
 ```json
@@ -786,6 +798,26 @@ A source under `batch_size` writes one batch and never sees this: the replacemen
 The replacement happens **on the first batch only**; later batches of the same run append. Applying the predicate to every batch would make the batches of one run erase each other, leaving a 300 000-row run with only its last 50 000.
 
 That is also why `checkpoint` is refused with a replacing mode: resuming mid-run would restart from the watermark and replace the window a second time, erasing what the interrupted run had already written into it. A backfill is replayed from the start of its window, not from its middle — the combination fails validation.
+
+### `merge` — keep the latest version of each object
+
+`replace_where` needs a window you can describe in terms of **columns of the target table**. Some sources cannot give you one: an invoice reappears, changed, when it is paid; the date the API filters on is not a field of the response. There is no predicate to write. `"mode": "merge"` identifies the row instead:
+
+```json
+"write": {"mode": "merge", "merge_keys": ["Invoice_ID"]}
+```
+
+Each batch is merged into the table (Delta's `MERGE`: `when matched update all`, `when not matched insert all`). Every column of a matching row is replaced — `_flume_run_id` and `_flume_ingested_at` included, so a row always names the run that last wrote it — and a row with a new key is inserted. Rerunning the same window leaves the row count unchanged.
+
+- **The table is created by the first batch**, through the same write path as `append`, with the same type inference. A new column in a later batch is added to the table (`merge_schema`); a column that exists keeps the table's type, so a batch of integers merges into a column of floats.
+- **Duplicate keys inside one batch are collapsed before the merge**, the last occurrence winning: delta-rs refuses a `MERGE` where several incoming rows match one target row, and an API that returns two versions of an object in one response is exactly that.
+- **A record without a value for a key fails the run**, before anything is written: `NULL` never equals `NULL`, so such a row would match nothing and be inserted again at every run.
+- **It is idempotent**, so — unlike the replacing modes — it is allowed with [`incremental.checkpoint`](#resuming-with-incrementalcheckpoint): resuming replays rows that simply update.
+- **`rows_inserted` and `rows_updated`** on `RunResult` are the counts delta-rs reports, summed over the batches of the run. A key first inserted by one batch and updated by a later batch of the same run counts once in each.
+- **Nested values** (a list of lines inside an invoice) are stored as a JSON string, like everywhere else; they are compared as part of the row, not as part of the key.
+- **A source that returns nothing changes nothing**, as for the other modes; under `incremental` the run says so in `warnings`.
+
+A merge rewrites the data files that hold matching keys, so it costs more than an append on a large table. Partition on a column your keys correlate with if that matters. It needs a delta-rs with `merge_schema` on `DeltaTable.merge` (the 1.6 line used by the Fabric bundle has it).
 
 ### Every mode side by side
 
@@ -831,12 +863,67 @@ The flag only lifts a refusal; it changes nothing for a config that does not set
 | `value_format` | **yes** with `body_template`, otherwise no (default `any`) | Validation applied to the watermark before it is used: `any`, `numeric`, `iso_date`, `iso_datetime`. |
 | `normalize` | no (default `none`) | Reshapes the watermark **before it is sent**: `none` leaves it exactly as read, `utc_iso` converts it to UTC in `2026-08-25T12:57:44.000Z` form. For an API that dates its records with a local offset but only filters in UTC. |
 | `checkpoint` | no (default `false`) | Commits the watermark after **each batch** instead of once at the end, making an interrupted run resumable. Requires the source to return its rows sorted by `field`. See [Batched writes](#batched-writes). |
+| `allow_regression` | no (default `false`) | Lets a run lower the stored watermark. Off, the watermark only moves forward. See [The watermark only moves forward](#the-watermark-only-moves-forward). |
+| `window` | no | `{"upper_param", "upper_value"}`: the upper bound the request carries. Required by any `advance` but `field_max`. See [Reading the source by window](#reading-the-source-by-window). |
+| `advance` | no (default `field_max`) | What the watermark becomes at the end of a run: `field_max`, `field_max_capped` or `upper_bound`. |
+| `lookback` | no | Days. Sends `watermark - lookback`, stores the watermark unshifted. Needs a `yyyy-MM-dd` watermark. |
 
-Behavior: the last watermark is read from `<log_schema>.watermark` at run start (`initial_value` is used on the very first run, and no param is sent if neither exists); the new watermark is written **only if the run succeeded** and at least one record was loaded — unless [`checkpoint`](#resuming-with-incrementalcheckpoint) is on, in which case it advances batch by batch.
+Behavior: the last watermark is read from `<log_schema>.watermark` at run start (`initial_value` is used on the very first run, and no param is sent if neither exists); the new watermark is written **only if the run succeeded**, only if there is something to write (a record carrying `field`, or an `upper_bound`), and only if it is **ahead** of the stored one — unless [`checkpoint`](#resuming-with-incrementalcheckpoint) is on, in which case it advances batch by batch.
+
+### The watermark only moves forward
+
+A run whose largest `field` is lower than the stored watermark used to *lower* it, so that the next run reloaded — and in append mode duplicated — everything in between. The candidate is now compared with the stored value and written only if it is strictly greater. The comparison is aware of what it is comparing: two `yyyy-MM-dd` values are compared as dates, two other texts lexicographically (right for ISO 8601 timestamps), and a number against a numeric text as numbers — the table stores the watermark as text, and the maximum of an integer `field` is an integer. Two values that cannot be compared (a text watermark against an integer field) are **not written**, and `RunResult.warnings` says so.
+
+`"allow_regression": true` restores the previous behavior: any candidate different from the stored value is written. It exists for a `field` that legitimately goes backwards, such as a counter that restarts.
+
+With `checkpoint`, the sort check compares batches **with each other**, never with the stored watermark: a first batch below it is a source returning older rows, not an unsorted source.
+
+### Reading the source by window
+
+Some APIs take a date window — `Date_From`, `Date_To` — rather than an open-ended "changed since". `field_max` was written for the second kind. On a window it is unsafe, because `field` is only ever an approximation of the date the server filtered on:
+
+- a row **beyond the upper bound** (the field is a different date than the filter date) sets the watermark past the window, and the interval in between is never requested;
+- a window whose lower bound is inclusive keeps returning the boundary day: `rows_loaded > 0`, watermark unmoved;
+- an empty window writes nothing, and is requested again.
+
+`window` and `advance` give the watermark a source of truth other than the data:
+
+```json
+"params": {"Date_To": "2026-09-28"},
+"incremental": {
+  "enabled": true, "field": "Last_Activity_Date", "param_name": "Date_From",
+  "window": {"upper_param": "Date_To", "upper_value": "2026-09-28"},
+  "advance": "upper_bound"
+}
+```
+
+| `advance` | The watermark becomes | Use it when |
+|---|---|---|
+| `field_max` (default) | The largest `field`, as before (after the forward-only rule above). | The usual "changed since" API. **Unsafe on a window**, as above. |
+| `field_max_capped` | `min(largest field, window.upper_value)` | `field` is trustworthy up to the bound, but may contain outliers beyond it. Still writes nothing on an empty window. |
+| `upper_bound` | `window.upper_value`, on success, with rows or without, even if `field` is null everywhere. | `field` only approximates the filter date, or windows can be empty. |
+
+`upper_bound` is committed **after** the data, like every watermark: a failed run advances nothing. With `checkpoint`, the batches commit the capped largest `field`, and the bound itself is only written once the whole run succeeded — a bound is a statement that the entire window was read.
+
+`window.upper_param` must be a key of `params` and `window.upper_value` must equal its value; validation refuses a configuration where the bound sent and the bound followed could differ. At run time `upper_value` must be at least the watermark the run starts from — otherwise the run fails before the first request. Date-only values are compared as dates.
+
+`lookback` re-requests a margin: the value **sent** is `watermark - lookback` days, the value **stored** is untouched. It covers events recorded after the fact with a date earlier than the watermark. It needs a `yyyy-MM-dd` watermark (a timestamp fails the run, rather than guessing a timezone), it does not shift `initial_value` (a floor you chose), and the lower bound stays inclusive — an exclusive one would miss rows posted later on the boundary day. The overlap it creates comes back as rows already loaded: pair it with [`merge`](#merge--keep-the-latest-version-of-each-object).
+
+`run_source_windows` walks a long period in windows of bounded span, with the checks that a hand-written loop tends to leave out:
+
+```python
+from flume_lib import run_source_windows
+
+results = run_source_windows(config_for, until="2026-10-23", max_span_days=31)
+```
+
+`config_for(window_end)` returns the full config of the source for a window ending at `window_end` (`yyyy-MM-dd`) — in `params` and in `incremental.window.upper_value`. It is called once with `until` to learn the source's `name` and `initial_value`, then once per window. Each iteration reads the watermark, runs `run_source` with `window_end = min(until, watermark + max_span_days)`, and stops once a window reaches `until`. It raises `WindowRunError` — never swallows — when a run fails, when a run succeeds **without advancing the watermark** (`watermark_after` not ahead of `watermark_before`: the same request would be sent forever), or after `max_iterations` windows (default 1000). `WindowRunError.results` holds the `RunResult`s so far, and a rerun resumes from the stored watermark. It returns the list of `RunResult`s; an empty list means the source was already at `until`. A complete recipe, with `merge`: [cookbook.md, section 4.3](cookbook.md#43-date-window-apis-whose-filter-date-is-not-a-response-field).
+
+`"fail_on_empty": true` (top level) fails a run that loads no row, **before** the watermark moves — an `upper_bound` would otherwise have advanced past a window the API answered "nothing" to. Off by default; without it an empty incremental run in append mode only adds a line to `warnings`.
 
 Sending no param at all is the right default for an API whose filter is optional, and a trap on one that requires it: such an endpoint answers 4xx on the very first run, no watermark is ever written, and every rerun repeats it. `initial_value` is what breaks that loop — treat it as mandatory whenever the vendor makes the incremental filter mandatory.
 
-Reading, forcing or resetting that watermark between two runs: [cookbook.md, "Operating the watermark"](cookbook.md#4-operating-the-watermark).
+Reading, forcing or resetting that watermark between two runs — `read_watermark`, `write_watermark`, `reset_watermark`: [cookbook.md, "Operating the watermark"](cookbook.md#4-operating-the-watermark).
 
 The max of each batch is computed **before** that batch is written, so a `field` whose values cannot be compared (mixed types) fails the run without leaving rows behind an unadvanced watermark. Comparison uses Python `max()` — works for ISO 8601 timestamps and numerics; beware of date formats that don't sort lexicographically.
 
@@ -885,7 +972,7 @@ Created automatically on first run in `<log_schema>` (default `flume`):
 
 | Table | Columns |
 |---|---|
-| `watermark` | `source_name`, `last_value`, `updated_ts` — one row appended per advance (the current value is the max `updated_ts` per source). |
+| `watermark` | `source_name`, `last_value`, `updated_ts` — one row appended per advance (the current value is the max `updated_ts` per source). Appended rather than upserted so that sources can commit concurrently; `reset_watermark(source_name)` removes a source's rows. |
 | `log_runs` | `run_id`, `source_name`, `start_ts`, `end_ts`, `status`, `rows_loaded`, `error_message` — one row per `run_source` call, success or failure. |
 
 `error_message` holds the exception type and message of whatever failed. When the failure came from an [application error](#application-errors-in-a-200), that message is the API's own, truncated to the first 3 errors and 500 characters — a GraphQL error quotes the failing query in full, and `log_runs` is a table, not a log file. URLs in it are stripped of their query string (see [docs/security.md](security.md)).

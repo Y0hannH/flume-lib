@@ -55,6 +55,8 @@ Two traps worth naming, because both fail silently rather than loudly:
 | Only what changed since the last run | `"incremental": {"enabled": true, "field": …, "param_name": …}` |
 | …and the API dates its records in a local offset but filters in UTC | same + `"normalize": "utc_iso"` |
 | A rerunnable backfill, one window at a time | `"write": {"mode": "replace_where", "replace_where": "<SQL>"}` |
+| An object that comes back changed (an invoice that gets paid) and the table should hold its latest version | `"write": {"mode": "merge", "merge_keys": ["<id>"]}` |
+| The API filters on a date window and the date it filters on is not a field of the response | [section 4.3](#43-date-window-apis-whose-filter-date-is-not-a-response-field) |
 
 `overwrite` and `replace_where` share one deliberate behaviour: **a run that loads zero rows replaces nothing.** The target keeps its previous contents and `RunResult.warnings` says so, on a run still marked `success`. An API that is down and a genuinely empty window both answer "0 rows", and emptying the table on that signal would destroy data without anything having failed. Read `warnings` in your run loop — it does not reach `log_runs`.
 
@@ -209,57 +211,100 @@ A `success` is worth reading too — `RunResult.warnings` carries the empty-sour
 
 The incremental watermark lives in `<log_schema>.watermark` (default `flume.watermark`), one row per write: `source_name`, `last_value`, `updated_ts`. The table is **append-only** and `read_watermark` takes the most recent row of a source — so *setting* a value means appending one, and *resetting* means deleting the source's rows so that nothing is found and `initial_value` takes over again.
 
-Both are operations you run **between** two runs, from a notebook cell. A successful run appends its own row at the end; do this while one is in flight and the run wins.
+### 4.1 Reading, setting, resetting
+
+Operations you run **between** two runs, from a notebook cell. A successful run appends its own row at the end; do this while one is in flight and the run wins.
 
 ```python
-from flume_lib._delta import query_table, resolve_lakehouse_tables_path, table_uri
-from flume_lib.watermark import read_watermark, write_watermark
+from flume_lib import read_watermark, reset_watermark, write_watermark
 
-# Same resolution run_source does: in Fabric the local mount cannot commit a
-# Delta log, so the path becomes the lakehouse's OneLake ABFSS URI.
-TABLES = resolve_lakehouse_tables_path("/lakehouse/default/Tables")
-SCHEMA = "flume"            # log_schema
 SOURCE = "my_source"        # exactly config["name"]
 
-read_watermark(TABLES, SOURCE, schema=SCHEMA)          # current value, or None
-
-uri = table_uri(TABLES, SCHEMA, "watermark")
-query_table(uri, "select * from wm order by updated_ts desc", alias="wm")
-
-write_watermark(TABLES, SOURCE, "2026-01-01T00:00:00Z", schema=SCHEMA)
+read_watermark(source_name=SOURCE)                                # current value, or None
+write_watermark(source_name=SOURCE, last_value="2026-01-01T00:00:00Z")
+reset_watermark(SOURCE)                                           # rows deleted: 1, 2…; 0 if none
 ```
 
-Both take `storage_options=` for a lakehouse other than the default, like `run_source`.
+All three default to the table `run_source` uses: the same `lakehouse_tables_path` (`/lakehouse/default/Tables`, resolved to the OneLake ABFSS URI in Fabric — `resolve_lakehouse_tables_path` is exported if you need the resolved path yourself) and the same `log_schema` (`schema="flume"`). Pass `lakehouse_tables_path=`, `schema=` and `storage_options=` for any other lakehouse, as with `run_source`. `read_watermark` and `write_watermark` keep their historical positional order — path first — so call them by keyword when you rely on the defaults.
 
-### Resetting
-
-Appending is not a reset: as long as one row exists, `initial_value` is never read again. Look at what you are about to delete, then delete it.
-
-```python
-from deltalake import DeltaTable
-from flume_lib._delta import sql_quote, storage_options_for
-
-predicate = f"source_name = {sql_quote(SOURCE)}"
-
-for row in query_table(uri, f"select * from wm where {predicate}", alias="wm"):
-    print(row)                                          # look first
-
-dt = DeltaTable(uri, storage_options=storage_options_for(uri, None))
-dt.delete(predicate)                                    # {'num_deleted_rows': N}
-read_watermark(TABLES, SOURCE, schema=SCHEMA)           # None
-```
+`reset_watermark` deletes **only the rows of `source_name`**, never the other sources', and tells you how many it removed. Appending is not a reset: as long as one row exists, `initial_value` is never read again.
 
 | Trap | Why it bites |
 |---|---|
-| **The predicate is not optional** | `dt.delete()` with no argument empties the table for *every* source, not just yours. That is the reason for the read-first cell. |
-| **`source_name` must match `config["name"]` exactly** | A typo writes a second, unrelated entry without a word, and the run keeps reading the old one. |
+| **`source_name` must match `config["name"]` exactly** | A typo writes a second, unrelated entry without a word, and the run keeps reading the old one. For a reset it removes 0 rows — check the number. |
 | **`initial_value` becomes the floor again** | After a reset the next run starts there — if it holds today's date, you reload today and the history never comes back. Move it before rerunning. |
-| **A rerun replays and appends** | Rows already loaded do not disappear. Reload a window with `write.replace_where` over the same bounds, or de-duplicate on `_flume_run_id`. |
+| **A rerun replays and appends** | Rows already loaded do not disappear. Reload a window with `write.replace_where` over the same bounds, use `write.mode: "merge"`, or de-duplicate on `_flume_run_id`. |
 | **The value must be shaped the way the API expects** | It is reinjected verbatim into the filter param. A malformed timestamp is not caught by `validate_config` — `value_format` only guards the `body_template` injection — and leaves as-is. |
 
-A wrong delete is recoverable: Delta keeps the history. `dt.history(5)` lists the versions and `dt.restore(<version>)` puts the table back as it was.
+A wrong delete is recoverable: Delta keeps the history. For the table itself, `DeltaTable(uri).history(5)` lists the versions and `.restore(<version>)` puts it back as it was.
 
-`flume_lib._delta` is private and `watermark` is not exported in `__all__` — these signatures carry no stability guarantee across versions.
+`write_watermark` appends rather than upserting so that two sources can commit at the same time without a conflict; the table therefore grows by one row per advance. It stays tiny, but `reset_watermark` on a source you are retiring is the way to prune it.
+
+### 4.2 The watermark only moves forward
+
+Previously, a run whose largest `field` was *lower* than the stored watermark lowered it, and the next run reloaded — in append mode, duplicated — everything in between. The watermark now moves forward only: a lower or equal candidate is simply not written. A candidate that cannot be compared with the stored value (a text watermark against an integer field) is not written either, and `RunResult.warnings` says why.
+
+`"allow_regression": true` restores the old behaviour, for the rare source whose `field` legitimately goes backwards (a counter that restarts).
+
+Two fields of `RunResult` tell you where a run left the source: `watermark_before` (where it started: the stored value, or `initial_value` on a first run) and `watermark_after` (where the next one will start). **Equal means the run did not advance the source**, whatever `rows_loaded` says — with an inclusive lower bound the boundary day always comes back.
+
+### 4.3 Date-window APIs whose filter date is not a response field
+
+A report endpoint takes `Date_From` and `Date_To`, caps the span it accepts, and filters on a date you cannot see in the response: the *accounting* date while an invoice is unpaid, the *last payment* date once it is paid. The response carries `Last_Activity_Date`, which tracks that filter date closely — but only closely: it can differ from the filter date by a day or two, now and then by weeks, and a row can sit well beyond the window.
+
+`incremental.field` is then an **approximation**, and `field_max` — the watermark is the largest `field` seen — is unsafe on it in three ways:
+
+| Failure | What happens |
+|---|---|
+| **Outlier beyond the window** | A window ending 2026-09-28 returns one row dated 2026-10-23. The watermark jumps to 10-23 and `[09-29, 10-23]` is **never requested**: data loss, no error. |
+| **No progress** | The lower bound is inclusive, so the boundary day comes back on every run: `rows_loaded > 0`, watermark unchanged, and a caller looping on "did it load something" never stops. |
+| **Empty window** | No row, no watermark write. The next run asks for the same window again. |
+
+The fix is to stop deriving the watermark from the data and derive it from **the window that was requested**:
+
+```python
+from datetime import date
+
+from flume_lib import run_source_windows
+
+
+def config_for(window_end: str) -> dict:
+    return {
+        "name": "reports_by_company_acme",
+        "base_url": "https://api.example.com/reports/invoices",
+        "target_schema": "bronze",
+        "target_table": "invoices",
+        "params": {"format": "json", "Company": "ACME", "Date_To": window_end},
+        "pagination": {"type": "none", "items_field": "Report_Entry"},
+        "incremental": {
+            "enabled": True,
+            "field": "Last_Activity_Date",
+            "param_name": "Date_From",
+            "initial_value": "2024-09-01",
+            "lookback": 7,                                   # late-posted events
+            "window": {"upper_param": "Date_To", "upper_value": window_end},
+            "advance": "upper_bound",                        # what we asked for, not what came back
+        },
+        # an invoice returns when its status changes: keep the latest version
+        "write": {"mode": "merge", "merge_keys": ["Invoice_ID"]},
+    }
+
+
+results = run_source_windows(
+    config_for, until=date.today().isoformat(), max_span_days=31
+)
+for r in results:
+    print(r.window_end, r.rows_loaded, r.rows_inserted, r.rows_updated, r.warnings)
+```
+
+What each choice does:
+
+- **`window` + `"advance": "upper_bound"`** — on success the watermark becomes the window's upper bound, with rows, without rows, with a null `field`. It is still committed *after* the data, so a failed run advances nothing. `window.upper_param` must be a key of `params` and `upper_value` must equal its value — validation refuses a bound that is sent but not the one the watermark follows. `"advance": "field_max_capped"` is the middle road when `field` is trustworthy up to the bound: the watermark is `min(max(field), upper_value)`, so an outlier cannot carry it past the window.
+- **`lookback`** — sends `watermark - 7 days` as the lower bound and stores the watermark unshifted. Events recorded late but dated before the watermark are requested again. It requires a `yyyy-MM-dd` watermark and does not shift `initial_value`, which is a floor you chose. The lower bound stays inclusive: an exclusive one would miss rows posted later on the boundary day.
+- **`write.mode: "merge"`** — the overlap (the boundary day, the lookback, and any paid invoice that reappears in a later window) comes back as rows already in the table. Appending them duplicates; `replace_where` cannot replace them, because the filter date is not a column of the table. A merge on the object's id updates the row in place, adds the new ones, and refreshes `_flume_run_id` and `_flume_ingested_at` on the rows it touched. `rows_inserted` and `rows_updated` count each; `rows_loaded` stays "rows processed".
+- **`run_source_windows`** — the loop that every notebook used to rewrite: read the watermark, `window_end = min(until, watermark + max_span_days)`, run, stop once a window reaches `until`. It raises `WindowRunError` — carrying the `RunResult`s so far in `.results` — if a run fails, if a run does not advance the watermark (so a stall is a loud error rather than an endless loop), or after `max_iterations` windows. Errors are never swallowed; rerunning resumes from the stored watermark.
+
+Two things to keep in mind. Nested arrays (an invoice's `Line` list) are stored as a **JSON string** in one column, like any other nested value; merge compares rows by `merge_keys` only, so a changed line list updates the row. And `fail_on_empty: true` makes a run that loads no row fail *before* the watermark moves, for a source that must never be silent.
 
 ---
 
@@ -296,6 +341,7 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `batch_size` | — | `50 000` | rows per Delta commit; caps the memory a run uses |
 | `write` | — | — |  |
 | `allow_body_on_get` | — | — | lets a GET carry a body — refused by default, most APIs ignore it |
+| `fail_on_empty` | — | `false` | fails the run when no row was loaded, before the watermark moves |
 
 #### `pagination` — common to every strategy
 
@@ -436,15 +482,28 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `initial_value` | — | — |  |
 | `value_format` | — | `"any"` | one of `any` / `numeric` / `iso_date` / `iso_datetime` |
 | `normalize` | — | `"none"` | one of `none` / `utc_iso`; reshapes the watermark before it is **sent**, not as stored |
-| `checkpoint` | — | — | commits the watermark batch by batch; incompatible with any `write.mode` but `append` |
+| `checkpoint` | — | — | commits the watermark batch by batch; incompatible with a replacing `write.mode` |
+| `allow_regression` | — | `false` | lets a run lower the stored watermark; off, it only ever moves forward |
+| `window` | — | — | declares the upper bound sent in `params`; needed by any `advance` but `field_max` |
+| `advance` | — | `"field_max"` | one of `field_max` / `field_max_capped` / `upper_bound`; what the watermark becomes — the last two need `window` |
+| `lookback` | — | — | days; sends `watermark - lookback`, stores the watermark unshifted; needs a `yyyy-MM-dd` watermark |
+
+#### `incremental.window`
+
+| Key | Required | Default | Note |
+|---|---|---|---|
+| `upper_param` | yes | — | must be a key of `params` |
+| `upper_value` | yes | — | must equal `params[upper_param]`; at least the watermark, checked at run time |
 
 #### `write`
 
 | Key | Required | Default | Note |
 |---|---|---|---|
-| `mode` | — | `"append"` | one of `append` / `overwrite` / `replace_where` |
+| `mode` | — | `"append"` | one of `append` / `overwrite` / `replace_where` / `merge` |
 | `replace_where` | conditional | — | SQL predicate over the target table; not templated |
 | `partition_by` | — | — | Delta partition columns |
+| `merge_keys` | conditional | — | columns identifying a row; required with `merge`, which accepts `checkpoint` |
+| `when_matched` | — | — | only `update` for now, which is also the default |
 
 #### `retry`
 

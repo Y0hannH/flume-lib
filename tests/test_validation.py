@@ -912,7 +912,6 @@ def window_cfg(**incremental):
 
 
 class TestIncrementalWindow:
-
     def test_a_consistent_window_is_valid(self):
         validate_config(window_cfg())
 
