@@ -16,4 +16,4 @@ __all__ = [
     "reset_watermark",
     "resolve_lakehouse_tables_path",
 ]
-__version__ = "0.17.0"
+__version__ = "0.18.0"

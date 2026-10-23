@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here. Versions follow [semantic versioning](https://semver.org/); until 1.0.0, minor versions may contain breaking changes — these are always listed first.
 
-## [Unreleased]
+## [0.18.0] — 2026-10-23
 
 Incremental loading made safe for APIs filtered by a window of dates, where the date the server filters on is not a field of the response — a report endpoint taking `Date_From` / `Date_To` is the typical case. The watermark was derived from the data returned, and on such a source the data is only an approximation: an outlier row could move it past a stretch of time that was never requested, a window with only boundary-day rows made no progress, and a lower value silently lowered it. Everything new is opt-in except the first fix below, which has an opt-out.
 
