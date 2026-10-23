@@ -10,6 +10,12 @@ from deltalake.exceptions import TableNotFoundError
 
 ONELAKE_HOST = "onelake.dfs.fabric.microsoft.com"
 
+# Défauts partagés par `run_source` et par les fonctions publiques du
+# watermark : un appelant qui lit ou réinitialise un watermark doit viser la
+# même table que le run, sans avoir à recopier ces deux valeurs.
+DEFAULT_LAKEHOUSE_TABLES_PATH = "/lakehouse/default/Tables"
+DEFAULT_LOG_SCHEMA = "flume"
+
 # Le workspace à mettre dans l'URI est celui du lakehouse attaché, pas celui du
 # notebook : les deux diffèrent dès qu'on attache un lakehouse d'un autre
 # workspace, et l'URI assemblée avec `currentWorkspaceId` désigne alors un
@@ -343,6 +349,20 @@ def query_table(
     qb.register(alias, dt)
     result = qb.execute(sql)
     return ac.Table.from_arrow(result).to_struct_array().to_pylist()
+
+
+def delete_rows(uri: str, predicate: str, storage_options: dict | None = None) -> int:
+    """Supprime les lignes qui satisfont `predicate`. Retourne leur nombre, 0 si
+    la table n'existe pas. Le prédicat est obligatoire : un `delete()` sans
+    argument vide la table pour tout le monde."""
+    if not predicate or not predicate.strip():
+        raise ValueError("delete_rows: a predicate is required")
+    try:
+        dt = DeltaTable(uri, storage_options=storage_options_for(uri, storage_options))
+    except TableNotFoundError:
+        return 0
+    metrics = dt.delete(predicate)
+    return int(metrics.get("num_deleted_rows", 0))
 
 
 def sql_quote(value: str) -> str:

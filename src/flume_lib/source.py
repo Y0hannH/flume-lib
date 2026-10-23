@@ -14,7 +14,13 @@ from tenacity import (
     wait_exponential,
 )
 
-from flume_lib._delta import resolve_lakehouse_tables_path, table_uri, write_records
+from flume_lib._delta import (
+    DEFAULT_LAKEHOUSE_TABLES_PATH,
+    DEFAULT_LOG_SCHEMA,
+    resolve_lakehouse_tables_path,
+    table_uri,
+    write_records,
+)
 from flume_lib.auth import AuthProvider
 from flume_lib.incremental import compare
 from flume_lib.logging_ import write_log_run
@@ -29,8 +35,6 @@ from flume_lib.urls_ import safe_url, sanitized_request_error
 from flume_lib.validation import ConfigError, validate_config
 from flume_lib.watermark import read_watermark, write_watermark
 
-DEFAULT_LAKEHOUSE_TABLES_PATH = "/lakehouse/default/Tables"
-DEFAULT_LOG_SCHEMA = "flume"
 DEFAULT_TIMEOUT_SECONDS = 60
 
 # Plafond de l'attente dictée par un header Retry-After. Au-delà, l'attente est
