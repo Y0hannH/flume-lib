@@ -16,6 +16,7 @@ from tenacity import (
 
 from flume_lib._delta import resolve_lakehouse_tables_path, table_uri, write_records
 from flume_lib.auth import AuthProvider
+from flume_lib.incremental import compare
 from flume_lib.logging_ import write_log_run
 from flume_lib.pagination import _MISSING, get_path, paginate
 from flume_lib.templating import (
@@ -103,6 +104,10 @@ class ExpiredTokenError(RetryableError):
 
 class IncrementalError(Exception):
     """Le watermark ne peut pas être calculé ou avancé sans risque."""
+
+
+class EmptyResultError(Exception):
+    """Le run n'a chargé aucune ligne alors que `fail_on_empty` l'interdit."""
 
 
 class APIError(Exception):
@@ -210,6 +215,13 @@ class RunResult:
     # dont les valeurs ne rentrent pas dans le type déduit et qui finit en
     # texte. Un run `success` peut en porter : c'est tout l'intérêt.
     warnings: list = field(default_factory=list)
+    # Position du watermark autour du run, en texte : celle d'où le run est
+    # parti (relue, ou `initial_value` au premier run) et celle d'où le
+    # suivant partira. Égales, le run n'a pas fait avancer la source — avec une
+    # borne basse inclusive, `rows_loaded > 0` ne dit pas le contraire. None
+    # sans `incremental`.
+    watermark_before: str | None = None
+    watermark_after: str | None = None
 
 
 def _utc_now() -> str:
@@ -485,10 +497,7 @@ def _is_regression(candidate, reference) -> bool:
     est déjà signalée par `_max_incremental_value`."""
     if reference is None:
         return False
-    try:
-        return candidate < reference
-    except TypeError:
-        return False
+    return compare(candidate, reference) == -1
 
 
 def _add_lineage(records: list[dict], run_id: str) -> None:
@@ -531,6 +540,8 @@ class _BatchWriter:
         log_schema: str,
         storage_options: dict | None,
         write: dict | None = None,
+        stored_watermark=None,
+        fail_on_empty: bool = False,
     ):
         self._uri = uri
         self._run_id = run_id
@@ -550,6 +561,8 @@ class _BatchWriter:
         self._enabled = bool(incremental.get("enabled"))
         self._field = incremental.get("field")
         self._checkpoint = bool(incremental.get("checkpoint"))
+        self._allow_regression = bool(incremental.get("allow_regression", False))
+        self._fail_on_empty = fail_on_empty
 
         self._buffer: list[dict] = []
         self.rows_written = 0
@@ -558,9 +571,20 @@ class _BatchWriter:
         # différemment la même colonne et casser le commit Delta.
         self._types: dict = {}
         self.warnings: list[str] = []
-        # plus grande valeur vue jusqu'ici / dernière effectivement commitée
+        # plus grande valeur vue *dans ce run* — elle sert aussi au contrôle de
+        # tri de `checkpoint`, qui ne doit pas se comparer au watermark d'un
+        # run précédent : un premier lot en deçà n'est pas une source mal triée.
         self._pending = None
-        self._written = None
+        # ce que la table `watermark` contient : la valeur relue au départ,
+        # puis la dernière commitée. Le point de comparaison de toute écriture
+        # — sans lui, un run dont le max est plus bas ramenait le watermark en
+        # arrière et le run suivant rechargeait ce qui l'était déjà.
+        self._written = stored_watermark
+
+    @property
+    def watermark(self):
+        """Valeur actuellement en table (celle de départ si rien n'a avancé)."""
+        return self._written
 
     def add(self, records: list[dict]) -> None:
         self._buffer.extend(records)
@@ -573,6 +597,13 @@ class _BatchWriter:
         if self._buffer:
             batch, self._buffer = self._buffer, []
             self._flush(batch)
+        # Avant tout commit de watermark : un run refusé pour être vide ne doit
+        # pas avoir avancé la source (`upper_bound` l'aurait fait).
+        if self.rows_written == 0 and self._fail_on_empty:
+            raise EmptyResultError(
+                "the source returned no rows and 'fail_on_empty' is set — "
+                "the watermark was not advanced"
+            )
         # Une source qui ne renvoie rien ne déclenche aucun lot, donc aucun
         # remplacement : la fenêtre visée garde son contenu précédent. C'est
         # délibéré — une API en panne, un filtre trop étroit ou un token sans
@@ -584,6 +615,16 @@ class _BatchWriter:
                 f"write.mode='{self._write_mode}': the source returned no "
                 "rows, nothing was replaced — the target keeps its previous "
                 "content"
+            )
+        elif self.rows_written == 0 and self._enabled:
+            # Le même « 0 ligne » en append n'a rien à protéger, mais il a
+            # une lecture trompeuse : un run `success` qui n'a rien chargé
+            # ressemble à une source à jour. Réservé aux sources incrémentales
+            # : un rechargement complet d'une table de référence vide est un
+            # cas ordinaire, alors qu'ici « rien » veut dire « pas de progrès ».
+            self.warnings.append(
+                f"write.mode='{self._write_mode}': the source returned no "
+                "rows, nothing was written"
             )
         # Hors mode checkpoint le watermark n'est commité qu'ici, une fois le
         # run complet : la reprise n'est pas offerte, mais un run interrompu
@@ -641,16 +682,34 @@ class _BatchWriter:
         }
 
     def _commit_watermark(self) -> None:
-        if self._pending is None or self._pending == self._written:
+        target = self._pending
+        if target is None:
             return
+        if self._written is not None:
+            if str(target) == str(self._written):
+                return
+            if not self._allow_regression:
+                order = compare(target, self._written)
+                if order is None:
+                    message = (
+                        f"incremental: the new watermark {target!r} cannot be "
+                        f"compared with the stored one {self._written!r} "
+                        "(different types) — it was not written. Fix the "
+                        "stored value, or set \"allow_regression\": true."
+                    )
+                    if message not in self.warnings:
+                        self.warnings.append(message)
+                    return
+                if order <= 0:
+                    return
         write_watermark(
             self._lakehouse_tables_path,
             self._source_name,
-            self._pending,
+            target,
             schema=self._log_schema,
             storage_options=self._storage_options,
         )
-        self._written = self._pending
+        self._written = target
 
 
 def run_source(
@@ -692,6 +751,10 @@ def run_source(
     ne remplace rien : la cible garde son contenu et RunResult.warnings le
     dit.
 
+    Le watermark n'avance jamais en arrière (`incremental.allow_regression`
+    pour l'autoriser) ; RunResult dit où le run est parti
+    (`watermark_before`) et où le suivant partira (`watermark_after`).
+
     Cible exclusivement des lakehouses avec schémas : les données vont dans
     config['target_schema'] (requis), les tables techniques watermark et
     log_runs dans log_schema (défaut : 'flume'). Chaque ligne écrite porte
@@ -715,6 +778,8 @@ def run_source(
     sample = None
     warnings: list[str] = []
     fetch_page = None
+    watermark_before = None
+    watermark_after = None
 
     try:
         lakehouse_tables_path = resolve_lakehouse_tables_path(lakehouse_tables_path)
@@ -730,18 +795,23 @@ def run_source(
         # par le watermark quand il doit atterrir ailleurs qu'en query string.
         variables: dict[str, str] = {}
 
+        stored_watermark = None
         if incremental.get("enabled"):
-            last_value = read_watermark(
+            stored_watermark = read_watermark(
                 lakehouse_tables_path,
                 source_name,
                 schema=log_schema,
                 storage_options=storage_options,
             )
+            last_value = stored_watermark
             if last_value is None:
                 # Premier run : sans plancher, un placeholder resterait non
                 # substitué et partirait tel quel dans la requête.
                 last_value = incremental.get("initial_value")
             if last_value is not None:
+                # la position de départ, avant tout décalage ou reformatage :
+                # c'est celle que le watermark doit dépasser pour avoir avancé
+                watermark_before = watermark_after = str(last_value)
                 # Avant toute injection, et donc aussi bien pour la valeur
                 # relue que pour 'initial_value' : les deux doivent partir
                 # sous la même forme, sans quoi le premier run essaierait un
@@ -796,6 +866,8 @@ def run_source(
                 log_schema=log_schema,
                 storage_options=storage_options,
                 write=config.get("write"),
+                stored_watermark=stored_watermark,
+                fail_on_empty=bool(config.get("fail_on_empty", False)),
             )
             try:
                 for page in pages:
@@ -805,6 +877,8 @@ def run_source(
                 # Ce que l'appelant voit doit être ce qui est réellement dans
                 # la table, y compris quand le run casse en cours de route.
                 rows_loaded = writer.rows_written
+                if writer.watermark is not None:
+                    watermark_after = str(writer.watermark)
                 # extend, pas une affectation : celles de la pagination sont
                 # déjà dans la liste
                 warnings.extend(writer.warnings)
@@ -828,6 +902,8 @@ def run_source(
         run_id=run_id,
         sample=sample,
         warnings=warnings,
+        watermark_before=watermark_before,
+        watermark_after=watermark_after,
     )
 
     if dry_run:

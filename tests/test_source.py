@@ -1769,3 +1769,131 @@ class TestSessionLifecycle:
         result = run_source({"name": "x"}, lakehouse_tables_path=TABLES_PATH)
         assert result.status == "failed"
         assert "ConfigError" in result.error_message
+
+
+class TestWatermarkNeverMovesBackwards:
+    """Un run dont le max est plus bas que le watermark stocké ne doit pas
+    le ramener en arrière : le run suivant rechargerait, en append, ce qui
+    l'est déjà."""
+
+    CONFIG = {
+        **BASE_CONFIG,
+        "incremental": {"enabled": True, "field": "ts", "param_name": "since"},
+    }
+
+    def test_a_lower_max_leaves_the_stored_watermark_alone(self, http, delta):
+        delta["watermark_value"] = "2026-09-28"
+        http.next_payloads = [[{"ts": "2026-09-20"}]]
+        result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert delta["watermark_write"] == []
+        assert result.watermark_after == "2026-09-28"
+
+    def test_allow_regression_restores_the_old_behaviour(self, http, delta):
+        delta["watermark_value"] = "2026-09-28"
+        config = {
+            **self.CONFIG,
+            "incremental": {**self.CONFIG["incremental"], "allow_regression": True},
+        }
+        http.next_payloads = [[{"ts": "2026-09-20"}]]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert delta["watermark_write"] == [("s1", "2026-09-20")]
+        assert result.watermark_after == "2026-09-20"
+
+    def test_a_higher_max_still_advances_it(self, http, delta):
+        delta["watermark_value"] = "2026-09-28"
+        http.next_payloads = [[{"ts": "2026-10-02"}]]
+        run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert delta["watermark_write"] == [("s1", "2026-10-02")]
+
+    def test_the_same_value_is_not_written_again(self, http, delta):
+        delta["watermark_value"] = "2026-09-28"
+        http.next_payloads = [[{"ts": "2026-09-28"}]]
+        run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert delta["watermark_write"] == []
+
+    def test_a_numeric_field_is_compared_with_the_stored_text(self, http, delta):
+        # la table `watermark` rend du texte ; le max d'un champ entier est
+        # un entier. Les comparer tel quel levait TypeError, lu comme « pas
+        # une régression » : le garde-fou ne gardait rien
+        delta["watermark_value"] = "100"
+        http.next_payloads = [[{"ts": 50}]]
+        run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+        assert delta["watermark_write"] == []
+
+        http.next_payloads = [[{"ts": 150}]]
+        run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+        assert delta["watermark_write"] == [("s1", 150)]
+
+    def test_incomparable_values_warn_and_write_nothing(self, http, delta):
+        delta["watermark_value"] = "not-a-number"
+        http.next_payloads = [[{"ts": 7}]]
+        result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert delta["watermark_write"] == []
+        assert any("cannot be compared" in w for w in result.warnings)
+
+    def test_a_low_first_batch_is_not_an_unsorted_source(self, http, delta):
+        # le contrôle de tri de `checkpoint` compare les lots *entre eux*, pas
+        # au watermark d'un run précédent
+        delta["watermark_value"] = 10
+        config = {
+            **self.CONFIG,
+            "batch_size": 2,
+            "incremental": {**self.CONFIG["incremental"], "checkpoint": True},
+        }
+        http.next_payloads = [[{"ts": 3}, {"ts": 4}, {"ts": 12}, {"ts": 13}]]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert delta["watermark_write"] == [("s1", 13)]
+
+
+class TestRunResultProgress:
+
+    def test_a_source_without_incremental_reports_nothing(self, http, delta):
+        http.next_payloads = [[{"id": 1}]]
+        result = run_source(BASE_CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.watermark_before is None
+        assert result.watermark_after is None
+
+
+class TestEmptyIncrementalRuns:
+    CONFIG = {
+        **BASE_CONFIG,
+        "incremental": {"enabled": True, "field": "ts", "param_name": "since"},
+    }
+
+    def test_an_empty_incremental_append_warns(self, http, delta):
+        http.next_payloads = [[]]
+        result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success"
+        assert any("returned no rows" in w for w in result.warnings)
+
+    def test_fail_on_empty_fails_before_the_watermark_moves(self, http, delta):
+        delta["watermark_value"] = "2026-09-20"
+        http.next_payloads = [[]]
+        result = run_source(
+            {**self.CONFIG, "fail_on_empty": True}, lakehouse_tables_path=TABLES_PATH
+        )
+
+        assert result.status == "failed"
+        assert "fail_on_empty" in result.error_message
+        assert delta["watermark_write"] == []
+        assert result.watermark_after == "2026-09-20"
+
+    def test_fail_on_empty_lets_a_non_empty_run_through(self, http, delta):
+        http.next_payloads = [[{"ts": "2026-09-10"}]]
+        result = run_source(
+            {**self.CONFIG, "fail_on_empty": True}, lakehouse_tables_path=TABLES_PATH
+        )
+
+        assert result.status == "success", result.error_message
+        assert result.watermark_before is None and result.watermark_after == "2026-09-10"

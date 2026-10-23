@@ -893,3 +893,26 @@ class TestNumericValues:
     def test_a_negative_start_page_is_refused(self):
         with pytest.raises(ConfigError, match="must not be negative"):
             validate_config(cfg(pagination={"type": "page", "start_page": -1}))
+
+
+class TestIncrementalWindow:
+
+    def test_allow_regression_requires_incremental_enabled(self):
+        with pytest.raises(ConfigError, match="enabled"):
+            validate_config(cfg(incremental={"allow_regression": True}))
+
+    def test_allow_regression_must_be_a_boolean(self):
+        with pytest.raises(ConfigError, match="allow_regression"):
+            validate_config(
+                cfg(
+                    incremental={
+                        "enabled": True, "field": "ts", "param_name": "since",
+                        "allow_regression": "yes",
+                    }
+                )
+            )
+
+    def test_fail_on_empty_must_be_a_boolean(self):
+        with pytest.raises(ConfigError, match="fail_on_empty"):
+            validate_config(cfg(fail_on_empty="yes"))
+        validate_config(cfg(fail_on_empty=True))

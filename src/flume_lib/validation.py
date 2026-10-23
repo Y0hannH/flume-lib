@@ -17,6 +17,7 @@ _OPTIONAL = (
     "name", "params", "auth", "pagination", "incremental", "retry",
     "timeout_seconds", "method", "body", "body_format", "headers",
     "errors", "template_paths", "batch_size", "write", "allow_body_on_get",
+    "fail_on_empty",
 )
 
 # Clés autorisées par type d'auth. Les formes historiques *_env_var sont
@@ -95,6 +96,7 @@ _ERRORS_KEYS = ("path", "code_field", "message_field", "retryable_codes")
 _INCREMENTAL_KEYS = (
     "enabled", "field", "param_name", "inject", "placeholder",
     "initial_value", "value_format", "normalize", "checkpoint",
+    "allow_regression",
 )
 _INCREMENTAL_INJECTS = ("query_param", "body_template")
 _RETRY_KEYS = ("max_attempts", "backoff_multiplier", "max_retry_after_seconds")
@@ -184,6 +186,18 @@ def _check_type(section: str, config: dict, allowed_types: dict, default: str):
     return type_name
 
 
+def _validate_incremental_options(config: dict, incremental: dict) -> None:
+    """Contrôles de `allow_regression`."""
+    if "allow_regression" in incremental:
+        if not isinstance(incremental["allow_regression"], bool):
+            raise ConfigError("incremental: 'allow_regression' must be a boolean")
+        if not incremental.get("enabled"):
+            raise ConfigError(
+                "incremental: 'allow_regression' only makes sense with "
+                "\"enabled\": true"
+            )
+
+
 def validate_config(config: dict) -> None:
     """Valide la configuration d'une source. Lève ConfigError au premier
     problème rencontré, avec un message actionnable."""
@@ -205,6 +219,10 @@ def validate_config(config: dict) -> None:
         raise ConfigError(
             "config: 'body' is ignored on GET — set \"method\": \"POST\""
         )
+
+    fail_on_empty = config.get("fail_on_empty", False)
+    if not isinstance(fail_on_empty, bool):
+        raise ConfigError("config: 'fail_on_empty' must be a boolean")
 
     _check_number("config", config, "batch_size")
     _check_number("config", config, "timeout_seconds", integer=False)
@@ -436,6 +454,7 @@ def validate_config(config: dict) -> None:
                 "incremental: 'checkpoint' commits the watermark batch by batch "
                 "and only makes sense with \"enabled\": true"
             )
+        _validate_incremental_options(config, incremental)
         if incremental.get("enabled"):
             if not incremental.get("field"):
                 raise ConfigError(
