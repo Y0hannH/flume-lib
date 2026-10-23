@@ -1004,3 +1004,46 @@ class TestIncrementalWindow:
         with pytest.raises(ConfigError, match="fail_on_empty"):
             validate_config(cfg(fail_on_empty="yes"))
         validate_config(cfg(fail_on_empty=True))
+
+
+class TestMergeWrite:
+    def test_merge_with_keys_is_valid(self):
+        validate_config(
+            cfg(write={"mode": "merge", "merge_keys": ["Inv_Ref_ID"], "when_matched": "update"})
+        )
+
+    def test_merge_requires_keys(self):
+        with pytest.raises(ConfigError, match="'merge_keys' required"):
+            validate_config(cfg(write={"mode": "merge"}))
+
+    @pytest.mark.parametrize("keys", [[], "id", [""], [1], None])
+    def test_merge_keys_must_be_a_non_empty_list_of_names(self, keys):
+        with pytest.raises(ConfigError, match="merge_keys"):
+            validate_config(cfg(write={"mode": "merge", "merge_keys": keys}))
+
+    def test_a_key_listed_twice_is_refused(self):
+        with pytest.raises(ConfigError, match="twice"):
+            validate_config(cfg(write={"mode": "merge", "merge_keys": ["id", "id"]}))
+
+    def test_unknown_when_matched_is_refused(self):
+        with pytest.raises(ConfigError, match="when_matched"):
+            validate_config(
+                cfg(write={"mode": "merge", "merge_keys": ["id"], "when_matched": "delete"})
+            )
+
+    @pytest.mark.parametrize("key, value", [("merge_keys", ["id"]), ("when_matched", "update")])
+    def test_merge_options_are_refused_with_another_mode(self, key, value):
+        with pytest.raises(ConfigError, match="is ignored"):
+            validate_config(cfg(write={"mode": "append", key: value}))
+
+    def test_merge_is_compatible_with_checkpoint(self):
+        # idempotent : reprendre rejoue des lignes qui se mettent à jour
+        validate_config(
+            cfg(
+                write={"mode": "merge", "merge_keys": ["id"]},
+                incremental={
+                    "enabled": True, "field": "ts", "param_name": "since",
+                    "checkpoint": True,
+                },
+            )
+        )

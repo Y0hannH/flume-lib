@@ -17,6 +17,7 @@ from tenacity import (
 from flume_lib._delta import (
     DEFAULT_LAKEHOUSE_TABLES_PATH,
     DEFAULT_LOG_SCHEMA,
+    merge_records,
     resolve_lakehouse_tables_path,
     table_uri,
     write_records,
@@ -58,6 +59,12 @@ DRY_RUN_SAMPLE_SIZE = 3
 # c'est le seul qui ne détruit rien.
 WRITE_APPEND = "append"
 WRITE_OVERWRITE = "overwrite"
+# `merge` ne passe pas par `write_deltalake` : c'est un MERGE INTO, qui met à
+# jour les lignes dont la clé existe et insère les autres. Idempotent, donc le
+# seul mode non-append compatible avec `incremental.checkpoint`.
+WRITE_MERGE = "merge"
+# Modes qui détruisent ce qu'ils remplacent, au premier lot seulement.
+_REPLACING_MODES = ("overwrite", "replace_where")
 
 # Ce que devient le watermark à la fin d'un run (`incremental.advance`).
 # `field_max` est le comportement historique : le plus grand `field` vu. Les
@@ -237,6 +244,10 @@ class RunResult:
     # Borne haute envoyée à l'API (`incremental.window.upper_value`), si la
     # source est lue par fenêtre.
     window_end: str | None = None
+    # Renseignés en mode `merge` uniquement ; `rows_loaded` reste le nombre
+    # de lignes traitées.
+    rows_inserted: int | None = None
+    rows_updated: int | None = None
 
 
 def _utc_now() -> str:
@@ -570,8 +581,9 @@ class _BatchWriter:
         self._write_mode = write.get("mode", WRITE_APPEND)
         self._replace_where = write.get("replace_where")
         self._partition_by = write.get("partition_by")
+        self._merge_keys = write.get("merge_keys")
         # Consommé par le premier lot : voir _delta_write_args.
-        self._replacement_pending = self._write_mode != WRITE_APPEND
+        self._replacement_pending = self._write_mode in _REPLACING_MODES
 
         self._enabled = bool(incremental.get("enabled"))
         self._field = incremental.get("field")
@@ -583,6 +595,10 @@ class _BatchWriter:
 
         self._buffer: list[dict] = []
         self.rows_written = 0
+        # Renseignés en mode merge seulement : None dit « sans objet », 0 dit
+        # « aucune ligne » — ce ne sont pas la même information.
+        self.rows_inserted = 0 if self._write_mode == WRITE_MERGE else None
+        self.rows_updated = 0 if self._write_mode == WRITE_MERGE else None
         # Types Arrow retenus par le premier lot : les lots suivants s'y
         # conforment, sans quoi deux lots d'un même run pourraient typer
         # différemment la même colonne et casser le commit Delta.
@@ -680,13 +696,25 @@ class _BatchWriter:
                 )
 
         _add_lineage(batch, self._run_id)
-        types, fallbacks = write_records(
-            self._uri,
-            batch,
-            **self._delta_write_args(),
-            storage_options=self._storage_options,
-            known_types=self._types,
-        )
+        if self._write_mode == WRITE_MERGE:
+            types, fallbacks, inserted, updated = merge_records(
+                self._uri,
+                batch,
+                self._merge_keys,
+                partition_by=self._partition_by,
+                storage_options=self._storage_options,
+                known_types=self._types,
+            )
+            self.rows_inserted += inserted
+            self.rows_updated += updated
+        else:
+            types, fallbacks = write_records(
+                self._uri,
+                batch,
+                **self._delta_write_args(),
+                storage_options=self._storage_options,
+                known_types=self._types,
+            )
         self._types.update(types)
         for message in fallbacks:
             # une colonne dégradée l'est à chaque lot : ne le dire qu'une fois
@@ -823,7 +851,9 @@ def run_source(
     "overwrite" remplace la table entière — un rechargement complet de table
     de référence. Dans les deux cas, une source qui ne renvoie aucune ligne
     ne remplace rien : la cible garde son contenu et RunResult.warnings le
-    dit.
+    dit. "mode": "merge" avec `merge_keys` met à jour les lignes dont la clé
+    existe et insère les autres : un objet qui revient modifié n'existe
+    qu'une fois, dans sa dernière version.
 
     Le watermark n'avance jamais en arrière (`incremental.allow_regression`
     pour l'autoriser). Pour une API filtrée par fenêtre de dates,
@@ -858,6 +888,8 @@ def run_source(
     watermark_before = None
     watermark_after = None
     window_end = None
+    rows_inserted = None
+    rows_updated = None
 
     try:
         lakehouse_tables_path = resolve_lakehouse_tables_path(lakehouse_tables_path)
@@ -966,6 +998,7 @@ def run_source(
                 # Ce que l'appelant voit doit être ce qui est réellement dans
                 # la table, y compris quand le run casse en cours de route.
                 rows_loaded = writer.rows_written
+                rows_inserted, rows_updated = writer.rows_inserted, writer.rows_updated
                 if writer.watermark is not None:
                     watermark_after = str(writer.watermark)
                 # extend, pas une affectation : celles de la pagination sont
@@ -994,6 +1027,8 @@ def run_source(
         watermark_before=watermark_before,
         watermark_after=watermark_after,
         window_end=window_end,
+        rows_inserted=rows_inserted,
+        rows_updated=rows_updated,
     )
 
     if dry_run:

@@ -103,8 +103,9 @@ _INCREMENTAL_WINDOW_KEYS = ("upper_param", "upper_value")
 _INCREMENTAL_ADVANCES = ("field_max", "field_max_capped", "upper_bound")
 _RETRY_KEYS = ("max_attempts", "backoff_multiplier", "max_retry_after_seconds")
 
-_WRITE_KEYS = ("mode", "replace_where", "partition_by")
-_WRITE_MODES = ("append", "overwrite", "replace_where")
+_WRITE_KEYS = ("mode", "replace_where", "partition_by", "merge_keys", "when_matched")
+_WRITE_MODES = ("append", "overwrite", "replace_where", "merge")
+_WRITE_WHEN_MATCHED = ("update",)
 
 
 class ConfigError(Exception):
@@ -573,6 +574,39 @@ def validate_config(config: dict) -> None:
                     "would stay literal and the predicate would match no row. "
                     "Build the string on the caller side, one window per run"
                 )
+        merge_keys = write.get("merge_keys")
+        if mode == "merge":
+            if (
+                not isinstance(merge_keys, (list, tuple))
+                or not merge_keys
+                or not all(isinstance(key, str) and key for key in merge_keys)
+            ):
+                raise ConfigError(
+                    "write: 'merge_keys' required with \"mode\": \"merge\" — a "
+                    "non-empty list of column names identifying a row. Without "
+                    "them nothing says which target row an incoming one replaces"
+                )
+            if any("`" in key for key in merge_keys):
+                raise ConfigError(
+                    "write: 'merge_keys' must not contain a backtick — column "
+                    "names are quoted with it in the merge predicate"
+                )
+            if len(set(merge_keys)) != len(merge_keys):
+                raise ConfigError("write: 'merge_keys' lists a column twice")
+            when_matched = write.get("when_matched", "update")
+            if when_matched not in _WRITE_WHEN_MATCHED:
+                known = ", ".join(f"'{m}'" for m in _WRITE_WHEN_MATCHED)
+                raise ConfigError(
+                    f"write: unknown 'when_matched' '{when_matched}' — "
+                    f"expected one of: {known}"
+                )
+        else:
+            for key in ("merge_keys", "when_matched"):
+                if key in write:
+                    raise ConfigError(
+                        f"write: '{key}' is ignored with \"mode\": \"{mode}\" — "
+                        "set \"mode\": \"merge\" for it to be applied"
+                    )
         partition_by = write.get("partition_by")
         if partition_by is not None:
             if not isinstance(partition_by, (list, tuple)) or not partition_by:
@@ -585,8 +619,11 @@ def validate_config(config: dict) -> None:
                     "names"
                 )
 
+    # `merge` est idempotent — rejouer un lot met à jour les mêmes lignes — donc
+    # la reprise de `checkpoint` ne l'abîme pas, contrairement à un
+    # remplacement qui effacerait ce que le run interrompu avait déjà écrit.
     if config.get("incremental", {}).get("checkpoint") and (
-        config.get("write", {}).get("mode", "append") != "append"
+        config.get("write", {}).get("mode", "append") not in ("append", "merge")
     ):
         raise ConfigError(
             "write: \"mode\": \"{mode}\" is incompatible with "

@@ -336,6 +336,120 @@ def write_records(
     return types, fallbacks
 
 
+def _merge_key(record: dict, merge_keys: list[str]) -> tuple:
+    """Clé d'identité d'un enregistrement. Une clé absente ou nulle est une
+    erreur, pas une ligne de plus : `NULL = NULL` n'est jamais vrai en SQL, une
+    telle ligne ne correspondrait à rien et serait réinsérée à chaque run."""
+    parts = []
+    for key in merge_keys:
+        value = record.get(key)
+        if value is None:
+            raise DeltaWriteError(
+                f"merge: a record has no value for the key '{key}' "
+                f"(keys: {', '.join(merge_keys)}) — a row that cannot be "
+                "identified can be neither matched nor updated. Check "
+                "write.merge_keys against the fields the source returns."
+            )
+        parts.append(
+            json.dumps(value, sort_keys=True, ensure_ascii=False)
+            if isinstance(value, (dict, list))
+            else value
+        )
+    return tuple(parts)
+
+
+def dedupe_on_keys(records: list[dict], merge_keys: list[str]) -> list[dict]:
+    """Un seul enregistrement par clé, le dernier reçu l'emportant. delta-rs
+    refuse un MERGE où plusieurs lignes source correspondent à une même ligne
+    cible ; une API qui renvoie deux versions d'un objet dans un même lot est
+    exactement ce cas."""
+    latest: dict[tuple, dict] = {}
+    for record in records:
+        latest[_merge_key(record, merge_keys)] = record
+    return list(latest.values())
+
+
+def _quote_column(name: str) -> str:
+    if "`" in name:
+        raise ValueError(f"invalid merge key {name!r}: a backtick cannot be quoted")
+    return f"`{name}`"
+
+
+def _explain_merge_error(exc: Exception, merge_keys: list[str]) -> str:
+    raw = str(exc)
+    detail = raw if len(raw) <= MAX_DELTA_ERROR_CHARS else raw[:MAX_DELTA_ERROR_CHARS] + "…"
+    if "No field named" in raw:
+        return (
+            f"merge: a key among {merge_keys!r} is missing from the target "
+            "table. The available columns are those written by previous runs, "
+            f"plus the _flume_* lineage columns. Detail: {detail}"
+        )
+    return f"Delta merge refused: {detail}"
+
+
+def merge_records(
+    uri: str,
+    records: list[dict],
+    merge_keys: list[str],
+    partition_by: list | None = None,
+    storage_options: dict | None = None,
+    known_types: dict | None = None,
+) -> tuple[dict, list[str], int, int]:
+    """Fusionne des enregistrements dans une table Delta : une ligne dont la
+    clé existe est mise à jour (toutes ses colonnes, lignage compris), les
+    autres sont insérées. Rejouer le même lot ne change donc rien.
+
+    Les doublons de clé *dans* le lot sont résolus avant l'envoi (le dernier
+    gagne). La table est créée par une écriture ordinaire si elle n'existe pas
+    encore — même chemin, mêmes types, mêmes dégradations signalées. Les
+    colonnes existantes gardent le type de la table, ce qui évite à un lot
+    d'entiers de se heurter à une colonne de flottants.
+
+    Retourne les types Arrow retenus, les dégradations de type, et les nombres
+    de lignes insérées et mises à jour rapportés par delta-rs."""
+    # le prédicat d'abord : un nom de clé inquotable est refusé avant tout le reste
+    predicate = " AND ".join(
+        f"t.{_quote_column(key)} = s.{_quote_column(key)}" for key in merge_keys
+    )
+    records = dedupe_on_keys(records, merge_keys)
+    try:
+        dt = DeltaTable(uri, storage_options=storage_options_for(uri, storage_options))
+    except TableNotFoundError:
+        types, fallbacks = write_records(
+            uri,
+            records,
+            partition_by=partition_by,
+            storage_options=storage_options,
+            known_types=known_types,
+        )
+        return types, fallbacks, len(records), 0
+
+    target_types = {field.name: field.type for field in dt.schema().to_arrow()}
+    table, fallbacks = records_to_table(records, {**(known_types or {}), **target_types})
+    try:
+        metrics = (
+            dt.merge(
+                source=table,
+                predicate=predicate,
+                source_alias="s",
+                target_alias="t",
+                merge_schema=True,
+            )
+            .when_matched_update_all()
+            .when_not_matched_insert_all()
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001 — retraduit, puis relevé
+        raise DeltaWriteError(_explain_merge_error(exc, merge_keys)) from exc
+    types = {field.name: field.type for field in table.schema}
+    return (
+        types,
+        fallbacks,
+        int(metrics.get("num_target_rows_inserted", 0)),
+        int(metrics.get("num_target_rows_updated", 0)),
+    )
+
+
 def query_table(
     uri: str, sql: str, alias: str = "t", storage_options: dict | None = None
 ) -> list[dict]:
