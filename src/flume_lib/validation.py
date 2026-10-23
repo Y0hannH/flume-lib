@@ -96,7 +96,7 @@ _ERRORS_KEYS = ("path", "code_field", "message_field", "retryable_codes")
 _INCREMENTAL_KEYS = (
     "enabled", "field", "param_name", "inject", "placeholder",
     "initial_value", "value_format", "normalize", "checkpoint",
-    "allow_regression", "window", "advance",
+    "allow_regression", "window", "advance", "lookback",
 )
 _INCREMENTAL_INJECTS = ("query_param", "body_template")
 _INCREMENTAL_WINDOW_KEYS = ("upper_param", "upper_value")
@@ -189,7 +189,7 @@ def _check_type(section: str, config: dict, allowed_types: dict, default: str):
 
 
 def _validate_incremental_options(config: dict, incremental: dict) -> None:
-    """Contrôles de `allow_regression`, `window` et `advance`.
+    """Contrôles de `allow_regression`, `window`, `advance` et `lookback`.
 
     Statiques : tout ce qui se décide sans connaître le watermark. La borne
     haute contre le point de départ est vérifiée à l'exécution, quand ce
@@ -205,6 +205,7 @@ def _validate_incremental_options(config: dict, incremental: dict) -> None:
         raise ConfigError(
             f"incremental: unknown 'advance' '{advance}' — expected one of: {known}"
         )
+    _check_number("incremental", incremental, "lookback", allow_zero=True)
 
     window = incremental.get("window")
     if advance != "field_max" and window is None:
@@ -215,7 +216,7 @@ def _validate_incremental_options(config: dict, incremental: dict) -> None:
         )
 
     if not incremental.get("enabled"):
-        for key in ("window", "advance", "allow_regression"):
+        for key in ("window", "advance", "lookback", "allow_regression"):
             if key in incremental:
                 raise ConfigError(
                     f"incremental: '{key}' only makes sense with \"enabled\": true"

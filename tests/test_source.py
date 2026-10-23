@@ -2121,3 +2121,59 @@ class TestEmptyIncrementalRuns:
 
         assert result.status == "success", result.error_message
         assert result.watermark_before is None and result.watermark_after == "2026-09-10"
+
+
+class TestLookback:
+    def test_the_request_carries_the_watermark_minus_the_lookback(self, http, delta):
+        delta["watermark_value"] = "2026-09-20"
+        http.next_payloads = [_entries("2026-09-21")]
+        run_source(_date_window_config(lookback=7), lakehouse_tables_path=TABLES_PATH)
+
+        params = http.instances[0].calls[0]["params"]
+        assert params["Accounting_Date_From"] == "2026-09-13"
+        assert params["Accounting_Date_To"] == "2026-09-28"
+
+    def test_the_stored_watermark_is_not_shifted(self, http, delta):
+        delta["watermark_value"] = "2026-09-20"
+        http.next_payloads = [_entries("2026-09-21", "2026-09-24")]
+        result = run_source(
+            _date_window_config(lookback=7), lakehouse_tables_path=TABLES_PATH
+        )
+
+        assert delta["watermark_write"] == [("s1", "2026-09-24")]
+        assert result.watermark_before == "2026-09-20"
+
+    def test_upper_bound_stores_the_bound_not_a_shifted_one(self, http, delta):
+        delta["watermark_value"] = "2026-09-20"
+        http.next_payloads = [_entries()]
+        run_source(
+            _date_window_config(lookback=7, advance="upper_bound"),
+            lakehouse_tables_path=TABLES_PATH,
+        )
+
+        assert delta["watermark_write"] == [("s1", "2026-09-28")]
+
+    def test_rows_older_than_the_watermark_never_lower_it(self, http, delta):
+        # c'est tout l'objet du lookback : relire du passé sans y retourner
+        delta["watermark_value"] = "2026-09-20"
+        http.next_payloads = [_entries("2026-09-14", "2026-09-16")]
+        run_source(_date_window_config(lookback=7), lakehouse_tables_path=TABLES_PATH)
+
+        assert delta["watermark_write"] == []
+
+    def test_initial_value_is_a_floor_and_is_not_shifted(self, http, delta):
+        http.next_payloads = [_entries("2026-09-21")]
+        run_source(_date_window_config(lookback=7), lakehouse_tables_path=TABLES_PATH)
+
+        sent = http.instances[0].calls[0]["params"]["Accounting_Date_From"]
+        assert sent == "2024-09-01"
+
+    def test_a_watermark_that_is_not_a_date_fails_the_run(self, http, delta):
+        delta["watermark_value"] = "2026-09-20T10:00:00Z"
+        result = run_source(
+            _date_window_config(lookback=7), lakehouse_tables_path=TABLES_PATH
+        )
+
+        assert result.status == "failed"
+        assert "lookback" in result.error_message
+        assert delta["writes"] == []

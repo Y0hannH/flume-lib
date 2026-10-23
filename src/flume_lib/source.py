@@ -22,7 +22,7 @@ from flume_lib._delta import (
     write_records,
 )
 from flume_lib.auth import AuthProvider
-from flume_lib.incremental import compare
+from flume_lib.incremental import compare, shift_days
 from flume_lib.logging_ import write_log_run
 from flume_lib.pagination import _MISSING, get_path, paginate
 from flume_lib.templating import (
@@ -779,6 +779,13 @@ def _check_window_ahead(upper_value, last_value) -> None:
         )
 
 
+def _apply_lookback(watermark, days: int) -> str:
+    try:
+        return shift_days(str(watermark), days)
+    except ValueError as exc:
+        raise IncrementalError(f"incremental.lookback: {exc}") from exc
+
+
 def run_source(
     config: dict,
     lakehouse_tables_path: str = DEFAULT_LAKEHOUSE_TABLES_PATH,
@@ -821,8 +828,9 @@ def run_source(
     Le watermark n'avance jamais en arrière (`incremental.allow_regression`
     pour l'autoriser). Pour une API filtrée par fenêtre de dates,
     `incremental.window` et `advance` le font suivre la fenêtre demandée plutôt
-    que les données reçues ; RunResult dit où le run est parti
-    (`watermark_before`) et où le suivant partira (`watermark_after`).
+    que les données reçues, et `lookback` rouvre une marge ; RunResult dit où
+    le run est parti (`watermark_before`) et où le suivant partira
+    (`watermark_after`). `run_source_windows` enchaîne les fenêtres.
 
     Cible exclusivement des lakehouses avec schémas : les données vont dans
     config['target_schema'] (requis), les tables techniques watermark et
@@ -886,6 +894,13 @@ def run_source(
                 # la position de départ, avant tout décalage ou reformatage :
                 # c'est celle que le watermark doit dépasser pour avoir avancé
                 watermark_before = watermark_after = str(last_value)
+                lookback = incremental.get("lookback")
+                if lookback and stored_watermark is not None:
+                    # Seule la valeur *envoyée* recule : le watermark stocké
+                    # reste celui du dernier run. `initial_value` est exclu —
+                    # c'est un plancher que l'utilisateur a fixé, pas un
+                    # watermark à recouvrir.
+                    last_value = _apply_lookback(stored_watermark, lookback)
                 # Avant toute injection, et donc aussi bien pour la valeur
                 # relue que pour 'initial_value' : les deux doivent partir
                 # sous la même forme, sans quoi le premier run essaierait un

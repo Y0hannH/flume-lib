@@ -974,11 +974,20 @@ class TestIncrementalWindow:
         with pytest.raises(ConfigError, match="enabled"):
             validate_config(cfg(incremental={"allow_regression": True}))
 
+    def test_lookback_requires_incremental_enabled(self):
+        with pytest.raises(ConfigError, match="enabled"):
+            validate_config(cfg(incremental={"lookback": 7}))
+
     def test_a_window_without_enabled_is_refused(self):
         config = window_cfg()
         config["incremental"]["enabled"] = False
         with pytest.raises(ConfigError, match="'window' only makes sense"):
             validate_config(config)
+
+    @pytest.mark.parametrize("value", [-1, 1.5, "7", True, None])
+    def test_lookback_must_be_a_non_negative_integer(self, value):
+        with pytest.raises(ConfigError, match="lookback"):
+            validate_config(window_cfg(lookback=value))
 
     def test_allow_regression_must_be_a_boolean(self):
         with pytest.raises(ConfigError, match="allow_regression"):

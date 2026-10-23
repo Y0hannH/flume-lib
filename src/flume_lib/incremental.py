@@ -11,7 +11,7 @@ laissait donc passer. `align` ramène les deux côtés à un type commun avant d
 trancher."""
 
 import re
-from datetime import date
+from datetime import date, timedelta
 
 _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -72,3 +72,17 @@ def compare(left, right) -> int | None:
         return None
     first, second = pair
     return (first > second) - (first < second)
+
+
+def shift_days(value: str, days: int) -> str:
+    """`value` (une date `yyyy-MM-dd`) reculée de `days` jours (avancée si
+    négatif). Lève ValueError pour toute autre forme : un décalage de jours n'a
+    de sens que sur une date, et deviner pour un horodatage choisirait un
+    fuseau à la place de l'utilisateur."""
+    parsed = parse_date(value)
+    if parsed is None:
+        raise ValueError(
+            f"{value!r} is not a yyyy-MM-dd date — a number of days can only "
+            "be subtracted from a date"
+        )
+    return (parsed - timedelta(days=days)).isoformat()
