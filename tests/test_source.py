@@ -1771,6 +1771,33 @@ class TestSessionLifecycle:
         assert "ConfigError" in result.error_message
 
 
+def _date_window_config(upper="2026-09-28", **incremental):
+    """Un rapport filtré par fenêtre de dates : la borne basse part en
+    paramètre, la borne haute est fixe, `Last_Inv_Date` approxime la date du
+    filtre sans la refléter exactement."""
+    return {
+        **BASE_CONFIG,
+        "params": {"Company": "C1", "Accounting_Date_To": upper},
+        "pagination": {"type": "none", "items_field": "Report_Entry"},
+        "incremental": {
+            "enabled": True,
+            "field": "Last_Inv_Date",
+            "param_name": "Accounting_Date_From",
+            "initial_value": "2024-09-01",
+            "window": {"upper_param": "Accounting_Date_To", "upper_value": upper},
+            **incremental,
+        },
+    }
+
+
+def _entries(*dates):
+    return {
+        "Report_Entry": [
+            {"Inv_Ref_ID": f"INV-{i}", "Last_Inv_Date": d} for i, d in enumerate(dates)
+        ]
+    }
+
+
 class TestWatermarkNeverMovesBackwards:
     """Un run dont le max est plus bas que le watermark stocké ne doit pas
     le ramener en arrière : le run suivant rechargerait, en append, ce qui
@@ -1854,7 +1881,166 @@ class TestWatermarkNeverMovesBackwards:
         assert delta["watermark_write"] == [("s1", 13)]
 
 
+class TestWindowedAdvance:
+    def test_field_max_capped_stops_at_the_upper_bound(self, http, delta):
+        # le cas qui perdait des données : une ligne à 2026-10-23 dans une
+        # fenêtre qui s'arrête au 09-28 faisait sauter [09-29, 10-23]
+        delta["watermark_value"] = "2026-09-27"
+        config = _date_window_config(advance="field_max_capped")
+        http.next_payloads = [_entries("2026-09-28", "2026-10-23")]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert delta["watermark_write"] == [("s1", "2026-09-28")]
+        assert result.watermark_after == "2026-09-28"
+
+    def test_field_max_capped_keeps_a_max_below_the_bound(self, http, delta):
+        delta["watermark_value"] = "2026-09-20"
+        config = _date_window_config(advance="field_max_capped")
+        http.next_payloads = [_entries("2026-09-22", "2026-09-25")]
+        run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert delta["watermark_write"] == [("s1", "2026-09-25")]
+
+    def test_field_max_is_unchanged_and_unsafe(self, http, delta):
+        delta["watermark_value"] = "2026-09-27"
+        config = _date_window_config()  # advance par défaut : field_max
+        http.next_payloads = [_entries("2026-09-28", "2026-10-23")]
+        run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert delta["watermark_write"] == [("s1", "2026-10-23")]
+
+    def test_upper_bound_advances_on_an_empty_window(self, http, delta):
+        delta["watermark_value"] = "2026-09-20"
+        config = _date_window_config(advance="upper_bound")
+        http.next_payloads = [_entries()]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
+        assert result.rows_loaded == 0
+        assert delta["watermark_write"] == [("s1", "2026-09-28")]
+        assert result.watermark_before == "2026-09-20"
+        assert result.watermark_after == "2026-09-28"
+        assert result.window_end == "2026-09-28"
+
+    def test_upper_bound_advances_when_only_boundary_rows_come_back(self, http, delta):
+        # la borne basse est inclusive : le jour du watermark revient à chaque
+        # run, `rows_loaded > 0` sans que rien n'avance
+        delta["watermark_value"] = "2026-09-20"
+        config = _date_window_config(advance="upper_bound")
+        http.next_payloads = [_entries("2026-09-20", "2026-09-20")]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.rows_loaded == 2
+        assert result.watermark_after == "2026-09-28"
+
+    def test_field_max_reports_no_progress_on_boundary_rows(self, http, delta):
+        delta["watermark_value"] = "2026-09-20"
+        config = _date_window_config()
+        http.next_payloads = [_entries("2026-09-20")]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.rows_loaded == 1
+        assert result.watermark_after == result.watermark_before == "2026-09-20"
+
+    def test_upper_bound_is_written_after_the_data(self, http, delta, monkeypatch):
+        order = []
+        monkeypatch.setattr(
+            "flume_lib.source.write_watermark",
+            lambda *a, **k: order.append(("watermark", len(delta["writes"]))),
+        )
+        delta["watermark_value"] = "2026-09-20"
+        http.next_payloads = [_entries("2026-09-21")]
+        run_source(
+            _date_window_config(advance="upper_bound"),
+            lakehouse_tables_path=TABLES_PATH,
+        )
+
+        # une écriture de données déjà faite quand le watermark part
+        assert order == [("watermark", 1)]
+
+    def test_a_failed_run_does_not_advance_to_the_bound(self, http, delta):
+        delta["watermark_value"] = "2026-09-20"
+
+        class Boom(FakeSession):
+            def request(self, method, url, **kwargs):
+                return FakeResponse({}, status_code=403)
+
+        import flume_lib.source as source_module
+
+        source_module.requests.Session = Boom
+        try:
+            result = run_source(
+                _date_window_config(advance="upper_bound"),
+                lakehouse_tables_path=TABLES_PATH,
+            )
+        finally:
+            source_module.requests.Session = FakeSession
+
+        assert result.status == "failed"
+        assert delta["watermark_write"] == []
+        assert result.watermark_after == "2026-09-20"
+
+    def test_upper_bound_with_checkpoint_commits_capped_batches_then_the_bound(
+        self, http, delta
+    ):
+        delta["watermark_value"] = "2026-09-01"
+        config = _date_window_config(advance="upper_bound", checkpoint=True)
+        config["batch_size"] = 2
+        http.next_payloads = [_entries("2026-09-05", "2026-09-06", "2026-09-07")]
+        run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        # un commit par lot (plafonné), puis la borne une fois le run complet
+        assert delta["watermark_write"] == [
+            ("s1", "2026-09-06"),
+            ("s1", "2026-09-07"),
+            ("s1", "2026-09-28"),
+        ]
+
+    def test_an_upper_bound_before_the_watermark_fails_the_run(self, http, delta):
+        delta["watermark_value"] = "2026-10-05"
+        result = run_source(
+            _date_window_config(advance="upper_bound"),
+            lakehouse_tables_path=TABLES_PATH,
+        )
+
+        assert result.status == "failed"
+        assert "before the watermark" in result.error_message
+        assert http.instances == [] or http.instances[0].calls == []
+        assert delta["watermark_write"] == []
+
+    def test_the_window_is_checked_against_initial_value_on_a_first_run(
+        self, http, delta
+    ):
+        config = _date_window_config(upper="2024-08-01")
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "failed"
+        assert "before the watermark" in result.error_message
+
+    def test_a_capped_field_on_another_scale_fails_before_writing(self, http, delta):
+        delta["watermark_value"] = "2026-09-20"
+        http.next_payloads = [{"Report_Entry": [{"Last_Inv_Date": 5}]}]
+        result = run_source(
+            _date_window_config(advance="field_max_capped"),
+            lakehouse_tables_path=TABLES_PATH,
+        )
+
+        assert result.status == "failed"
+        assert "cannot be compared" in result.error_message
+        assert delta["writes"] == []
+
+
 class TestRunResultProgress:
+
+    def test_positions_on_a_first_run_start_at_initial_value(self, http, delta):
+        config = _date_window_config()
+        http.next_payloads = [_entries("2026-09-10")]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.watermark_before == "2024-09-01"
+        assert result.watermark_after == "2026-09-10"
+        assert result.window_end == "2026-09-28"
 
     def test_a_source_without_incremental_reports_nothing(self, http, delta):
         http.next_payloads = [[{"id": 1}]]
@@ -1862,6 +2048,44 @@ class TestRunResultProgress:
 
         assert result.watermark_before is None
         assert result.watermark_after is None
+
+    def test_a_dry_run_leaves_the_position_where_it_was(self, http, delta):
+        delta["watermark_value"] = "2026-09-20"
+        http.next_payloads = [_entries("2026-09-25")]
+        result = run_source(
+            _date_window_config(advance="upper_bound"),
+            lakehouse_tables_path=TABLES_PATH,
+            dry_run=True,
+        )
+
+        assert result.watermark_before == result.watermark_after == "2026-09-20"
+        assert delta["watermark_write"] == []
+
+    def test_an_empty_incremental_append_warns(self, http, delta):
+        delta["watermark_value"] = "2026-09-20"
+        http.next_payloads = [_entries()]
+        result = run_source(_date_window_config(), lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success"
+        assert any("returned no rows" in w for w in result.warnings)
+
+    def test_fail_on_empty_fails_before_the_watermark_moves(self, http, delta):
+        delta["watermark_value"] = "2026-09-20"
+        config = {**_date_window_config(advance="upper_bound"), "fail_on_empty": True}
+        http.next_payloads = [_entries()]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "failed"
+        assert "fail_on_empty" in result.error_message
+        assert delta["watermark_write"] == []
+        assert result.watermark_after == "2026-09-20"
+
+    def test_fail_on_empty_lets_a_non_empty_run_through(self, http, delta):
+        config = {**_date_window_config(), "fail_on_empty": True}
+        http.next_payloads = [_entries("2026-09-10")]
+        result = run_source(config, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success", result.error_message
 
 
 class TestEmptyIncrementalRuns:

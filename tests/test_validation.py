@@ -895,11 +895,90 @@ class TestNumericValues:
             validate_config(cfg(pagination={"type": "page", "start_page": -1}))
 
 
+def window_cfg(**incremental):
+    return cfg(
+        params={"Company": "C1", "Accounting_Date_To": "2026-09-28"},
+        incremental={
+            "enabled": True,
+            "field": "Last_Inv_Date",
+            "param_name": "Accounting_Date_From",
+            "window": {
+                "upper_param": "Accounting_Date_To",
+                "upper_value": "2026-09-28",
+            },
+            **incremental,
+        },
+    )
+
+
 class TestIncrementalWindow:
+
+    def test_a_consistent_window_is_valid(self):
+        validate_config(window_cfg())
+
+    @pytest.mark.parametrize("advance", ["field_max", "field_max_capped", "upper_bound"])
+    def test_every_advance_mode_is_valid_with_a_window(self, advance):
+        validate_config(window_cfg(advance=advance))
+
+    def test_upper_param_must_be_a_key_of_params(self):
+        config = window_cfg()
+        config["incremental"]["window"]["upper_param"] = "Date_To"
+        with pytest.raises(ConfigError, match="not a key of 'params'"):
+            validate_config(config)
+
+    def test_upper_value_must_equal_the_param_value(self):
+        config = window_cfg()
+        config["incremental"]["window"]["upper_value"] = "2026-10-31"
+        with pytest.raises(ConfigError, match="must be the same value"):
+            validate_config(config)
+
+    def test_window_needs_both_keys(self):
+        config = window_cfg()
+        del config["incremental"]["window"]["upper_value"]
+        with pytest.raises(ConfigError, match="upper_value"):
+            validate_config(config)
+
+    def test_window_rejects_unknown_keys(self):
+        config = window_cfg()
+        config["incremental"]["window"]["upper_vlaue"] = "x"
+        with pytest.raises(ConfigError, match="did you mean 'upper_value'"):
+            validate_config(config)
+
+    def test_window_must_be_an_object(self):
+        with pytest.raises(ConfigError, match="'window' must be an object"):
+            validate_config(window_cfg(window="2026-09-28"))
+
+    def test_upper_param_cannot_be_the_lower_bound_param(self):
+        config = window_cfg()
+        config["incremental"]["param_name"] = "Accounting_Date_To"
+        with pytest.raises(ConfigError, match="distinct params"):
+            validate_config(config)
+
+    @pytest.mark.parametrize("advance", ["field_max_capped", "upper_bound"])
+    def test_advancing_by_the_bound_requires_a_window(self, advance):
+        with pytest.raises(ConfigError, match="needs a 'window'"):
+            validate_config(
+                cfg(
+                    incremental={
+                        "enabled": True, "field": "ts", "param_name": "since",
+                        "advance": advance,
+                    }
+                )
+            )
+
+    def test_unknown_advance_is_refused(self):
+        with pytest.raises(ConfigError, match="unknown 'advance'"):
+            validate_config(window_cfg(advance="bound"))
 
     def test_allow_regression_requires_incremental_enabled(self):
         with pytest.raises(ConfigError, match="enabled"):
             validate_config(cfg(incremental={"allow_regression": True}))
+
+    def test_a_window_without_enabled_is_refused(self):
+        config = window_cfg()
+        config["incremental"]["enabled"] = False
+        with pytest.raises(ConfigError, match="'window' only makes sense"):
+            validate_config(config)
 
     def test_allow_regression_must_be_a_boolean(self):
         with pytest.raises(ConfigError, match="allow_regression"):

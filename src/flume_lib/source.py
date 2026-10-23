@@ -55,6 +55,14 @@ DRY_RUN_SAMPLE_SIZE = 3
 WRITE_APPEND = "append"
 WRITE_OVERWRITE = "overwrite"
 
+# Ce que devient le watermark à la fin d'un run (`incremental.advance`).
+# `field_max` est le comportement historique : le plus grand `field` vu. Les
+# deux autres existent pour les APIs dont le filtre est une fenêtre de dates
+# que `field` ne reflète qu'approximativement — voir docs/configuration.md.
+ADVANCE_FIELD_MAX = "field_max"
+ADVANCE_FIELD_MAX_CAPPED = "field_max_capped"
+ADVANCE_UPPER_BOUND = "upper_bound"
+
 # Nombre de lignes tamponnées avant écriture. Borne la mémoire d'un run : elle
 # ne dépend plus du volume de la source. Une source qui tient sous ce seuil
 # produit un unique commit Delta, comme avant l'introduction des lots.
@@ -222,6 +230,9 @@ class RunResult:
     # sans `incremental`.
     watermark_before: str | None = None
     watermark_after: str | None = None
+    # Borne haute envoyée à l'API (`incremental.window.upper_value`), si la
+    # source est lue par fenêtre.
+    window_end: str | None = None
 
 
 def _utc_now() -> str:
@@ -562,6 +573,8 @@ class _BatchWriter:
         self._field = incremental.get("field")
         self._checkpoint = bool(incremental.get("checkpoint"))
         self._allow_regression = bool(incremental.get("allow_regression", False))
+        self._advance = incremental.get("advance", ADVANCE_FIELD_MAX)
+        self._upper = (incremental.get("window") or {}).get("upper_value")
         self._fail_on_empty = fail_on_empty
 
         self._buffer: list[dict] = []
@@ -629,8 +642,11 @@ class _BatchWriter:
         # Hors mode checkpoint le watermark n'est commité qu'ici, une fois le
         # run complet : la reprise n'est pas offerte, mais un run interrompu
         # ne laisse jamais un watermark avancé au-delà d'une fenêtre partielle.
-        if self._enabled and not self._checkpoint:
-            self._commit_watermark()
+        # `upper_bound` est l'exception qui confirme la règle : avec
+        # checkpoint, les lots avancent jusqu'au plafond, et seule la fin du
+        # run peut dire que la fenêtre entière a été lue.
+        if self._enabled and (not self._checkpoint or self._advance == ADVANCE_UPPER_BOUND):
+            self._commit_watermark(final=True)
 
     def _flush(self, batch: list[dict]) -> None:
         candidate = None
@@ -645,6 +661,18 @@ class _BatchWriter:
                     f"'{self._field}'. Resuming from that watermark would skip "
                     "rows: sort the source, or remove "
                     '"checkpoint": true.'
+                )
+            if (
+                candidate is not None
+                and self._advance != ADVANCE_FIELD_MAX
+                and compare(candidate, self._upper) is None
+            ):
+                # même raison que le max() : avant l'écriture du lot
+                raise IncrementalError(
+                    f"incremental: field '{self._field}' value {candidate!r} "
+                    f"cannot be compared with window.upper_value "
+                    f"{self._upper!r} — \"advance\": \"{self._advance}\" needs "
+                    "both on the same scale"
                 )
 
         _add_lineage(batch, self._run_id)
@@ -681,8 +709,23 @@ class _BatchWriter:
             **args,
         }
 
-    def _commit_watermark(self) -> None:
-        target = self._pending
+    def _watermark_target(self, final: bool):
+        """Valeur que le watermark devrait prendre, ou None s'il n'a aucune
+        raison de bouger. `final` : le run est complet (fin de `close`)."""
+        if self._advance == ADVANCE_UPPER_BOUND and final:
+            # toute la fenêtre a été lue : même vide, même sans `field`
+            return self._upper
+        if self._pending is None:
+            return None
+        if self._advance != ADVANCE_FIELD_MAX and compare(self._pending, self._upper) == 1:
+            # un enregistrement au-delà de la borne envoyée (champ approximant
+            # la date du filtre) ne prouve pas que la fenêtre a été lue
+            # jusque-là : s'y fier ferait sauter définitivement l'intervalle
+            return self._upper
+        return self._pending
+
+    def _commit_watermark(self, final: bool = False) -> None:
+        target = self._watermark_target(final)
         if target is None:
             return
         if self._written is not None:
@@ -710,6 +753,26 @@ class _BatchWriter:
             storage_options=self._storage_options,
         )
         self._written = target
+
+
+def _check_window_ahead(upper_value, last_value) -> None:
+    """La borne haute d'une fenêtre ne peut pas précéder le point de départ :
+    la requête serait vide ou incohérente, et — avec `upper_bound` — le run
+    ferait reculer le watermark vers une valeur qu'il a déjà dépassée."""
+    if last_value is None:
+        return
+    order = compare(upper_value, last_value)
+    if order is None:
+        raise ConfigError(
+            f"incremental.window: upper_value {upper_value!r} cannot be "
+            f"compared with the watermark {last_value!r} — they must be on "
+            "the same scale"
+        )
+    if order < 0:
+        raise ConfigError(
+            f"incremental.window: upper_value {upper_value!r} is before the "
+            f"watermark {last_value!r} — the window would be empty"
+        )
 
 
 def run_source(
@@ -752,7 +815,9 @@ def run_source(
     dit.
 
     Le watermark n'avance jamais en arrière (`incremental.allow_regression`
-    pour l'autoriser) ; RunResult dit où le run est parti
+    pour l'autoriser). Pour une API filtrée par fenêtre de dates,
+    `incremental.window` et `advance` le font suivre la fenêtre demandée plutôt
+    que les données reçues ; RunResult dit où le run est parti
     (`watermark_before`) et où le suivant partira (`watermark_after`).
 
     Cible exclusivement des lakehouses avec schémas : les données vont dans
@@ -780,6 +845,7 @@ def run_source(
     fetch_page = None
     watermark_before = None
     watermark_after = None
+    window_end = None
 
     try:
         lakehouse_tables_path = resolve_lakehouse_tables_path(lakehouse_tables_path)
@@ -808,6 +874,10 @@ def run_source(
                 # Premier run : sans plancher, un placeholder resterait non
                 # substitué et partirait tel quel dans la requête.
                 last_value = incremental.get("initial_value")
+            window = incremental.get("window")
+            if window:
+                window_end = str(window["upper_value"])
+                _check_window_ahead(window["upper_value"], last_value)
             if last_value is not None:
                 # la position de départ, avant tout décalage ou reformatage :
                 # c'est celle que le watermark doit dépasser pour avoir avancé
@@ -904,6 +974,7 @@ def run_source(
         warnings=warnings,
         watermark_before=watermark_before,
         watermark_after=watermark_after,
+        window_end=window_end,
     )
 
     if dry_run:

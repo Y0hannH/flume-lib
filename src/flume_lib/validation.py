@@ -96,9 +96,11 @@ _ERRORS_KEYS = ("path", "code_field", "message_field", "retryable_codes")
 _INCREMENTAL_KEYS = (
     "enabled", "field", "param_name", "inject", "placeholder",
     "initial_value", "value_format", "normalize", "checkpoint",
-    "allow_regression",
+    "allow_regression", "window", "advance",
 )
 _INCREMENTAL_INJECTS = ("query_param", "body_template")
+_INCREMENTAL_WINDOW_KEYS = ("upper_param", "upper_value")
+_INCREMENTAL_ADVANCES = ("field_max", "field_max_capped", "upper_bound")
 _RETRY_KEYS = ("max_attempts", "backoff_multiplier", "max_retry_after_seconds")
 
 _WRITE_KEYS = ("mode", "replace_where", "partition_by")
@@ -187,15 +189,70 @@ def _check_type(section: str, config: dict, allowed_types: dict, default: str):
 
 
 def _validate_incremental_options(config: dict, incremental: dict) -> None:
-    """Contrôles de `allow_regression`."""
-    if "allow_regression" in incremental:
-        if not isinstance(incremental["allow_regression"], bool):
-            raise ConfigError("incremental: 'allow_regression' must be a boolean")
-        if not incremental.get("enabled"):
+    """Contrôles de `allow_regression`, `window` et `advance`.
+
+    Statiques : tout ce qui se décide sans connaître le watermark. La borne
+    haute contre le point de départ est vérifiée à l'exécution, quand ce
+    dernier est relu."""
+    if "allow_regression" in incremental and not isinstance(
+        incremental["allow_regression"], bool
+    ):
+        raise ConfigError("incremental: 'allow_regression' must be a boolean")
+
+    advance = incremental.get("advance", "field_max")
+    if advance not in _INCREMENTAL_ADVANCES:
+        known = ", ".join(f"'{a}'" for a in _INCREMENTAL_ADVANCES)
+        raise ConfigError(
+            f"incremental: unknown 'advance' '{advance}' — expected one of: {known}"
+        )
+
+    window = incremental.get("window")
+    if advance != "field_max" and window is None:
+        raise ConfigError(
+            f"incremental: \"advance\": \"{advance}\" needs a 'window' — "
+            "it is the window's upper bound that the watermark is capped to, "
+            "or moved to"
+        )
+
+    if not incremental.get("enabled"):
+        for key in ("window", "advance", "allow_regression"):
+            if key in incremental:
+                raise ConfigError(
+                    f"incremental: '{key}' only makes sense with \"enabled\": true"
+                )
+        return
+
+    if window is None:
+        return
+    if not isinstance(window, dict):
+        raise ConfigError("incremental: 'window' must be an object")
+    _check_unknown("incremental.window", window, _INCREMENTAL_WINDOW_KEYS)
+    for key in _INCREMENTAL_WINDOW_KEYS:
+        if not isinstance(window.get(key), str) or not window[key]:
             raise ConfigError(
-                "incremental: 'allow_regression' only makes sense with "
-                "\"enabled\": true"
+                f"incremental.window: '{key}' required, as a non-empty string"
             )
+    upper_param, upper_value = window["upper_param"], window["upper_value"]
+    params = config.get("params") or {}
+    if upper_param not in params:
+        known = ", ".join(sorted(params)) or "none"
+        raise ConfigError(
+            f"incremental.window: 'upper_param' '{upper_param}' is not a key of "
+            f"'params' (found: {known}) — the window's upper bound must be the "
+            "value the request actually carries"
+        )
+    if str(params[upper_param]) != upper_value:
+        raise ConfigError(
+            f"incremental.window: params['{upper_param}'] is "
+            f"{str(params[upper_param])!r} but 'upper_value' is {upper_value!r} — "
+            "the bound sent and the bound the watermark is capped to must be "
+            "the same value"
+        )
+    if upper_param == incremental.get("param_name"):
+        raise ConfigError(
+            "incremental.window: 'upper_param' is also the incremental "
+            "'param_name' — the lower and upper bounds need distinct params"
+        )
 
 
 def validate_config(config: dict) -> None:
