@@ -1,4 +1,6 @@
 from flume_lib._delta import resolve_lakehouse_tables_path
+from flume_lib.locks import RunLockedError
+from flume_lib.maintenance import compact_technical_tables
 from flume_lib.source import RunResult, run_source
 from flume_lib.validation import ConfigError, validate_config
 from flume_lib.watermark import read_watermark, reset_watermark, write_watermark
@@ -15,5 +17,7 @@ __all__ = [
     "write_watermark",
     "reset_watermark",
     "resolve_lakehouse_tables_path",
+    "compact_technical_tables",
+    "RunLockedError",
 ]
 __version__ = "0.18.0"

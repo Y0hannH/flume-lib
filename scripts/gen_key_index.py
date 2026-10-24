@@ -90,6 +90,7 @@ _SCOPES = {
     ("source.py", "_build_fetch_page"): "config",
     ("source.py", "run_source"): "config",
     ("source.py", "_run_write"): "config",
+    ("locks.py", "acquire"): "config",
     ("source.py", "_prepare_incremental"): "incremental",
 }
 
@@ -211,7 +212,7 @@ def _named_constant(name: str) -> str | None:
 
 def collect_defaults() -> dict[tuple[str, str], str]:
     defaults: dict[tuple[str, str], str] = {}
-    for filename in ("pagination.py", "auth.py", "source.py"):
+    for filename in ("pagination.py", "auth.py", "source.py", "locks.py"):
         tree = ast.parse((ROOT / "src" / "flume_lib" / filename).read_text(encoding="utf-8"))
         collector = _DefaultCollector(filename)
         collector.visit(tree)
@@ -322,6 +323,14 @@ _NOTES = {
     ("auth.oauth2_client_credentials", "urlencode_credentials"):
         "form-urlencodes id and secret in the Basic header (RFC 6749 §2.3.1); "
         'needs `"client_auth": "basic"`',
+    ("config", "max_response_bytes"):
+        "caps one response body; a streamed read, so a huge or endless body is cut off",
+    ("config", "max_run_seconds"):
+        "wall-clock limit for the run; checked before each request and between chunks",
+    ("config", "single_instance"):
+        "refuses a second run of the same source while one is going (advisory lock)",
+    ("config", "lock_ttl_seconds"):
+        "how long a run's lock lives if the run dies; must exceed `max_run_seconds`",
     ("config", "allow_literal_secrets"):
         "lifts the refusal of a literal secret in `auth` — throwaway tests only",
     ("config", "allow_insecure_http"):

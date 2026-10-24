@@ -1,6 +1,8 @@
 """Point d'entrée unique : run_source(config) -> RunResult. Ne lève jamais
 d'exception vers l'appelant."""
 
+import json
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -24,6 +26,7 @@ from flume_lib._delta import (
 )
 from flume_lib.auth import AuthProvider
 from flume_lib.incremental import compare, shift_days
+from flume_lib.locks import RunLock
 from flume_lib.logging_ import write_log_run
 from flume_lib.pagination import _MISSING, get_path, paginate
 from flume_lib.secrets_ import redact
@@ -53,6 +56,16 @@ LINEAGE_RUN_ID = "_flume_run_id"
 LINEAGE_INGESTED_AT = "_flume_ingested_at"
 
 DRY_RUN_SAMPLE_SIZE = 3
+
+# Plafond du corps d'une réponse de données. Une page légitime pèse quelques
+# mégaoctets ; au-delà, c'est une API qui ne pagine pas, ou un serveur qui
+# déverse un flux : `response.json()` chargeait tout en mémoire, sans borne.
+DEFAULT_MAX_RESPONSE_BYTES = 100 * 1024 * 1024
+_READ_CHUNK_BYTES = 64 * 1024
+# Ce qu'on lit d'une réponse d'erreur pour en tirer `MAX_ERROR_DETAIL_CHARS`
+# caractères : de quoi couvrir de l'UTF-8 à quatre octets par caractère, et les
+# blancs que la mise en forme écrase.
+_ERROR_BODY_READ_BYTES = 16 * 1024
 
 # Préfixe du montage local du lakehouse par défaut : delta-rs ne peut pas y
 # commiter. `resolve_lakehouse_tables_path` le remplace par une URI ABFSS ; s'il
@@ -132,6 +145,14 @@ class ExpiredTokenError(RetryableError):
         )
 
 
+class ResponseTooLargeError(Exception):
+    """Le corps d'une réponse dépasse `max_response_bytes`."""
+
+
+class RunTimeoutError(Exception):
+    """Le run a dépassé `max_run_seconds`."""
+
+
 class IncrementalError(Exception):
     """Le watermark ne peut pas être calculé ou avancé sans risque."""
 
@@ -163,11 +184,81 @@ def _response_detail(response) -> str:
     dépense pas sa troncature en retours à la ligne.
     """
     try:
-        body = response.text
+        body = _error_body_text(response)
     except Exception:  # noqa: BLE001 — un corps illisible ne masque pas le statut
         return ""
     body = " ".join((body or "").split())
     return f": {body[:MAX_ERROR_DETAIL_CHARS]}" if body else ""
+
+
+def _error_body_text(response) -> str:
+    """Début du corps d'une réponse d'erreur. Une vraie réponse est lue en flux
+    et abandonnée après quelques kilooctets : `response.text` aurait chargé tout
+    le corps, et un serveur hostile choisit sa taille. Toute autre réponse (les
+    doublures des tests) garde `.text`."""
+    if not isinstance(response, requests.Response):
+        return response.text
+    data = b""
+    for chunk in response.iter_content(chunk_size=_READ_CHUNK_BYTES):
+        data += chunk
+        if len(data) >= _ERROR_BODY_READ_BYTES:
+            break
+    response.close()
+    return data[:_ERROR_BODY_READ_BYTES].decode(response.encoding or "utf-8", errors="replace")
+
+
+def _check_deadline(deadline: float | None, limit: float | None) -> None:
+    """Lève `RunTimeoutError` si l'échéance du run est passée. `deadline` est un
+    instant de l'horloge monotone ; `limit` la durée configurée, pour le message."""
+    if deadline is not None and time.monotonic() > deadline:
+        raise RunTimeoutError(
+            f"the run exceeded max_run_seconds ({limit:g} s) — stopped before "
+            "reaching the end of the source. Rows already written stay in the table."
+        )
+
+
+def _discard(response) -> None:
+    """Libère la connexion d'une réponse dont on ne lira pas le corps."""
+    close = getattr(response, "close", None)
+    if close is not None:
+        close()
+
+
+def _read_json(response, url: str, max_bytes: int, deadline, limit):
+    """Corps JSON d'une réponse, lu en flux sous deux bornes : sa taille
+    (`max_bytes`) et l'échéance du run.
+
+    `requests` ne borne la durée que **entre deux octets** (`timeout`) : un
+    serveur qui en envoie un toutes les 50 secondes garde la requête ouverte
+    indéfiniment. L'échéance est donc revérifiée à chaque bloc lu. Toute
+    réponse qui n'est pas une `requests.Response` (les doublures des tests) garde
+    `.json()`."""
+    if not isinstance(response, requests.Response):
+        return response.json()
+    declared = response.headers.get("Content-Length", "")
+    if declared.isdigit() and int(declared) > max_bytes:
+        response.close()
+        raise ResponseTooLargeError(
+            f"response from {_safe_url(url)} announces {int(declared)} bytes, above "
+            f"max_response_bytes ({max_bytes})"
+        )
+    chunks, size = [], 0
+    for chunk in response.iter_content(chunk_size=_READ_CHUNK_BYTES):
+        size += len(chunk)
+        if size > max_bytes:
+            response.close()
+            raise ResponseTooLargeError(
+                f"response from {_safe_url(url)} exceeds max_response_bytes "
+                f"({max_bytes}) — the API is not paginating, or the page size is too large"
+            )
+        _check_deadline(deadline, limit)
+        chunks.append(chunk)
+    response.close()
+    try:
+        return json.loads(b"".join(chunks))
+    except ValueError as exc:
+        # même type que `response.json()` : c'est lui que `error_message` recopie
+        raise requests.exceptions.JSONDecodeError(str(exc), "", 0) from None
 
 
 def _safe_url(url: str) -> str:
@@ -401,8 +492,12 @@ def _scope_auth_headers(session, header_names: set) -> None:
     session.rebuild_auth = rebuild_auth
 
 
-def _build_fetch_page(config: dict, variables: dict | None = None):
+def _build_fetch_page(
+    config: dict, variables: dict | None = None, deadline: float | None = None
+):
     auth = AuthProvider(config.get("auth"))
+    max_bytes = config.get("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES)
+    run_limit = config.get("max_run_seconds")
     retry_config = config.get("retry", {})
     timeout = config.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
     method = str(config.get("method", "GET")).upper()
@@ -451,7 +546,10 @@ def _build_fetch_page(config: dict, variables: dict | None = None):
             renewed = auth.headers()
             session.headers.update(renewed)
             auth_header_names.update(renewed)
-        kwargs = {"timeout": timeout}
+        # avant tout appel, retries compris : l'échéance du run n'est pas
+        # rejouable. `stream` : le corps est lu par morceaux, sous plafond.
+        _check_deadline(deadline, run_limit)
+        kwargs = {"timeout": timeout, "stream": True}
         if method == "GET" and not allow_body_on_get:
             kwargs["params"] = params
         elif params_in == "body":
@@ -486,6 +584,7 @@ def _build_fetch_page(config: dict, variables: dict | None = None):
             raise sanitized_request_error(exc, url, kwargs.get("params")) from None
         retry_after = _parse_retry_after(response.headers.get("Retry-After"))
         if response.status_code == 429 or response.status_code >= 500:
+            _discard(response)
             raise RetryableHTTPError(response.status_code, _safe_url(url), retry_after)
         if (
             response.status_code == 401
@@ -496,6 +595,7 @@ def _build_fetch_page(config: dict, variables: dict | None = None):
             # persiste avec un token neuf, ce n'est pas une expiration et
             # rejouer ne ferait que retarder le diagnostic.
             state["refreshed"] = True
+            _discard(response)
             renewed = auth.refresh()
             session.headers.update(renewed)
             auth_header_names.update(renewed)
@@ -506,7 +606,7 @@ def _build_fetch_page(config: dict, variables: dict | None = None):
                 f"{_response_detail(response)}",
                 response=response,
             )
-        payload = response.json()
+        payload = _read_json(response, url, max_bytes, deadline, run_limit)
         _check_response_errors(payload, errors_config, _safe_url(url), retry_after)
         # headers requis par certaines stratégies (ex. total de pages)
         return payload, response.headers
@@ -999,6 +1099,19 @@ def _run_write(
         progress.warnings.extend(writer.warnings)
 
 
+def _release_lock(lock: RunLock, progress: _Progress) -> None:
+    """Libère le verrou du run, quoi qu'il soit arrivé. Un échec n'est pas
+    levé — il masquerait la cause du run — mais dit : le verrou tombera à son
+    échéance (`lock_ttl_seconds`)."""
+    try:
+        lock.release()
+    except Exception as exc:  # noqa: BLE001
+        progress.warnings.append(
+            f"the run lock could not be released ({type(exc).__name__}: {exc}); it "
+            "expires on its own after lock_ttl_seconds"
+        )
+
+
 def _persist_run(
     result: RunResult,
     lakehouse_tables_path: str,
@@ -1107,9 +1220,15 @@ def run_source(
     path_warning = None if dry_run else _lakehouse_path_warning(lakehouse_tables_path)
     if path_warning:
         progress.warnings.append(path_warning)
+    lock = RunLock(
+        lakehouse_tables_path, source_name, run_id, log_schema, storage_options,
+        enabled=not dry_run,
+    )
 
     try:
         validate_config(config)
+        # tôt : refuser un second run avant qu'il ne lise le watermark du premier
+        lock.acquire(config)
 
         # `or {}` : un `incremental: null` vaut « absent », comme à la validation
         incremental = config.get("incremental") or {}
@@ -1117,6 +1236,8 @@ def run_source(
         # Variables offertes au templating de 'body' et 'params'. Alimentées
         # par le watermark quand il doit atterrir ailleurs qu'en query string.
         variables: dict[str, str] = {}
+        run_limit = config.get("max_run_seconds")
+        deadline = time.monotonic() + run_limit if run_limit else None
         _prepare_incremental(
             incremental, params, variables, progress,
             lakehouse_tables_path, source_name, log_schema, storage_options,
@@ -1126,7 +1247,7 @@ def run_source(
         # `progress.warnings` est alimentée par la pagination, puis complétée
         # par le writer : les deux signalent des dégradations qui ne font pas
         # échouer le run.
-        fetch_page = _build_fetch_page(config, variables)
+        fetch_page = _build_fetch_page(config, variables, deadline)
         pages = paginate(
             fetch_page,
             config["base_url"],
@@ -1156,6 +1277,7 @@ def run_source(
         session = getattr(fetch_page, "session", None)
         if session is not None:
             session.close()
+        _release_lock(lock, progress)
 
     # Une seule porte de sortie pour ce qui est persisté ou rendu à l'appelant
     if error_message is not None:

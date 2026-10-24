@@ -41,6 +41,10 @@ Looking something up rather than reading through? [cookbook.md](cookbook.md) map
 | `target_table` | string | **yes** | — | Destination table, written with `schema_mode=merge`. Letters/digits/underscore only. |
 | `write` | object | no | append | How the target table is written: append, full overwrite, replacement of one window, or merge on a key. See [Write mode](#write-mode). |
 | `fail_on_empty` | boolean | no | `false` | Fails the run when it loads no row — before the watermark moves. See [Incremental](#incremental-watermark). |
+| `max_response_bytes` | integer | no | `104857600` (100 MiB) | Largest accepted body for one data response. See [Limits on a run](#limits-on-a-run). |
+| `max_run_seconds` | number | no | none | Wall-clock limit for the whole run. See [Limits on a run](#limits-on-a-run). |
+| `single_instance` | boolean | no | `false` | Refuses a second run of the same source while one is going. See [One run at a time](#one-run-at-a-time). |
+| `lock_ttl_seconds` | number | no | `21600` (6 h) | How long the lock of a run that died lasts. Only with `single_instance`. |
 | `allow_literal_secrets` | boolean | no | `false` | Accepts a literal string where a secret is expected (`auth.token`, `auth.client_secret`, a credential header…). Refused by default — see [Secret references](#secret-references). For a throwaway local test only. |
 | `allow_insecure_http` | boolean | no | `false` | Accepts a `base_url` or `token_url` in plain `http://`. Refused by default except towards `localhost`. For a trusted internal network only. |
 | `batch_size` | integer | no | `50000` | Rows buffered before each Delta write. Bounds the memory of a run. See [Batched writes](#batched-writes). |
@@ -333,6 +337,42 @@ Every written row carries two extra columns:
 | `_flume_ingested_at` | ISO 8601 UTC timestamp of the write. |
 
 They make it possible to trace a row back to the run that produced it, de-duplicate after a partial retry, or isolate the rows of a bad run. The `_flume_` prefix avoids collisions with API fields.
+
+### Limits on a run
+
+Two bounds, because `requests`' `timeout` is neither.
+
+- **`max_response_bytes`** (default 100 MiB) caps the body of **one data response**. The body is read as a stream: a `Content-Length` above the cap is refused before a byte is read, and a body without one is cut off as soon as it passes the cap — the library no longer loads whatever the server decides to send. The decompressed size counts, so a compressed bomb is stopped too. A page is a few megabytes, so the default only ever trips on an API that does not paginate; lower it to what your largest page needs. The body of a `4xx` is read the same way: only its first 16 KiB, of which the message keeps 500 characters.
+- **`max_run_seconds`** (default: none) is a wall-clock limit for the run. `timeout_seconds` bounds the silence **between two bytes**, not the total: a server that sends one byte every 50 seconds keeps a request open for as long as it likes. The deadline is checked before every request (retries included) and after every chunk read, so it also stops such a drip. It does not interrupt a request in flight beyond that: a run can overrun by one chunk read or one backoff wait. The failure is an ordinary failed run — batches already written stay, and with `checkpoint` the next run resumes.
+
+Both apply to **data calls**. The token calls keep their own `timeout_seconds` and read their (small) body whole.
+
+### One run at a time
+
+Two runs of the same source at once — a notebook relaunched by hand while the pipeline is still going — load the same window twice (in `append`, every row is duplicated) or start from a watermark the other is about to pass. `"single_instance": true` makes the second one fail at once with `RunLockedError`, naming the run that holds the source, before it reads the watermark or sends a request.
+
+It is an **advisory** lock, held in a technical table `run_locks` beside `watermark` and `log_runs`. Delta-rs offers no conditional create, so the lock is taken in two steps: read the active locks, write its own row, then read again — and if another lock is visible, withdraw and refuse. Two runs cannot both get through; two runs starting in the same instant may **both be refused**, and one of them has to be started again. A wrong refusal costs a rerun, a wrong admission costs duplicated data.
+
+- It only holds if **every** run of the source asks for it. A run without the option ignores the lock.
+- It expires: a run that dies (killed kernel, lost machine) frees nothing, so the lock lives `lock_ttl_seconds` (default 6 hours) and is then ignored. Set it longer than your longest run; validation requires it to exceed `max_run_seconds` when both are set. A run that outlasts its lock is no longer protected.
+- The lock is released in every case — success, failure, interruption. If the release itself fails, the run says so in `warnings`; the lock then expires on its own.
+- A dry run takes no lock.
+- The lock costs a handful of small Delta commits per run (compact them with `compact_technical_tables`, below): turn it on for the sources where an overlap would do damage.
+
+`RunLockedError` is raised **inside** `run_source`'s catch-all like every other error: the result is `failed` with the message `RunLockedError: …`, and the refusal is logged in `log_runs`.
+
+### Keeping the technical tables small
+
+`watermark`, `log_runs` and `run_locks` receive one row per run, appended: a Parquet file of a few bytes and one more commit each time. After a few thousand runs the Delta log is slow to replay and the folder holds as many small files — which slows **every** run, since each reads the watermark. `watermark` also keeps rows nobody reads: only the latest per source counts.
+
+```python
+from flume_lib import compact_technical_tables
+
+compact_technical_tables()                      # defaults: the run_source ones
+compact_technical_tables(vacuum=True)           # also delete unused files
+```
+
+It prunes `watermark` to the latest row of each source (the current watermark is unchanged, its history of advances is gone), deletes `run_locks` rows expired for more than a day, merges the small files of all three tables, and never deletes from `log_runs`, which is the history of the runs. It returns, per table, `rows_pruned`, `files_removed` and `files_added` (and `files_vacuumed` with `vacuum=True`, which stops time travel beyond seven days). Run it **between runs**, once a week is plenty: it is not meant to execute while a run writes the same tables.
 
 ### Interrupted runs
 
