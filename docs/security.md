@@ -117,6 +117,15 @@ A rejected watermark fails the run before any HTTP call, and the failure lands i
 - A `Retry-After` header from the server takes precedence over the local backoff, so the library does not retry earlier than it was told to. The delay a server can impose is itself capped (`retry.max_retry_after_seconds`, default 300 s) — a hostile or broken server cannot park a notebook for hours.
 - `oauth1` signs each request with HMAC over the method, URL and query params, with a fresh nonce and timestamp per request; credentials are never sent on the wire.
 
+## Resource limits
+
+A remote API is untrusted, and `requests` bounds neither the size of a response nor its total duration — `timeout` is the silence between two bytes. Two limits fill the gap (details in [configuration.md](configuration.md#limits-on-a-run)):
+
+- **`max_response_bytes`** (100 MiB by default) cuts a body off as it streams in, whether or not the server announces a length, and counts decompressed bytes. Before, `response.json()` loaded whatever arrived, and the body of a `4xx` was read whole to quote 500 characters of it.
+- **`max_run_seconds`** (opt-in) is checked before every request and after every chunk, so a server dripping one byte every few seconds no longer holds a notebook indefinitely. It does not interrupt a request already blocked in a socket read: the overrun is bounded by `timeout_seconds` plus one backoff wait.
+
+Not covered: the token calls (`oauth2_client_credentials`, `token_endpoint`) read their response whole under their own `timeout_seconds`. They go to the IdP named in the configuration, which is trusted at the same level as the rest of it.
+
 ## Writes
 
 - Schema and table names from the configuration are validated (`[A-Za-z_][A-Za-z0-9_]*`) before being used in a path — a value like `../../Files/x` is rejected, so a malformed or malicious configuration cannot write outside `Tables/<schema>/`.

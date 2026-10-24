@@ -609,5 +609,30 @@ def delete_rows(uri: str, predicate: str, storage_options: dict | None = None) -
     return int(metrics.get("num_deleted_rows", 0))
 
 
+def compact_table(uri: str, storage_options: dict | None = None) -> dict | None:
+    """Regroupe les petits fichiers d'une table (`OPTIMIZE`). Retourne les
+    métriques de delta-rs, ou None si la table n'existe pas. Une table à
+    laquelle on ajoute une ligne par run accumule un fichier par écriture."""
+    try:
+        dt = DeltaTable(uri, storage_options=storage_options_for(uri, storage_options))
+    except TableNotFoundError:
+        return None
+    return dict(dt.optimize.compact())
+
+
+def vacuum_table(
+    uri: str, storage_options: dict | None = None, retention_hours: int = 168
+) -> int:
+    """Supprime les fichiers que la table n'utilise plus et que plus aucune
+    lecture récente ne peut réclamer. Retourne leur nombre, 0 si la table
+    n'existe pas. Après un VACUUM, le voyage dans le temps ne remonte plus
+    au-delà de `retention_hours`."""
+    try:
+        dt = DeltaTable(uri, storage_options=storage_options_for(uri, storage_options))
+    except TableNotFoundError:
+        return 0
+    return len(dt.vacuum(retention_hours=retention_hours, dry_run=False))
+
+
 def sql_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"

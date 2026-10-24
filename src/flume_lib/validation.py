@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 from flume_lib._delta import parse_column_type
 from flume_lib.auth import CLIENT_AUTH_MODES
+from flume_lib.locks import DEFAULT_LOCK_TTL_SECONDS
 from flume_lib.oauth1 import SIGNATURE_METHODS
 from flume_lib.templating import NORMALIZERS, VALUE_FORMATS, templated_placeholders
 
@@ -22,6 +23,7 @@ _OPTIONAL = (
     "timeout_seconds", "method", "body", "body_format", "headers",
     "errors", "template_paths", "batch_size", "write", "allow_body_on_get",
     "fail_on_empty", "allow_insecure_http", "allow_literal_secrets",
+    "max_response_bytes", "max_run_seconds", "single_instance", "lock_ttl_seconds",
 )
 
 # Clés autorisées par type d'auth. Les formes historiques *_env_var sont
@@ -235,6 +237,20 @@ def _check_literal_secret(section: str, key: str, value, allow: bool) -> None:
     )
 
 
+def _check_lock_outlives_run(config: dict) -> None:
+    """Un verrou qui expire avant la fin autorisée du run ne protège plus rien :
+    un second run le prendrait pour abandonné. Les deux bornes se contrôlent."""
+    limit = config.get("max_run_seconds")
+    if not config.get("single_instance") or limit is None:
+        return
+    ttl = config.get("lock_ttl_seconds", DEFAULT_LOCK_TTL_SECONDS)
+    if ttl <= limit:
+        raise ConfigError(
+            f"config: lock_ttl_seconds ({ttl:g}) must exceed max_run_seconds "
+            f"({limit:g}) — the lock would expire while the run may still be going"
+        )
+
+
 def _check_number(
     section: str, config: dict, key: str, *, integer: bool = True,
     allow_zero: bool = False,
@@ -385,6 +401,17 @@ def _validate_top_level(config: dict) -> _Flags:
 
     _check_number("config", config, "batch_size")
     _check_number("config", config, "timeout_seconds", integer=False)
+    _check_number("config", config, "max_response_bytes")
+    _check_number("config", config, "max_run_seconds", integer=False)
+    _check_number("config", config, "lock_ttl_seconds", integer=False)
+    if not isinstance(config.get("single_instance", False), bool):
+        raise ConfigError("config: 'single_instance' must be a boolean")
+    if "lock_ttl_seconds" in config and not config.get("single_instance"):
+        raise ConfigError(
+            "config: 'lock_ttl_seconds' sets the lifetime of the run lock and only "
+            'makes sense with "single_instance": true'
+        )
+    _check_lock_outlives_run(config)
     if "params" in config and not isinstance(config["params"], dict):
         raise ConfigError("params: must be an object")
     return _Flags(method, allow_body_on_get, allow_http, allow_literals)

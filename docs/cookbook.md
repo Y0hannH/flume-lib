@@ -344,6 +344,10 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `fail_on_empty` | — | `false` | fails the run when no row was loaded, before the watermark moves |
 | `allow_insecure_http` | — | — | accepts plain `http://` for `base_url` / `token_url`; `localhost` is always accepted |
 | `allow_literal_secrets` | — | — | lifts the refusal of a literal secret in `auth` — throwaway tests only |
+| `max_response_bytes` | — | `104 857 600` | caps one response body; a streamed read, so a huge or endless body is cut off |
+| `max_run_seconds` | — | — | wall-clock limit for the run; checked before each request and between chunks |
+| `single_instance` | — | — | refuses a second run of the same source while one is going (advisory lock) |
+| `lock_ttl_seconds` | — | — | how long a run's lock lives if the run dies; must exceed `max_run_seconds` |
 
 #### `pagination` — common to every strategy
 
