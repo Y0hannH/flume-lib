@@ -45,7 +45,9 @@ from flume_lib import validation as V  # noqa: E402
 from flume_lib.oauth1 import SIGNATURE_METHODS  # noqa: E402
 from flume_lib.templating import NORMALIZERS, VALUE_FORMATS  # noqa: E402
 
-COOKBOOK = ROOT / "docs" / "cookbook.md"
+# Deux documents portent le même index généré : le cookbook humain et celui des
+# agents. Un index recopié à la main dans le second aurait dérivé du premier.
+TARGETS = (ROOT / "docs" / "cookbook.md", ROOT / "docs" / "agent-cookbook.md")
 BEGIN = "<!-- BEGIN GENERATED KEY INDEX -->"
 END = "<!-- END GENERATED KEY INDEX -->"
 
@@ -492,26 +494,31 @@ def main() -> int:
     args = parser.parse_args()
 
     generated = render()
-    text = COOKBOOK.read_text(encoding="utf-8")
-    if BEGIN not in text or END not in text:
-        print(f"gen_key_index : marqueurs {BEGIN} / {END} absents de {COOKBOOK.name}")
-        return 1
+    stale = []
+    for target in TARGETS:
+        text = target.read_text(encoding="utf-8")
+        if BEGIN not in text or END not in text:
+            print(f"gen_key_index : marqueurs {BEGIN} / {END} absents de {target.name}")
+            return 1
+        head, _, rest = text.partition(BEGIN)
+        _, _, tail = rest.partition(END)
+        updated = f"{head}{generated}{tail}"
+        if updated != text:
+            stale.append((target, updated))
 
-    head, _, rest = text.partition(BEGIN)
-    _, _, tail = rest.partition(END)
-    updated = f"{head}{generated}{tail}"
-
-    if updated == text:
+    if not stale:
         print("gen_key_index : l'index est à jour")
         return 0
     if args.check:
+        names = ", ".join(str(t.relative_to(ROOT)) for t, _ in stale)
         print(
-            "gen_key_index : docs/cookbook.md a divergé du code.\n"
+            f"gen_key_index : {names} a divergé du code.\n"
             "  Regénérer : python scripts/gen_key_index.py"
         )
         return 1
-    COOKBOOK.write_text(updated, encoding="utf-8")
-    print(f"gen_key_index : {COOKBOOK.relative_to(ROOT)} regénéré")
+    for target, updated in stale:
+        target.write_text(updated, encoding="utf-8")
+        print(f"gen_key_index : {target.relative_to(ROOT)} regénéré")
     return 0
 
 

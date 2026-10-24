@@ -166,7 +166,7 @@ That is the **standard** flow: a form-encoded `POST` carrying `grant_type=client
 
 Three things worth knowing about both, because they are what makes a long run survive:
 
-- **The token is renewed mid-run.** An API handing out 30-minute tokens no longer breaks a two-hour backfill. With a lifetime known — `expires_in` is standard in OAuth2, and `expires_in_json_path` supplies it for `token_endpoint` — renewal happens 60 seconds *before* expiry, wasting no call. Without one, renewal is reactive: on a 401 the library logs in again and replays the page, once per page. Both work; the first is free.
+- **The token is renewed mid-run.** An API handing out 30-minute tokens no longer breaks a two-hour backfill. With a lifetime known — `expires_in` is standard in OAuth2, and `expires_in_json_path` supplies it for `token_endpoint` — renewal happens shortly *before* expiry (10 % of the lifetime ahead, at most 60 seconds), wasting no call. Without one, renewal is reactive: on a 401 the library logs in again and replays the page, once per page. Both work; the first is free.
 - **A `token_endpoint` declared as GET with a secret reference in `body` is refused at validation.** Those values would leave as query params, into every server log and proxy in between. It is a POST or it is nothing.
 - **A wrong client secret fails as `AuthError`, before any data call.** A dry run is therefore a complete credential test, and the cheapest way to check a rotation.
 - **A failed token call quotes the vendor's own error message**, truncated to 500 characters, next to the status code. A bare `HTTP 401` says nothing about *which* 401 it is — misplaced credentials, expired secret, deactivated account — while the body of the response usually names it outright.
@@ -200,6 +200,12 @@ It exercises the credential, the pagination and the response shape, and touches 
 | `PaginationError:` | the loop lost its footing | `items_field`, `cursor_field`, a missing `total_pages_header` / `total_pages_field` |
 | `IncrementalError:` | the watermark did not advance, or does not sort | `incremental.field`, `value_format` |
 | `APIError:` | the API returned an error inside a 200 | your `errors` block |
+| `DeltaWriteError:` | Delta refused the write | the message names the cause (predicate, column, merge key, `column_types`) |
+| `TemplateError:` | a `{placeholder}` has no variable, or a value is forbidden | placeholders, `template_paths`, `value_format` |
+| `RunLockedError:` | another run of the source holds the `single_instance` lock | wait, or rerun |
+| `ResponseTooLargeError:` / `RunTimeoutError:` | `max_response_bytes` / `max_run_seconds` exceeded | the cap, or the source |
+
+The complete catalogue, with the actions, is in [agent-cookbook.md](agent-cookbook.md#62-error_message-prefixes).
 
 Query strings are stripped from these messages before they reach `log_runs`: the table is readable by the whole lakehouse, and a config that put a token in a URL would otherwise republish it there.
 
@@ -238,7 +244,7 @@ All three default to the table `run_source` uses: the same `lakehouse_tables_pat
 
 A wrong delete is recoverable: Delta keeps the history. For the table itself, `DeltaTable(uri).history(5)` lists the versions and `.restore(<version>)` puts it back as it was.
 
-`write_watermark` appends rather than upserting so that two sources can commit at the same time without a conflict; the table therefore grows by one row per advance. It stays tiny, but `reset_watermark` on a source you are retiring is the way to prune it.
+`write_watermark` appends rather than upserting so that two sources can commit at the same time without a conflict; the table therefore grows by one row per advance. It stays tiny, but each advance is one more file and one more commit: `compact_technical_tables()` keeps the latest row of each source and merges the small files, and `reset_watermark` on a source you are retiring removes its rows.
 
 ### 4.2 The watermark only moves forward
 
