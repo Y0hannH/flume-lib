@@ -42,22 +42,24 @@ Facts that shape the code you write:
 
 ```python
 from flume_lib import (
-    run_source, run_source_windows, validate_config,
+    run_source, run_sources, run_source_windows, validate_config,
     read_watermark, write_watermark, reset_watermark,
-    compact_technical_tables, retype_columns, resolve_lakehouse_tables_path,
-    RunResult, ConfigError, WindowRunError, RunLockedError,
+    compact_technical_tables, compact_data_tables, retype_columns, resolve_lakehouse_tables_path,
+    RunResult, SourcesResult, ConfigError, WindowRunError, RunLockedError, RunSourcesError,
 )
 ```
 
 | Name | Signature | Returns / raises |
 |---|---|---|
-| `run_source` | `(config, lakehouse_tables_path="/lakehouse/default/Tables", storage_options=None, log_schema="flume", dry_run=False)` | `RunResult`. Never raises on a source problem. |
+| `run_source` | `(config, lakehouse_tables_path="/lakehouse/default/Tables", storage_options=None, log_schema="flume", dry_run=False, on_progress=None)` | `RunResult`. Never raises on a source problem. `on_progress(pages, rows)` is called after each page; if it raises it is dropped and `warnings` says so. |
 | `validate_config` | `(config)` | `None`. Raises only `ConfigError`. |
-| `run_source_windows` | `(config_factory, until, max_span_days, max_iterations=1000, lakehouse_tables_path=…, storage_options=None, log_schema="flume")` | `list[RunResult]`. Raises `WindowRunError` (`.results` holds the runs so far) or `ValueError` on bad arguments. |
+| `run_sources` | `(configs, lakehouse_tables_path=…, storage_options=None, log_schema="flume", dry_run=False, max_workers=1, stop_on_failure=False, on_progress=None)` | `SourcesResult`: `.results` (input order), `.succeeded`, `.failed`, `.skipped`, `.rows_loaded`, `.ok`, `.summary()`, `.raise_for_failures()` (raises `RunSourcesError`). `ValueError` before any run on a bad list, a missing or duplicate `name`, or two sources on one table with `max_workers > 1`. A failing source is a failed `RunResult`, never an exception. `on_progress(source_name, pages, rows)`. |
+| `run_source_windows` | `(config_factory, until, max_span_days, max_iterations=1000, lakehouse_tables_path=…, storage_options=None, log_schema="flume", on_progress=None)` | `list[RunResult]`. Raises `WindowRunError` (`.results` holds the runs so far) or `ValueError` on bad arguments. |
 | `read_watermark` | `(lakehouse_tables_path=…, source_name=None, schema="flume", storage_options=None)` | `str \| None`. `source_name` is required: **call by keyword**. |
 | `write_watermark` | `(lakehouse_tables_path=…, source_name=None, last_value=None, schema="flume", storage_options=None)` | `None`. Appends a row. |
 | `reset_watermark` | `(source_name, schema="flume", storage_options=None, lakehouse_tables_path=…)` | `int`, rows deleted for that source only. |
 | `compact_technical_tables` | `(lakehouse_tables_path=…, schema="flume", storage_options=None, vacuum=False)` | `dict` per table: `rows_pruned`, `files_removed`, `files_added`. |
+| `compact_data_tables` | `(tables, lakehouse_tables_path=…, storage_options=None, vacuum=False, retention_hours=168)` | `dict` per `"schema.table"`: `files_removed`, `files_added`, and `files_vacuumed` with `vacuum=True`. `ValueError` before any work if a table is absent or `retention_hours` < 168. Between runs. |
 | `retype_columns` | `(target_schema, target_table, column_types, lakehouse_tables_path=…, storage_options=None)` | `int`, rows rewritten. Changes the type of existing columns (`double`, `string`, `decimal(p,s)`, `date`); every value is checked first, nothing is written if one does not fit. Raises `DeltaWriteError`. |
 | `resolve_lakehouse_tables_path` | `(path)` | `str`; in Fabric, the ABFSS URI of the default lakehouse. |
 
@@ -86,7 +88,7 @@ from flume_lib import (
 Cell 1 — install (see above). Then:
 
 ```python
-from flume_lib import ConfigError, run_source, validate_config
+from flume_lib import ConfigError, run_source, run_sources, validate_config
 
 KEYVAULT = "https://<vault-name>.vault.azure.net"
 
@@ -123,18 +125,16 @@ for source in SOURCES:
 
 ```python
 # Cell 4 — the real run, then fail loudly.
-results = [run_source(source) for source in SOURCES]
-for result in results:
-    print(result.source_name, result.status, result.rows_loaded, result.error_message)
+outcome = run_sources(SOURCES)
+print(outcome)                   # a total, then one line per source
+for result in outcome.results:
     for warning in result.warnings:
-        print("  warning:", warning)
+        print(result.source_name, "warning:", warning)
 
-failed = [result for result in results if result.status == "failed"]
-if failed:
-    raise RuntimeError(
-        "; ".join(f"{result.source_name}: {result.error_message}" for result in failed)
-    )
+outcome.raise_for_failures()     # raises RunSourcesError if a source failed or was skipped
 ```
+
+`run_sources` is the loop around `run_source`, written once: results in the order given, a failing source never stops the others (unless `stop_on_failure=True`), `max_workers` runs sources in parallel, and `raise_for_failures()` fails the notebook — which is what a pipeline sees. Duplicate or missing `name`s are refused before anything runs; with `max_workers > 1` so are two sources writing the same table. For one source, call `run_source` directly.
 
 A dry run walks the **whole** pagination: while testing a large source, add `"max_pages": 2` to `pagination` (reaching it fails the run, which is acceptable for a probe) or test against a narrow filter.
 
@@ -261,6 +261,9 @@ Only `decimal(precision,scale)` (precision ≤ 38), `double`, `date` and `string
 | `retry.max_attempts` | 3 | network errors, 429, 5xx, and `errors.retryable_codes`; other 4xx fail at once. A `Retry-After` header wins over backoff (capped by `retry.max_retry_after_seconds`, 300) |
 | `max_response_bytes` | 104 857 600 | cuts one response body off; the run fails |
 | `max_run_seconds` | none | wall-clock limit, checked before each request and between chunks |
+| `proxy` | none | proxy URL (`http(s)://host:port`), or a secret reference holding it when it carries a login; applies to data and token calls, and wins over `HTTPS_PROXY` |
+| `ca_bundle` | none | path of a PEM file to trust instead of the default bundle (TLS-inspecting proxy); there is no way to disable verification |
+| `max_requests_per_second` | none | at most that many requests start per second (replays included); set it from the API's documented quota, below it, to avoid the 429 rather than handle it. `retry.jitter` (default true) disperses the backoff |
 | `batch_size` | 50 000 | rows per Delta commit; lower it if memory runs out |
 | `single_instance` | false | refuses a second run of the same source while one is going (advisory lock in `run_locks`); `lock_ttl_seconds` (default 21 600) must exceed `max_run_seconds` |
 | `allow_insecure_http`, `allow_literal_secrets` | false | escape hatches for a trusted network / a throwaway test. **Do not set them** unless the human asks. |
@@ -695,11 +698,12 @@ Values of `body` and `headers` in `token_endpoint` are literals **or** reference
 | `status` | `"success"` or `"failed"` |
 | `rows_loaded` | rows **actually written**, also on a failed run (and rows counted in a dry run) |
 | `error_message` | `None` on success; `ExceptionClassName: message` on failure, secrets redacted, at most 2 000 characters |
-| `warnings` | `list[str]`: degradations that did not fail the run. **Read it on a `success`.** Not stored in `log_runs`. |
+| `warnings` | `list[str]`: degradations that did not fail the run. **Read it on a `success`.** Also stored in `log_runs.warnings`. |
 | `sample` | dry run only: the first 3 raw records |
 | `watermark_before`, `watermark_after` | with `incremental`: where the run started and where the next one will start. **Equal means the source did not advance**, whatever `rows_loaded` says |
 | `window_end` | with `incremental.window`: the upper bound sent |
 | `rows_inserted`, `rows_updated` | `merge` only; `rows_loaded` stays "rows processed" |
+| `pages`, `retries`, `token_renewals`, `duration_seconds` | what the run cost: data responses received, requests replayed, tokens obtained again, seconds. All are also columns of `log_runs`, with `target_table`, `write_mode` and `lib_version` |
 
 ### 6.2 `error_message` prefixes
 
@@ -720,7 +724,8 @@ Values of `body` and `headers` in `token_endpoint` are literals **or** reference
 | `EmptyResultError:` | zero rows with `fail_on_empty` | expected if the source was empty |
 | `RunLockedError:` | another run of the source holds the lock (`single_instance`) | wait, or rerun; it expires after `lock_ttl_seconds` |
 | `ResponseTooLargeError:` | a body exceeded `max_response_bytes` | paginate, or raise the cap |
-| `RunTimeoutError:` | `max_run_seconds` exceeded | raise it or narrow the source; written batches stay |
+| `NetworkConfigError:` | `proxy` unresolvable or not a proxy URL, or `ca_bundle` is not a file | the key it names |
+| `RunTimeoutError:` | `max_run_seconds` exceeded, or `max_requests_per_second` too slow to reach the end of the run within it | raise it or narrow the source; written batches stay |
 | `KeyboardInterrupt:` / `SystemExit:` … `run interrupted before completion` | the notebook was cancelled; the exception is re-raised | none |
 
 Plus, appended after ` | `: `écriture log_runs impossible — …` when the `log_runs` row itself could not be written.
@@ -749,6 +754,7 @@ compact_technical_tables()                                    # weekly, between 
 
 - `source_name` must equal `config["name"]` exactly; a typo creates an unrelated entry. Do these between runs, not during one.
 - A **rerun appends** by default. To reload a window use `replace_where` or `merge`; otherwise de-duplicate on `_flume_run_id`. Rows of a failed run can be removed with `DELETE … WHERE _flume_run_id = '<run_id>'`.
+- `compact_data_tables(["bronze.orders"])` merges the small files of data tables (a run writes at least one file per batch) and, with `vacuum=True`, purges the files `replace_where` / `overwrite` replaced. The library never does either by itself.
 - `compact_technical_tables()` keeps the latest watermark per source, drops long-expired lock rows, merges the small files of `watermark`, `log_runs` and `run_locks`, and never deletes from `log_runs`.
 - `log_runs`, `watermark` and `run_locks` are ordinary Delta tables in `log_schema`.
 
@@ -804,6 +810,9 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `max_run_seconds` | — | — | wall-clock limit for the run; checked before each request and between chunks |
 | `single_instance` | — | — | refuses a second run of the same source while one is going (advisory lock) |
 | `lock_ttl_seconds` | — | — | how long a run's lock lives if the run dies; must exceed `max_run_seconds` |
+| `max_requests_per_second` | — | — | at most this many requests start per second, retries included; per run |
+| `proxy` | — | — | proxy URL, or a secret reference holding it (a login lives in the URL); data and token calls; wins over `HTTPS_PROXY` |
+| `ca_bundle` | — | — | PEM file of the authority to trust (TLS-inspecting proxy); verification cannot be disabled |
 
 #### `pagination` — common to every strategy
 
@@ -977,6 +986,7 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `max_attempts` | — | `3` |  |
 | `backoff_multiplier` | — | `1` |  |
 | `max_retry_after_seconds` | — | `300` | ceiling on a `Retry-After` the server asks for |
+| `jitter` | — | `true` | spreads the backoff between half and all of the delay; never a `Retry-After` |
 
 #### `errors`
 

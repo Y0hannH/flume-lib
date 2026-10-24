@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 from flume_lib._delta import parse_column_type
 from flume_lib.auth import CLIENT_AUTH_MODES
 from flume_lib.locks import DEFAULT_LOCK_TTL_SECONDS
+from flume_lib.network import parse_proxy_url
 from flume_lib.oauth1 import SIGNATURE_METHODS
 from flume_lib.templating import NORMALIZERS, VALUE_FORMATS, templated_placeholders
 
@@ -24,6 +25,7 @@ _OPTIONAL = (
     "errors", "template_paths", "batch_size", "write", "allow_body_on_get",
     "fail_on_empty", "allow_insecure_http", "allow_literal_secrets",
     "max_response_bytes", "max_run_seconds", "single_instance", "lock_ttl_seconds",
+    "max_requests_per_second", "proxy", "ca_bundle",
 )
 
 # Clés autorisées par type d'auth. Les formes historiques *_env_var sont
@@ -107,7 +109,7 @@ _INCREMENTAL_KEYS = (
 _INCREMENTAL_INJECTS = ("query_param", "body_template")
 _INCREMENTAL_WINDOW_KEYS = ("upper_param", "upper_value")
 _INCREMENTAL_ADVANCES = ("field_max", "field_max_capped", "upper_bound")
-_RETRY_KEYS = ("max_attempts", "backoff_multiplier", "max_retry_after_seconds")
+_RETRY_KEYS = ("max_attempts", "backoff_multiplier", "max_retry_after_seconds", "jitter")
 
 # Champs d'auth dont la valeur est un secret : une chaîne littérale y est
 # refusée. Les identifiants publics (client_id, username, consumer_key) n'y
@@ -222,6 +224,28 @@ def _check_url(label: str, url, allow_insecure_http: bool) -> None:
             'use https://, or set "allow_insecure_http": true if the network is '
             "trusted (localhost is always accepted)"
         )
+
+
+def _check_network(config: dict) -> None:
+    """Clés `proxy` et `ca_bundle`. Un proxy est une URL sans identifiants, ou
+    la référence de secret qui contient l'URL complète : on n'écrit pas un mot
+    de passe de proxy dans la config."""
+    proxy = config.get("proxy")
+    if proxy is not None:
+        if isinstance(proxy, dict):
+            if not ({"env_var"} <= proxy.keys() or {"keyvault_url"} <= proxy.keys()):
+                raise ConfigError(
+                    "config: 'proxy' as an object must be a secret reference: "
+                    '{"env_var": "NAME"} or {"keyvault_url": "...", "secret_name": "..."}'
+                )
+        else:
+            try:
+                parse_proxy_url(proxy, allow_credentials=False)
+            except ValueError as exc:
+                raise ConfigError(f"config: 'proxy' {exc}") from None
+    ca_bundle = config.get("ca_bundle")
+    if ca_bundle is not None and (not isinstance(ca_bundle, str) or not ca_bundle.strip()):
+        raise ConfigError("config: 'ca_bundle' must be the path of a PEM file")
 
 
 def _check_literal_secret(section: str, key: str, value, allow: bool) -> None:
@@ -403,6 +427,8 @@ def _validate_top_level(config: dict) -> _Flags:
     _check_number("config", config, "timeout_seconds", integer=False)
     _check_number("config", config, "max_response_bytes")
     _check_number("config", config, "max_run_seconds", integer=False)
+    _check_number("config", config, "max_requests_per_second", integer=False)
+    _check_network(config)
     _check_number("config", config, "lock_ttl_seconds", integer=False)
     if not isinstance(config.get("single_instance", False), bool):
         raise ConfigError("config: 'single_instance' must be a boolean")
@@ -961,6 +987,8 @@ def _validate_retry(config: dict) -> None:
         "retry", retry, "max_retry_after_seconds",
         integer=False, allow_zero=True,
     )
+    if not isinstance(retry.get("jitter", True), bool):
+        raise ConfigError("retry: 'jitter' must be a boolean")
 
 
 def validate_config(config: dict) -> None:

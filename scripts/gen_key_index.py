@@ -330,6 +330,14 @@ _NOTES = {
         "caps one response body; a streamed read, so a huge or endless body is cut off",
     ("config", "max_run_seconds"):
         "wall-clock limit for the run; checked before each request and between chunks",
+    ("config", "proxy"):
+        "proxy URL, or a secret reference holding it (a login lives in the URL); "
+        "data and token calls; wins over `HTTPS_PROXY`",
+    ("config", "ca_bundle"):
+        "PEM file of the authority to trust (TLS-inspecting proxy); "
+        "verification cannot be disabled",
+    ("config", "max_requests_per_second"):
+        "at most this many requests start per second, retries included; per run",
     ("config", "single_instance"):
         "refuses a second run of the same source while one is going (advisory lock)",
     ("config", "lock_ttl_seconds"):
@@ -391,6 +399,8 @@ _NOTES = {
         "columns identifying a row; required with `merge`, which accepts `checkpoint`",
     ("write", "when_matched"): "only `update` for now, which is also the default",
     ("retry", "max_retry_after_seconds"): "ceiling on a `Retry-After` the server asks for",
+    ("retry", "jitter"):
+        "spreads the backoff between half and all of the delay; never a `Retry-After`",
     ("errors", "path"): "where the error envelope sits in a 200 response",
     ("errors", "retryable_codes"): "codes retried like a 5xx instead of failing the run",
     ("auth.bearer_token", "value_prefix"):

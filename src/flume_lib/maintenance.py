@@ -1,5 +1,5 @@
-"""Entretien : tables techniques `watermark`, `log_runs` et `run_locks`, et
-retypage des colonnes d'une table de données.
+"""Entretien : tables techniques `watermark`, `log_runs` et `run_locks`,
+fichiers des tables de données, et retypage de leurs colonnes.
 
 Chacune reçoit une ligne par run, écrite en ajout : un fichier Parquet de
 quelques octets et un commit de plus à chaque fois. Au bout de quelques milliers
@@ -21,11 +21,13 @@ from flume_lib._delta import (
     compact_table,
     delete_rows,
     query_table,
+    read_table_types,
     resolve_lakehouse_tables_path,
     retype_table_columns,
     sql_quote,
     table_uri,
     vacuum_table,
+    validate_identifier,
 )
 from flume_lib.locks import LOCKS_TABLE, stamp
 from flume_lib.logging_ import LOG_RUNS_TABLE
@@ -124,3 +126,85 @@ def retype_columns(
     resolved = resolve_lakehouse_tables_path(lakehouse_tables_path)
     uri = table_uri(resolved, target_schema, target_table)
     return retype_table_columns(uri, column_types, storage_options)
+
+
+# En deçà, delta-rs refuse de purger : un lecteur qui a commencé sa lecture
+# avant une purge plus courte verrait ses fichiers disparaître sous ses pieds.
+MIN_VACUUM_RETENTION_HOURS = 168
+
+
+def _split_table(spec) -> tuple[str, str]:
+    """`"bronze.orders"` ou `("bronze", "orders")` → (schéma, table), validés."""
+    if isinstance(spec, str) and spec.count(".") == 1:
+        schema, table = spec.split(".")
+    elif isinstance(spec, (tuple, list)) and len(spec) == 2:
+        schema, table = spec
+    else:
+        raise ValueError(
+            f"{spec!r} is not a table: expected 'schema.table' or (schema, table)"
+        )
+    return validate_identifier(schema, "schema"), validate_identifier(table, "table")
+
+
+def compact_data_tables(
+    tables: list,
+    lakehouse_tables_path: str = DEFAULT_LAKEHOUSE_TABLES_PATH,
+    storage_options: dict | None = None,
+    vacuum: bool = False,
+    retention_hours: int = MIN_VACUUM_RETENTION_HOURS,
+) -> dict[str, dict]:
+    """Regroupe les petits fichiers de tables de données, et purge si on le
+    demande.
+
+    Un run écrit un commit par lot, donc au moins un fichier par lot : une
+    source rechargée tous les jours accumule des milliers de petits fichiers
+    que chaque lecture doit ouvrir. `replace_where` et `overwrite` laissent en
+    plus sur le disque les fichiers qu'ils remplacent, tant que rien ne les
+    purge. La bibliothèque ne le fait pas d'elle-même — ce serait de longues
+    écritures au milieu d'un run — d'où cette fonction, à lancer entre deux
+    runs.
+
+    `tables` : des `"schema.table"` ou des `(schema, table)`. Une table absente
+    est une erreur (`ValueError`, avant de toucher à quoi que ce soit) : sur une
+    table de données, c'est presque toujours une faute de frappe, alors que les
+    tables techniques peuvent légitimement ne pas exister encore.
+
+    `vacuum=True` supprime les fichiers que la table n'utilise plus et que plus
+    aucune lecture récente ne peut réclamer, ce qui interdit ensuite de remonter
+    la table dans le temps au-delà de `retention_hours` (7 jours au minimum).
+
+    Retourne, par table, `files_removed` et `files_added` (le compactage), et
+    `files_vacuumed` si la purge a eu lieu."""
+    if not isinstance(tables, (list, tuple)) or not tables:
+        raise ValueError("tables must be a non-empty list of 'schema.table'")
+    if (
+        isinstance(retention_hours, bool)
+        or not isinstance(retention_hours, int)
+        or retention_hours < MIN_VACUUM_RETENTION_HOURS
+    ):
+        raise ValueError(
+            f"retention_hours must be an integer of at least {MIN_VACUUM_RETENTION_HOURS} "
+            "(7 days): Delta refuses a shorter purge"
+        )
+    resolved = resolve_lakehouse_tables_path(lakehouse_tables_path)
+    targets = {}
+    for spec in tables:
+        schema, table = _split_table(spec)
+        targets[f"{schema}.{table}"] = table_uri(resolved, schema, table)
+
+    absent = [
+        name for name, uri in targets.items() if read_table_types(uri, storage_options) is None
+    ]
+    if absent:
+        raise ValueError(f"table(s) not found: {', '.join(absent)} — nothing was compacted")
+
+    report = {}
+    for name, uri in targets.items():
+        metrics = compact_table(uri, storage_options) or {}
+        report[name] = {
+            "files_removed": int(metrics.get("numFilesRemoved", 0)),
+            "files_added": int(metrics.get("numFilesAdded", 0)),
+        }
+        if vacuum:
+            report[name]["files_vacuumed"] = vacuum_table(uri, storage_options, retention_hours)
+    return report

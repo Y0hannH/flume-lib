@@ -2,6 +2,8 @@
 d'exception vers l'appelant."""
 
 import json
+import random
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -29,6 +31,7 @@ from flume_lib.auth import AuthProvider
 from flume_lib.incremental import compare, shift_days
 from flume_lib.locks import RunLock
 from flume_lib.logging_ import write_log_run
+from flume_lib.network import resolve_network
 from flume_lib.pagination import _MISSING, get_path, paginate
 from flume_lib.secrets_ import redact
 from flume_lib.templating import (
@@ -299,11 +302,25 @@ def _parse_retry_after(raw: str | None) -> float | None:
 def _build_wait(retry_config: dict):
     """Attente entre deux tentatives : le Retry-After annoncé par le serveur
     s'il y en a un, sinon le backoff exponentiel. Respecter l'indication du
-    serveur évite le bannissement sur les APIs à gouvernance stricte."""
-    fallback = wait_exponential(multiplier=retry_config.get("backoff_multiplier", 1))
+    serveur évite le bannissement sur les APIs à gouvernance stricte.
+
+    Le backoff est dispersé (`retry.jitter`, vrai par défaut) : entre la moitié
+    du délai et le délai plein. Des sources lancées ensemble — `run_sources` —
+    qui reçoivent un 429 au même instant se représenteraient sinon toutes au
+    même instant, et retomberaient ensemble sur le même 429. La moitié fixe
+    garde un délai réel : un tirage dans [0, délai] pouvait rejouer aussitôt."""
+    exponential = wait_exponential(multiplier=retry_config.get("backoff_multiplier", 1))
+    jitter = retry_config.get("jitter", True)
     cap = retry_config.get(
         "max_retry_after_seconds", DEFAULT_MAX_RETRY_AFTER_SECONDS
     )
+
+    def fallback(retry_state):
+        delay = exponential(retry_state)
+        if jitter:
+            # dispersion des clients, pas de la cryptographie
+            return delay / 2 + random.uniform(0, delay / 2)  # nosec B311
+        return delay
 
     def wait(retry_state):
         outcome = retry_state.outcome
@@ -313,6 +330,39 @@ def _build_wait(retry_config: dict):
         return fallback(retry_state)
 
     return wait
+
+
+class _Throttle:
+    """Espace les requêtes d'un run : au plus `per_second` départs par seconde.
+
+    Le 429 réactif arrive après le dépassement, et sur une API à gouvernance
+    stricte c'est le dépassement qui est sanctionné. Chaque *tentative* passe
+    par ici, rejeux compris. Une requête dont le départ tomberait au-delà de
+    l'échéance du run échoue tout de suite, sans dormir jusque-là pour rien.
+    Un compteur par run — des sources parallèles ont chacune le leur : un quota
+    partagé entre elles se règle avec `max_workers`."""
+
+    def __init__(self, per_second: float | None):
+        # None : pas de limite, `wait` ne fait rien
+        self._interval = 1.0 / per_second if per_second else None
+        self._next = 0.0
+        self._lock = threading.Lock()
+
+    def wait(self, deadline: float | None = None, limit: float | None = None) -> None:
+        if self._interval is None:
+            return
+        with self._lock:
+            now = time.monotonic()
+            start = max(now, self._next)
+            self._next = start + self._interval
+        if deadline is not None and start >= deadline:
+            raise RunTimeoutError(
+                f"max_requests_per_second would delay the next request past "
+                f"max_run_seconds ({limit:g} s) — stopped before reaching the "
+                "end of the source. Rows already written stay in the table."
+            )
+        if start > now:
+            time.sleep(start - now)
 
 
 _RETRYABLE_EXCEPTIONS = (
@@ -351,6 +401,14 @@ class RunResult:
     # de lignes traitées.
     rows_inserted: int | None = None
     rows_updated: int | None = None
+    # Ce que le run a coûté. `pages` : réponses de données reçues, la dernière
+    # (vide) comprise. `retries` : requêtes rejouées — erreur réseau, 429, 5xx,
+    # erreur applicative annoncée transitoire, rejeu après un 401.
+    # `token_renewals` : tokens obtenus de nouveau après le premier.
+    pages: int = 0
+    retries: int = 0
+    token_renewals: int = 0
+    duration_seconds: float = 0.0
 
 
 def _utc_now() -> str:
@@ -496,7 +554,8 @@ def _scope_auth_headers(session, header_names: set) -> None:
 def _build_fetch_page(
     config: dict, variables: dict | None = None, deadline: float | None = None
 ):
-    auth = AuthProvider(config.get("auth"))
+    network = resolve_network(config)
+    auth = AuthProvider(config.get("auth"), network)
     max_bytes = config.get("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES)
     run_limit = config.get("max_run_seconds")
     retry_config = config.get("retry", {})
@@ -516,10 +575,18 @@ def _build_fetch_page(
         base_body = _render_body(config.get("body", {}), variables or {}, template_paths)
     params_path = pagination_config.get("params_path")
     errors_config = config.get("errors")
+    # ce que le run a coûté en appels : pages reçues, requêtes rejouées
+    stats = {"pages": 0, "retries": 0}
+    throttle = _Throttle(config.get("max_requests_per_second"))
+
+    def _count_retry(retry_state) -> None:
+        stats["retries"] += 1
+
     retryer = Retrying(
         stop=stop_after_attempt(retry_config.get("max_attempts", 3)),
         wait=_build_wait(retry_config),
         retry=retry_if_exception_type(_RETRYABLE_EXCEPTIONS),
+        before_sleep=_count_retry,
         reraise=True,
     )
     session = requests.Session()
@@ -547,10 +614,14 @@ def _build_fetch_page(
             renewed = auth.headers()
             session.headers.update(renewed)
             auth_header_names.update(renewed)
+        # la cadence d'abord : l'attente qu'elle impose compte dans l'échéance
+        throttle.wait(deadline, run_limit)
         # avant tout appel, retries compris : l'échéance du run n'est pas
         # rejouable. `stream` : le corps est lu par morceaux, sous plafond.
         _check_deadline(deadline, run_limit)
-        kwargs = {"timeout": timeout, "stream": True}
+        # `proxies` et `verify` par requête : ceux de la session cèdent devant
+        # HTTPS_PROXY / REQUESTS_CA_BUNDLE, ceux d'une requête non
+        kwargs = {"timeout": timeout, "stream": True, **network}
         if method == "GET" and not allow_body_on_get:
             kwargs["params"] = params
         elif params_in == "body":
@@ -613,13 +684,17 @@ def _build_fetch_page(
         return payload, response.headers
 
     def fetch_page(url: str, params: dict):
-        return retryer(_request, url, params, {"refreshed": False})
+        page = retryer(_request, url, params, {"refreshed": False})
+        stats["pages"] += 1
+        return page
 
     # La session porte le pool de connexions : `run_source` la ferme en
     # sortant, plutôt que d'attendre le ramasse-miettes. Un notebook qui
     # enchaîne les sources en laissait un par run.
     # attribut ajouté à la fonction : `run_source` ferme la session par là
     fetch_page.session = session  # type: ignore[attr-defined]
+    fetch_page.stats = stats  # type: ignore[attr-defined]
+    fetch_page.auth = auth  # type: ignore[attr-defined]
     return fetch_page
 
 
@@ -976,6 +1051,35 @@ class _Progress:
     rows_updated: int | None = None
 
 
+class _Reporter:
+    """Fait suivre au callback `on_progress` le déroulé d'un run : après chaque
+    page, le nombre de pages reçues et de lignes lues jusque-là.
+
+    Un callback qui lève ne fait pas échouer le run — son rôle est de montrer,
+    pas de décider : il est abandonné, et le run le dit une fois dans
+    `warnings`. (Une interruption, `KeyboardInterrupt`, passe : c'est ainsi
+    qu'un notebook annulé depuis le callback s'arrête.)"""
+
+    def __init__(self, callback, stats: dict, warnings: list):
+        self._callback = callback
+        self._stats = stats
+        self._warnings = warnings
+        self.rows = 0
+
+    def page(self, rows: int) -> None:
+        self.rows += rows
+        if self._callback is None:
+            return
+        try:
+            self._callback(self._stats["pages"], self.rows)
+        except Exception as exc:  # noqa: BLE001 — voir la docstring
+            self._callback = None
+            self._warnings.append(
+                f"on_progress raised {type(exc).__name__} and was disabled for the "
+                "rest of the run"
+            )
+
+
 def _lakehouse_path_warning(path) -> str | None:
     """Avertissement si le chemin du lakehouse n'a pas été résolu vers une URI
     ABFSS : le montage local ne peut pas porter le commit Delta."""
@@ -1055,13 +1159,14 @@ def _prepare_incremental(
         params[incremental["param_name"]] = last_value
 
 
-def _run_dry(pages, progress: _Progress) -> None:
+def _run_dry(pages, progress: _Progress, reporter: _Reporter) -> None:
     """Dry run : lit tout, compte, garde les premiers enregistrements."""
     progress.sample = []
     for page in pages:
         if len(progress.sample) < DRY_RUN_SAMPLE_SIZE:
             progress.sample.extend(page[: DRY_RUN_SAMPLE_SIZE - len(progress.sample)])
         progress.rows_loaded += len(page)
+        reporter.page(len(page))
 
 
 def _run_write(
@@ -1074,6 +1179,7 @@ def _run_write(
     lakehouse_tables_path: str,
     log_schema: str,
     storage_options: dict | None,
+    reporter: _Reporter,
 ) -> None:
     """Écrit les pages par lots, puis solde le watermark."""
     writer = _BatchWriter(
@@ -1095,6 +1201,9 @@ def _run_write(
     )
     try:
         for page in pages:
+            # la page est comptée *avant* son écriture : `rows` dit ce que la
+            # source a donné, `rows_loaded` ce qui est dans la table
+            reporter.page(len(page))
             writer.add(page)
         writer.close()
     finally:
@@ -1123,11 +1232,42 @@ def _release_lock(lock: RunLock, progress: _Progress) -> None:
         )
 
 
+def _run_details(result: RunResult, config) -> dict:
+    """Colonnes de détail de la ligne `log_runs` (voir `LOG_RUNS_DETAIL_TYPES`)."""
+    import flume_lib  # à l'appel : le paquet est importé en entier à ce stade
+
+    config = config if isinstance(config, dict) else {}
+    target = None
+    if config.get("target_schema") and config.get("target_table"):
+        target = f"{config['target_schema']}.{config['target_table']}"
+    joined = " | ".join(result.warnings)
+    return {
+        "warnings": (
+            joined[: MAX_RUN_MESSAGE_CHARS - 1] + "…"
+            if len(joined) > MAX_RUN_MESSAGE_CHARS
+            else joined or None
+        ),
+        "pages": result.pages,
+        "retries": result.retries,
+        "token_renewals": result.token_renewals,
+        "rows_inserted": result.rows_inserted,
+        "rows_updated": result.rows_updated,
+        "duration_seconds": result.duration_seconds,
+        "watermark_before": result.watermark_before,
+        "watermark_after": result.watermark_after,
+        "window_end": result.window_end,
+        "target_table": target,
+        "write_mode": (config.get("write") or {}).get("mode", WRITE_APPEND),
+        "lib_version": flume_lib.__version__,
+    }
+
+
 def _persist_run(
     result: RunResult,
     lakehouse_tables_path: str,
     log_schema: str,
     storage_options: dict | None,
+    config=None,
 ) -> None:
     """Écrit la ligne de `log_runs`. Un échec n'est pas levé : il s'ajoute au
     message du résultat, qui reste la source de vérité de l'appelant."""
@@ -1143,6 +1283,7 @@ def _persist_run(
             error_message=result.error_message,
             schema=log_schema,
             storage_options=storage_options,
+            details=_run_details(result, config),
         )
     except Exception as exc:  # noqa: BLE001
         log_error = f"écriture log_runs impossible — {type(exc).__name__}: {exc}"
@@ -1157,6 +1298,7 @@ def run_source(
     storage_options: dict | None = None,
     log_schema: str = DEFAULT_LOG_SCHEMA,
     dry_run: bool = False,
+    on_progress=None,
 ) -> RunResult:
     """Exécute l'ingestion d'une source d'après sa config. Toute erreur est
     catchée et remontée dans RunResult, jamais levée vers l'appelant.
@@ -1209,6 +1351,11 @@ def run_source(
     données, ni watermark, ni log_runs. Les premiers enregistrements bruts
     sont renvoyés dans RunResult.sample. Sans accumulation en mémoire.
 
+    `on_progress(pages, rows)`, si fourni, est appelé après chaque page reçue
+    avec le nombre de pages et de lignes lues jusque-là — le seul signe de vie
+    d'un run d'une heure. Il ne fait pas échouer le run : s'il lève, il est
+    abandonné et `warnings` le dit.
+
     Dans Fabric, le chemin local par défaut est automatiquement résolu vers
     l'URI ABFSS OneLake du lakehouse par défaut (le montage local ne permet
     pas le commit du transaction log delta-rs). storage_options est passé tel
@@ -1216,6 +1363,7 @@ def run_source(
     source_name = config.get("name", "<sans_nom>") if isinstance(config, dict) else "<sans_nom>"
     run_id = str(uuid.uuid4())
     start_ts = _utc_now()
+    started = time.monotonic()
     status = "failed"
     error_message = None
     fetch_page = None
@@ -1238,6 +1386,8 @@ def run_source(
 
     try:
         validate_config(config)
+        if on_progress is not None and not callable(on_progress):
+            raise ConfigError("on_progress must be a function taking (pages, rows)")
         # tôt : refuser un second run avant qu'il ne lise le watermark du premier
         lock.acquire(config)
 
@@ -1259,6 +1409,7 @@ def run_source(
         # par le writer : les deux signalent des dégradations qui ne font pas
         # échouer le run.
         fetch_page = _build_fetch_page(config, variables, deadline)
+        reporter = _Reporter(on_progress, fetch_page.stats, progress.warnings)
         pages = paginate(
             fetch_page,
             config["base_url"],
@@ -1268,11 +1419,11 @@ def run_source(
         )
 
         if dry_run:
-            _run_dry(pages, progress)
+            _run_dry(pages, progress, reporter)
         else:
             _run_write(
                 pages, config, incremental, progress, run_id, source_name,
-                lakehouse_tables_path, log_schema, storage_options,
+                lakehouse_tables_path, log_schema, storage_options, reporter,
             )
 
         status = "success"
@@ -1289,6 +1440,9 @@ def run_source(
         if session is not None:
             session.close()
         _release_lock(lock, progress)
+
+    # lus ici : `fetch_page` n'existe pas si le run a échoué avant sa création
+    stats = getattr(fetch_page, "stats", None) or {}
 
     # Une seule porte de sortie pour ce qui est persisté ou rendu à l'appelant
     if error_message is not None:
@@ -1309,10 +1463,14 @@ def run_source(
         window_end=progress.window_end,
         rows_inserted=progress.rows_inserted,
         rows_updated=progress.rows_updated,
+        pages=stats.get("pages", 0),
+        retries=stats.get("retries", 0),
+        token_renewals=getattr(getattr(fetch_page, "auth", None), "renewals", 0),
+        duration_seconds=round(time.monotonic() - started, 3),
     )
 
     if not dry_run:
-        _persist_run(result, lakehouse_tables_path, log_schema, storage_options)
+        _persist_run(result, lakehouse_tables_path, log_schema, storage_options, config)
     if interrupted is not None:
         raise interrupted
     return result

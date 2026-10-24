@@ -58,7 +58,7 @@ Two traps worth naming, because both fail silently rather than loudly:
 | An object that comes back changed (an invoice that gets paid) and the table should hold its latest version | `"write": {"mode": "merge", "merge_keys": ["<id>"]}` |
 | The API filters on a date window and the date it filters on is not a field of the response | [section 4.3](#43-date-window-apis-whose-filter-date-is-not-a-response-field) |
 
-`overwrite` and `replace_where` share one deliberate behaviour: **a run that loads zero rows replaces nothing.** The target keeps its previous contents and `RunResult.warnings` says so, on a run still marked `success`. An API that is down and a genuinely empty window both answer "0 rows", and emptying the table on that signal would destroy data without anything having failed. Read `warnings` in your run loop — it does not reach `log_runs`.
+`overwrite` and `replace_where` share one deliberate behaviour: **a run that loads zero rows replaces nothing.** The target keeps its previous contents and `RunResult.warnings` says so, on a run still marked `success`. An API that is down and a genuinely empty window both answer "0 rows", and emptying the table on that signal would destroy data without anything having failed. Read `warnings` in your run loop; it is also stored in `log_runs.warnings`, so a backfill that replaced nothing can be found afterwards.
 
 ---
 
@@ -354,6 +354,9 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `max_run_seconds` | — | — | wall-clock limit for the run; checked before each request and between chunks |
 | `single_instance` | — | — | refuses a second run of the same source while one is going (advisory lock) |
 | `lock_ttl_seconds` | — | — | how long a run's lock lives if the run dies; must exceed `max_run_seconds` |
+| `max_requests_per_second` | — | — | at most this many requests start per second, retries included; per run |
+| `proxy` | — | — | proxy URL, or a secret reference holding it (a login lives in the URL); data and token calls; wins over `HTTPS_PROXY` |
+| `ca_bundle` | — | — | PEM file of the authority to trust (TLS-inspecting proxy); verification cannot be disabled |
 
 #### `pagination` — common to every strategy
 
@@ -527,6 +530,7 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `max_attempts` | — | `3` |  |
 | `backoff_multiplier` | — | `1` |  |
 | `max_retry_after_seconds` | — | `300` | ceiling on a `Retry-After` the server asks for |
+| `jitter` | — | `true` | spreads the backoff between half and all of the delay; never a `Retry-After` |
 
 #### `errors`
 

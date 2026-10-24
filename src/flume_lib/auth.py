@@ -107,7 +107,9 @@ def _expires_in(payload: dict, path: str | None) -> float | None:
         return None
 
 
-def _fetch_oauth2_client_credentials(auth_config: dict) -> tuple[str, float | None]:
+def _fetch_oauth2_client_credentials(
+    auth_config: dict, network: dict | None = None
+) -> tuple[str, float | None]:
     """Flux OAuth2 client_credentials — couvre les service principals Entra ID
     (APIs Microsoft : Graph, Fabric, Azure Management…) et tout IdP standard.
 
@@ -160,7 +162,7 @@ def _fetch_oauth2_client_credentials(auth_config: dict) -> tuple[str, float | No
     timeout = auth_config.get("timeout_seconds", DEFAULT_TOKEN_TIMEOUT_SECONDS)
     try:
         response = requests.post(
-            token_url, data=data, headers=headers, timeout=timeout
+            token_url, data=data, headers=headers, timeout=timeout, **(network or {})
         )
     except requests.RequestException as exc:
         # Type conservé — une ConnectionError sur l'IdP reste rejouable ; la
@@ -182,7 +184,9 @@ def _fetch_oauth2_client_credentials(auth_config: dict) -> tuple[str, float | No
     return token, _expires_in(payload, "expires_in")
 
 
-def _fetch_token_endpoint(auth_config: dict) -> tuple[str, float | None]:
+def _fetch_token_endpoint(
+    auth_config: dict, network: dict | None = None
+) -> tuple[str, float | None]:
     """Obtient un token via un appel API de login arbitraire. Les valeurs de
     'body' et 'headers' peuvent être des littéraux (valeurs non sensibles) ou
     des références de secret (env_var / keyvault_url)."""
@@ -211,7 +215,7 @@ def _fetch_token_endpoint(auth_config: dict) -> tuple[str, float | None]:
     body_format = auth_config.get("body_format", "json")
     timeout = auth_config.get("timeout_seconds", DEFAULT_TOKEN_TIMEOUT_SECONDS)
 
-    kwargs = {"headers": headers, "timeout": timeout}
+    kwargs = {"headers": headers, "timeout": timeout, **(network or {})}
     if method != "GET":
         kwargs["json" if body_format == "json" else "data"] = body
     elif body:
@@ -286,13 +290,24 @@ class AuthProvider:
     rejouer ne ferait que retarder le diagnostic.
     """
 
-    def __init__(self, auth_config: dict | None):
+    def __init__(self, auth_config: dict | None, network: dict | None = None):
         self._config = auth_config or {}
+        # proxy et CA du run (`network.resolve_network`) : le token se demande
+        # à l'IdP par le même chemin que les données à l'API
+        self._network = network or {}
         self._type = self._config.get("type") or "none"
         self.refreshable = self._type in REFRESHABLE_TYPES
         self.signer = _build_oauth1(self._config) if self._type == "oauth1" else None
         self._headers: dict[str, str] | None = None
         self._expires_at: float | None = None
+        self._fetches = 0
+
+    @property
+    def renewals(self) -> int:
+        """Nombre de fois où le credential a été obtenu *de nouveau* après le
+        premier : un token renouvelé par anticipation ou après un 401. Un
+        credential statique n'en compte jamais."""
+        return max(0, self._fetches - 1)
 
     def headers(self) -> dict[str, str]:
         """Headers courants. Les régénère si le token est expiré ou sur le
@@ -314,7 +329,8 @@ class AuthProvider:
         if self.signer is not None:
             self._headers, self._expires_at = {}, None
             return self._headers
-        headers, expires_in = _build_headers(self._config)
+        headers, expires_in = _build_headers(self._config, self._network)
+        self._fetches += 1
         self._headers = headers
         self._expires_at = _renewal_instant(expires_in)
         return headers
@@ -345,7 +361,9 @@ def build_auth_headers(auth_config: dict | None) -> dict[str, str]:
     return _build_headers(auth_config)[0]
 
 
-def _build_headers(auth_config: dict | None) -> tuple[dict[str, str], float | None]:
+def _build_headers(
+    auth_config: dict | None, network: dict | None = None
+) -> tuple[dict[str, str], float | None]:
     """Headers d'auth et durée de vie du token quand l'endpoint l'annonce."""
     if not auth_config or auth_config.get("type") in (None, "none"):
         return {}, None
@@ -371,11 +389,11 @@ def _build_headers(auth_config: dict | None) -> tuple[dict[str, str], float | No
         return {"Authorization": f"Basic {encoded}"}, None
 
     if auth_type == "oauth2_client_credentials":
-        token, expires_in = _fetch_oauth2_client_credentials(auth_config)
+        token, expires_in = _fetch_oauth2_client_credentials(auth_config, network)
         return {"Authorization": f"Bearer {token}"}, expires_in
 
     if auth_type == "token_endpoint":
-        token, expires_in = _fetch_token_endpoint(auth_config)
+        token, expires_in = _fetch_token_endpoint(auth_config, network)
         header_name = auth_config.get("header_name", "Authorization")
         value_prefix = auth_config.get("value_prefix", "Bearer ")
         return {header_name: f"{value_prefix}{token}"}, expires_in

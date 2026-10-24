@@ -102,7 +102,11 @@ def fakes(monkeypatch):
         validate_config(config_factory(str(until)))
         return []
 
+    def fake_run_sources(configs, *args, **kwargs):
+        return flume_lib.SourcesResult([fake_run_source(config) for config in configs])
+
     checked("run_source", fake_run_source)
+    checked("run_sources", fake_run_sources)
     checked("run_source_windows", fake_run_source_windows)
     checked("read_watermark", lambda *a, **k: None)
     checked("write_watermark", lambda *a, **k: None)
@@ -122,6 +126,7 @@ class TestPythonBlocks:
     def test_agent_cookbook_blocks_run_against_the_real_signatures(self, fakes):
         namespace = run_blocks(AGENT_COOKBOOK, fakes)
         assert "run_source" in fakes  # le squelette a bien appelé la bibliothèque
+        assert "run_sources" in fakes
         assert "run_source_windows" in fakes
         assert "compact_technical_tables" in fakes
         # le squelette valide ses propres sources avant de les lancer

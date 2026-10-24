@@ -43,6 +43,9 @@ Looking something up rather than reading through? [cookbook.md](cookbook.md) map
 | `fail_on_empty` | boolean | no | `false` | Fails the run when it loads no row — before the watermark moves. See [Incremental](#incremental-watermark). |
 | `max_response_bytes` | integer | no | `104857600` (100 MiB) | Largest accepted body for one data response. See [Limits on a run](#limits-on-a-run). |
 | `max_run_seconds` | number | no | none | Wall-clock limit for the whole run. See [Limits on a run](#limits-on-a-run). |
+| `max_requests_per_second` | number | no | none | Spaces the requests of a run: at most that many start per second. See [Request rate](#request-rate). |
+| `proxy` | string \| secret reference | no | none | Outgoing proxy for the data calls and the token calls. See [Proxy and certificates](#proxy-and-certificates). |
+| `ca_bundle` | string | no | none | PEM file of the certificate authority to trust, for a proxy that inspects TLS. See [Proxy and certificates](#proxy-and-certificates). |
 | `single_instance` | boolean | no | `false` | Refuses a second run of the same source while one is going. See [One run at a time](#one-run-at-a-time). |
 | `lock_ttl_seconds` | number | no | `21600` (6 h) | How long the lock of a run that died lasts. Only with `single_instance`. |
 | `allow_literal_secrets` | boolean | no | `false` | Accepts a literal string where a secret is expected (`auth.token`, `auth.client_secret`, a credential header…). Refused by default — see [Secret references](#secret-references). For a throwaway local test only. |
@@ -291,7 +294,8 @@ Working notebook, auth to Delta: [examples/graphql_cursor_api.py](../examples/gr
 ## `run_source` parameters
 
 ```python
-run_source(config, lakehouse_tables_path=..., storage_options=..., log_schema=..., dry_run=False)
+run_source(config, lakehouse_tables_path=..., storage_options=..., log_schema=..., dry_run=False,
+           on_progress=None)
 ```
 
 | Parameter | Type | Default | Description |
@@ -301,6 +305,7 @@ run_source(config, lakehouse_tables_path=..., storage_options=..., log_schema=..
 | `storage_options` | dict \| None | `None` | Passed through to delta-rs. If absent with an `abfss://` URI, a storage bearer token is obtained via `notebookutils`. |
 | `log_schema` | str | `flume` | Schema of the technical tables `watermark` and `log_runs`. |
 | `dry_run` | bool | `False` | See [Dry run](#dry-run). |
+| `on_progress` | callable \| None | `None` | `on_progress(pages, rows)`, called after each page. See [Following a run](#following-a-run). |
 
 Returns a `RunResult` with `source_name`, `status` (`success`/`failed`), `rows_loaded`, `error_message` (None on success), `start_ts`, `end_ts` (ISO 8601 UTC), `run_id` (UUID), `warnings`, and `sample` (dry run only). **Never raises.**
 
@@ -310,10 +315,32 @@ Returns a `RunResult` with `source_name`, `status` (`success`/`failed`), `rows_l
 | `watermark_after` | `incremental.enabled` | Where the next run will start. **Equal to `watermark_before` means the run did not advance the source**, whatever `rows_loaded` says. After a failed run it is the last watermark actually committed. |
 | `window_end` | `incremental.window` | The upper bound the request carried (`window.upper_value`). |
 | `rows_inserted`, `rows_updated` | `write.mode: "merge"` | Rows the merge added and rows it updated. `rows_loaded` stays "rows processed" — before in-batch de-duplication. |
+| `pages` | always | Data responses received, the last (empty) one included. |
+| `retries` | always | Requests replayed: network error, `429`, `5xx`, a retryable application error, the replay that follows a token renewal. |
+| `token_renewals` | always | Tokens obtained again after the first — anticipated by `expires_in`, or after a `401`. Always 0 for a static credential. |
+| `duration_seconds` | always | Wall-clock duration of the run, measured on a monotonic clock. |
 
 The same functions are importable beside `run_source`: `read_watermark`, `write_watermark`, `reset_watermark`, `resolve_lakehouse_tables_path` and `run_source_windows` (see [Reading the source by window](#reading-the-source-by-window)).
 
 All four parameters worked through, with the cases each one exists for: [examples/run_options.py](../examples/run_options.py).
+
+### Following a run
+
+A run that takes an hour used to give no sign of life until its last line. `on_progress` is called after every page with the number of pages received and rows read so far:
+
+```python
+def show(pages, rows):
+    if pages % 50 == 0:
+        print(f"{pages} pages, {rows} rows")
+
+result = run_source(config, on_progress=show)
+```
+
+`rows` counts what the source has given, not what is in the table: rows wait in a buffer until `batch_size` is reached, and `RunResult.rows_loaded` stays the count of rows actually written. The callback also runs in a dry run, and `run_source_windows` passes it to every window (the counters start again at zero for each one).
+
+It cannot fail the run. If it raises, it is dropped for the rest of the run and `warnings` says so once, without quoting the exception; a `KeyboardInterrupt` raised from it is the exception to that rule, since it is how a notebook is stopped. Keep it short — it runs between two pages, on the thread that reads them.
+
+Everything a run reports is also written to `log_runs`, see [Technical tables](#technical-tables).
 
 ### Dry run
 
@@ -343,6 +370,7 @@ They make it possible to trace a row back to the run that produced it, de-duplic
 Two bounds, because `requests`' `timeout` is neither.
 
 - **`max_response_bytes`** (default 100 MiB) caps the body of **one data response**. The body is read as a stream: a `Content-Length` above the cap is refused before a byte is read, and a body without one is cut off as soon as it passes the cap — the library no longer loads whatever the server decides to send. The decompressed size counts, so a compressed bomb is stopped too. A page is a few megabytes, so the default only ever trips on an API that does not paginate; lower it to what your largest page needs. The body of a `4xx` is read the same way: only its first 16 KiB, of which the message keeps 500 characters.
+- **`max_requests_per_second`** (default: none) is a ceiling on the rate of a run, see [Request rate](#request-rate).
 - **`max_run_seconds`** (default: none) is a wall-clock limit for the run. `timeout_seconds` bounds the silence **between two bytes**, not the total: a server that sends one byte every 50 seconds keeps a request open for as long as it likes. The deadline is checked before every request (retries included) and after every chunk read, so it also stops such a drip. It does not interrupt a request in flight beyond that: a run can overrun by one chunk read or one backoff wait. The failure is an ordinary failed run — batches already written stay, and with `checkpoint` the next run resumes.
 
 Both apply to **data calls**. The token calls keep their own `timeout_seconds` and read their (small) body whole.
@@ -905,7 +933,16 @@ A merge rewrites the data files that hold matching keys, so it costs more than a
 
 `partition_by` sets the partition columns **when the table is created**. Delta fixes them at that point: passing them for an existing unpartitioned table fails with an explicit message, since changing them means rewriting the table whole, which this library does not do. Partition on a column a `replace_where` predicate filters on and the replacement only rewrites the matching partitions.
 
-The library performs no `OPTIMIZE` and no `VACUUM` on **your data tables** (its own technical tables have [`compact_technical_tables`](#keeping-the-technical-tables-small)). A table written batch after batch accumulates small files, and the replaced files stay on disk until vacuumed — schedule both out of band if a table grows enough to need them.
+The library never runs `OPTIMIZE` or `VACUUM` by itself — that would be long writes in the middle of a run. A table written batch after batch accumulates small files (at least one per batch), and `replace_where` and `overwrite` leave the files they replace on disk until they are vacuumed. `compact_data_tables` does both between two runs:
+
+```python
+from flume_lib import compact_data_tables
+
+compact_data_tables(["bronze.orders", "bronze.invoices"])                 # merge the small files
+compact_data_tables(["bronze.orders"], vacuum=True, retention_hours=336)  # and purge what is unused
+```
+
+It returns, per table, `files_removed` and `files_added` (and `files_vacuumed` with `vacuum=True`). `vacuum=True` deletes the files the table no longer uses and no recent read can claim, so the table can no longer be read as of a date older than `retention_hours` — which is at least 168 (7 days), Delta refusing a shorter purge. Row contents never change. A table that does not exist is a `ValueError` raised **before** any table is touched: on a data table that is nearly always a typo, unlike the technical tables, which may legitimately not exist yet. Run it while no run is writing the same table. The technical tables have their own, [`compact_technical_tables`](#keeping-the-technical-tables-small).
 
 ### A body on a GET
 
@@ -1020,12 +1057,43 @@ Runnable incremental sources: query param in [examples/rest_api_paginated.py](..
 | `max_attempts` | `3` | Total attempts per request. |
 | `backoff_multiplier` | `1` | Exponential backoff multiplier (tenacity `wait_exponential`). |
 | `max_retry_after_seconds` | `300` | Ceiling on a server-provided `Retry-After` delay. |
+| `jitter` | `true` | Spreads the exponential backoff between half the delay and the full delay. `false` for the exact delay. |
 
 Retried: network errors (connection, timeout), HTTP 429 and 5xx, and application errors whose code appears in [`errors.retryable_codes`](#application-errors-in-a-200). **Not retried**: other 4xx (401, 403, 404…) and any other application error — they fail immediately. Applies to data calls; the token call (`oauth2_client_credentials`/`token_endpoint`) is not retried.
 
 `max_attempts` bounds every one of those causes alike, so an API answering "transient" forever costs at most `max_attempts` calls per page, not an unbounded loop.
 
+The backoff is **dispersed** by default: each wait is drawn between half of the exponential delay and all of it. Sources started together — `run_sources` — that all receive a 429 at the same instant would otherwise come back at the same instant, and meet the same 429 again. The half that is fixed keeps a real delay: a draw from zero could replay at once. A server's `Retry-After` is never dispersed — it is an instruction, not a guess.
+
+### Request rate
+
+The 429 is handled after the limit has been crossed, and on an API with strict governance it is the crossing that is punished. `max_requests_per_second` spaces the requests instead:
+
+```json
+"max_requests_per_second": 2
+```
+
+One request every 0.5 s, the first one immediately. Every *attempt* counts, replays included, so a retried page does not burst. Idle time is not banked: after a pause the next requests do not leave in a burst. The counter belongs to a run — sources running in parallel under `run_sources` each have their own, so a quota shared between them is settled with `max_workers`. The token calls of `oauth2_client_credentials` and `token_endpoint` are not throttled.
+
+The wait counts against `max_run_seconds`: a request whose turn would come after the deadline fails the run at once (`RunTimeoutError`), rather than sleeping until then to fail anyway.
+
 When the response carries a `Retry-After` header (seconds or an HTTP date), that delay is used instead of the exponential backoff — APIs with strict governance ban clients that retry earlier than they were told to. The delay is capped at `max_retry_after_seconds`; beyond the cap the wait is truncated and the next attempt will most likely fail, which surfaces as a `failed` run in `log_runs` rather than a notebook hanging for an hour.
+
+## Proxy and certificates
+
+Behind a corporate proxy a run fails in two ways that look nothing alike: the proxy is not reached, or it is reached and re-issues every certificate with its own authority, which `requests` does not know (`SSLError: certificate verify failed`). Both are settled in the configuration:
+
+```json
+{
+  "proxy": {"env_var": "CORP_PROXY_URL"},
+  "ca_bundle": "/lakehouse/default/Files/certs/corp-ca.pem"
+}
+```
+
+- **`proxy`** is the URL of the proxy, `http://` or `https://`. It applies to the data calls and to the token calls of `oauth2_client_credentials` and `token_endpoint` — the IdP sits behind the same proxy as the API. A proxy that needs a login has its credentials **in the URL**, and a password does not belong in the configuration: a literal URL carrying `user:password@` is refused, and the whole URL is given as a secret reference instead (`{"env_var": "NAME"}` or Key Vault). The resolved URL is then masked in error messages like any other secret. Without the key, `requests` still honours `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` from the environment; when `proxy` is set it wins over them, which is deliberate — the library hands it to every request, because a proxy set on a `requests` session is overridden by the environment variable.
+- **`ca_bundle`** is the path of a PEM file holding the authority to trust, typically one uploaded to the lakehouse Files. It replaces the default bundle for the run, so it must contain the authority that signs the API's certificate as seen *through* the proxy. A path that is not a file fails the run before any request (`NetworkConfigError`).
+
+There is no option to turn certificate verification off, and none is planned: a trusted authority solves the actual problem, while disabling the check hands the API's credentials to anything that sits on the path. SOCKS proxies are not supported (they need an extra package, which is not in the offline batch).
 
 ## Column types in Delta
 
@@ -1092,6 +1160,41 @@ retype_columns("bronze", "ledger", {"amount": "double"})   # rows rewritten
 
 `retype_columns(target_schema, target_table, column_types, lakehouse_tables_path=…, storage_options=None)` takes the same types as `write.column_types`. Every value is checked **before** anything is written, and one that does not fit stops the call with a count (never the values): text that is not a number, a `decimal` that would be rounded, an integer beyond 2^53 going to `double`. A float is not converted to a `decimal` (its value is binary: the conversion is a rounding), and a partition column cannot be retyped. The table is rewritten in one atomic commit, so its cost follows the size of the table, and the previous version stays readable by time travel until it is vacuumed. Run it between runs, not during one.
 
+## Running several sources
+
+`run_source` runs one. The loop around it — `for source in sources: run_source(source)` — was rewritten in every notebook, with or without a `try`, a summary, or anything that made the notebook *fail* when a source had: and it is the notebook's failure that a Fabric pipeline sees. `run_sources` is that loop, written once:
+
+```python
+from flume_lib import run_sources
+
+outcome = run_sources(sources)       # a list of source configs
+print(outcome)                       # a total, then one line per source
+outcome.raise_for_failures()         # last line of the notebook
+```
+
+```text
+3 source(s): 2 succeeded, 1 failed, 0 skipped — 12345 row(s) in 41.2 s
+  ok       orders  12000 row(s), 24 page(s), 30.1 s
+  ok       invoices  345 row(s), 3 page(s), 11.1 s, 1 warning(s)
+  FAILED   customers  0 row(s), 1 page(s), 0.4 s  HTTPError: HTTP 404 on https://…
+```
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `configs` | — | A list of source configurations. Every source needs a unique `name`. |
+| `lakehouse_tables_path`, `storage_options`, `log_schema`, `dry_run` | as `run_source` | Passed to every run. |
+| `max_workers` | `1` | Sources run at the same time, in threads (a run mostly waits for the network). `1` runs them one after the other, in the order given. |
+| `stop_on_failure` | `False` | After the first failed source, none starts. Those already running finish; the ones that never started are listed in `outcome.skipped`. |
+| `on_progress` | `None` | `on_progress(source_name, pages, rows)`, after each page of each source. With `max_workers > 1` it is called from several threads at once. |
+
+A failing source never stops another by default: each goes through `run_source`, which never raises. `SourcesResult` holds `results` (in the order given, whatever finished first), `succeeded`, `failed`, `skipped`, `rows_loaded`, `ok`, and `summary()`. `raise_for_failures()` raises `RunSourcesError` — carrying the whole outcome — if a source failed **or was skipped**; call it last, so the pipeline sees the failure once everything that could run has run.
+
+The arguments are checked before the first request, and refused with a `ValueError`: a configuration that is not an object, a missing or duplicate `name` (two sources would share one watermark and one lock), a bad `max_workers`. A *source* that is invalid is not a `ValueError`: it is a failed run like any other, and the others go on. With `max_workers > 1`, two sources that write the same `target_schema.target_table` are refused too — their commits to one table would conflict; run them one after the other.
+
+### Concurrent writers
+
+Sources running together all write to the same three technical tables (`log_runs`, `watermark`, `run_locks`). That is safe — they only ever receive appends — but on a lakehouse where these tables do not exist yet, the first commits race to create them, and Delta refuses the losers. Measured: with eight writers creating one table at once, six commits were refused. A commit that loses is now **replayed**: it wrote nothing, so replaying is safe, and it starts again from a fresh view of the table after a short random pause (up to 6 attempts). The same applies to your data tables and to `merge`, and to two notebooks running at the same time, not only to `run_sources`. A write that loses six times in a row fails with an error saying that another writer kept committing.
+
 ## Technical tables
 
 Created automatically on first run in `<log_schema>` (default `flume`):
@@ -1099,7 +1202,7 @@ Created automatically on first run in `<log_schema>` (default `flume`):
 | Table | Columns |
 |---|---|
 | `watermark` | `source_name`, `last_value`, `updated_ts` — one row appended per advance (the current value is the max `updated_ts` per source). Appended rather than upserted so that sources can commit concurrently; `reset_watermark(source_name)` removes a source's rows. |
-| `log_runs` | `run_id`, `source_name`, `start_ts`, `end_ts`, `status`, `rows_loaded`, `error_message` — one row per `run_source` call, success or failure. `RunResult.warnings` is **not** stored there. |
+| `log_runs` | One row per `run_source` call, success or failure. `run_id`, `source_name`, `start_ts`, `end_ts`, `status`, `rows_loaded`, `error_message`, then the detail of the run: `warnings` (the `RunResult.warnings`, joined with ` \| `, NULL when there are none, capped like `error_message`), `pages`, `retries`, `token_renewals`, `rows_inserted`, `rows_updated`, `duration_seconds`, `watermark_before`, `watermark_after`, `window_end`, `target_table` (`schema.table`), `write_mode` and `lib_version`. A table created by an earlier version gains these columns at its next write; its older rows have them NULL. |
 | `run_locks` | `source_name`, `run_id`, `state` (`acquired` / `released`), `ts`, `expires_ts` — only for sources with `single_instance`. See [One run at a time](#one-run-at-a-time). |
 
 `error_message` holds the exception type and message of whatever failed. When the failure came from an [application error](#application-errors-in-a-200), that message is the API's own, truncated to the first 3 errors and 500 characters — a GraphQL error quotes the failing query in full, and `log_runs` is a table, not a log file. URLs in it are stripped of their query string (see [docs/security.md](security.md)).
