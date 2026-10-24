@@ -84,11 +84,13 @@ jobs:
       - name: Install uv
         run: pip install uv==0.13.5
 
-      - name: Lockfile matches pyproject.toml
+      - name: Lockfiles match their sources
         run: |
           uv pip compile pyproject.toml --universal --python-version 3.10 \
             --generate-hashes --no-header -o requirements/runtime.txt
-          git diff --exit-code requirements/runtime.txt
+          uv pip compile requirements/build.in --universal --python-version 3.10 \
+            --generate-hashes --no-header -o requirements/build.txt
+          git diff --exit-code requirements/
 
   audit:
     runs-on: ubuntu-latest
@@ -118,11 +120,13 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install
-        run: pip install build
+      # Les outils de construction viennent d'un lockfile à hashes : le wheel
+      # qu'ils produisent est celui que la release signe.
+      - name: Install the build tools
+        run: pip install --require-hashes -r requirements/build.txt
 
       - name: Build the wheel
-        run: python -m build --wheel
+        run: python -m build --wheel --no-isolation
 
       # Le lot de wheels Fabric est installé hors ligne depuis le lakehouse :
       # un wheel qui ne porte pas py.typed ou qui oublie un module ne se voit

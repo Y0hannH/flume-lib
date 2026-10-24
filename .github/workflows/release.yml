@@ -66,13 +66,13 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install
-        run: pip install build
+      - name: Install the build tools
+        run: pip install --require-hashes -r requirements/build.txt
 
       # Sans --python-version : le script cible l'interpréteur courant, qui est
       # celui de la matrice. C'est la seule façon d'obtenir un lot complet.
       - name: Build the offline bundle
-        run: python scripts/build_fabric_wheels.py
+        run: python scripts/build_fabric_wheels.py --no-isolation
 
       # Une release ne part pas sans que son lot ait été vérifié : empreintes
       # conformes à PyPI, et aucune vulnérabilité connue. Un échec ici arrête
@@ -108,12 +108,12 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install
-        run: pip install build
+      - name: Install the build tools
+        run: pip install --require-hashes -r requirements/build.txt
 
       # Le wheel seul, pour qui installe depuis un environnement connecté
       - name: Build the wheel
-        run: python -m build --wheel
+        run: python -m build --wheel --no-isolation
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:

@@ -1111,7 +1111,8 @@ def run_source(
     try:
         validate_config(config)
 
-        incremental = config.get("incremental", {})
+        # `or {}` : un `incremental: null` vaut « absent », comme à la validation
+        incremental = config.get("incremental") or {}
         params = dict(config.get("params", {}))
         # Variables offertes au templating de 'body' et 'params'. Alimentées
         # par le watermark quand il doit atterrir ailleurs qu'en query string.
