@@ -68,7 +68,9 @@ def active_runs(uri: str, source_name: str, storage_options=None, now=None) -> d
     now = now or datetime.now(timezone.utc)
     rows = query_table(
         uri,
-        "select run_id, state, ts from l "
+        # source_name est cité par `sql_quote`, l'instant sort de `stamp` (format
+        # fixe) : le reste est une constante
+        "select run_id, state, ts from l "  # nosec B608
         f"where source_name = {sql_quote(source_name)} "
         f"and expires_ts > '{stamp(now)}'",
         alias="l",
