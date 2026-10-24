@@ -200,7 +200,7 @@ It exercises the credential, the pagination and the response shape, and touches 
 | `PaginationError:` | the loop lost its footing | `items_field`, `cursor_field`, a missing `total_pages_header` / `total_pages_field` |
 | `IncrementalError:` | the watermark did not advance, or does not sort | `incremental.field`, `value_format` |
 | `APIError:` | the API returned an error inside a 200 | your `errors` block |
-| `DeltaWriteError:` | Delta refused the write | the message names the cause (predicate, column, merge key, `column_types`) |
+| `DeltaWriteError:` | Delta refused the write | the message names the cause (predicate, column, merge key, `column_types`, a column type that conflicts with the table's) |
 | `TemplateError:` | a `{placeholder}` has no variable, or a value is forbidden | placeholders, `template_paths`, `value_format` |
 | `RunLockedError:` | another run of the source holds the `single_instance` lock | wait, or rerun |
 | `ResponseTooLargeError:` / `RunTimeoutError:` | `max_response_bytes` / `max_run_seconds` exceeded | the cap, or the source |
@@ -518,7 +518,7 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `partition_by` | — | — | Delta partition columns |
 | `merge_keys` | conditional | — | columns identifying a row; required with `merge`, which accepts `checkpoint` |
 | `when_matched` | — | — | only `update` for now, which is also the default |
-| `column_types` | — | — | imposed types: `decimal(p,s)`, `date`, `string`; a value that does not fit fails the run |
+| `column_types` | — | — | imposed types: `decimal(p,s)`, `double`, `date`, `string`; a value that does not fit fails the run |
 
 #### `retry`
 

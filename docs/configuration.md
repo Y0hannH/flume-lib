@@ -1042,7 +1042,7 @@ Objects and lists are serialized to a JSON string. Dates and timestamps arrive a
 
 A column whose values fit none of those types — an integer beyond `bigint`, say — is still written, as text, and the degradation is reported in `RunResult.warnings`. A run can be `success` and carry warnings; that is the point. It used to be silent, which is how a column of amounts became a column of text without anyone noticing.
 
-Within a run, the types chosen by the first batch are applied to the following ones, so a source whose later rows look different cannot produce two incompatible schemas for the same table. One case deserves attention: a column holding only nulls in the first batch is typed `string`, for want of anything to go on, and later batches conform to that — their numbers are written as text. The type cannot be revised without breaking the commit, and the table would carry it anyway, so the library reports it in `RunResult.warnings` instead of failing. A source with sparse optional fields and a small `batch_size` makes this more likely; a larger first batch makes it rarer. Across runs, Delta's `schema_mode=merge` handles new columns, but not a column that changes type from one run to the next — that is a `SchemaMismatchError` at commit time.
+Within a run, the types chosen by the first batch are applied to the following ones, so a source whose later rows look different cannot produce two incompatible schemas for the same table. One case deserves attention: a column holding only nulls in the first batch is typed `string`, for want of anything to go on, and later batches conform to that — their numbers are written as text. The type cannot be revised without breaking the commit, and the table would carry it anyway, so the library reports it in `RunResult.warnings` instead of failing. A source with sparse optional fields and a small `batch_size` makes this more likely; a larger first batch makes it rarer. Across runs, the **table's type wins** — see [The table's types are a contract](#the-tables-types-are-a-contract).
 
 ### Typed columns
 
@@ -1055,6 +1055,7 @@ Inference cannot know that `1234567.89` is money, or that `"2026-01-02"` is a da
 | Type | Source values accepted | Stored as |
 |---|---|---|
 | `decimal(precision,scale)` | integers, floats, numeric texts (`"1234.5"`, `"1.5e3"`); precision 1 to 38, scale up to precision | `decimal(p,s)` — exact |
+| `double` | integers, floats, numeric texts — never a boolean, `nan`, `inf`, or an integer beyond 2^53 (a double would round it: an identifier is a `string`) | `double` |
 | `date` | `yyyy-MM-dd`, or an ISO instant (`2026-01-02T03:04:05Z`), which gives its day | `date` |
 | `string` | anything; objects and lists become JSON, numbers their text | `string` |
 
@@ -1062,7 +1063,34 @@ The declared type wins over the inferred one, in every write mode, and a column 
 
 `timestamp` is not offered: Arrow's conversion to a time zone needs the system's tz database, which not every runtime ships. Keep timestamps as text, or declare a `date`.
 
-Declare the type **before the first run**. Delta cannot change a column's type afterwards: declaring `decimal` over a table that holds `double` fails at commit with a schema error, which is the correct outcome.
+Declare the type **before the first run**. Delta cannot change a column's type by writing: declaring `decimal` over a table that holds `double` fails before any write, naming both types. `double` exists for the commonest trap — a first batch of round amounts (`100`, `250`) creates an integer column, and the next batch of `1234.56` could not be stored. Declared `double`, the column is a double from the first run.
+
+### The table's types are a contract
+
+When the target table already exists, the type it holds decides what a batch may contain. The library reads the table's schema once at the start of a run, before the first write, and checks every column of every batch against it:
+
+| The table holds | A batch that holds | Result |
+|---|---|---|
+| `bigint` | integers | written |
+| `bigint` | floats, booleans, text | **the run fails**, nothing is written |
+| `double` | integers or floats | written (integers become floats) |
+| `double` | booleans, text | the run fails |
+| `string` | anything scalar | written as text, reported in `warnings` |
+| `boolean` | booleans | written |
+| `boolean` | numbers, text | the run fails |
+| `decimal` or `date` | — | the run fails unless the column is declared in `write.column_types` |
+
+The refusal is deliberate. delta-rs does not reject a batch whose type differs from the table's: it **coerces** it, and what does not fit disappears without an error — a `bigint` column that receives `2.5` stores `2`. A month of round amounts followed by a month with cents is exactly how that happens. The error names the column and the two types, never a value (it is stored in `log_runs`). A column the batch does not have is written as null, and a column the table does not have yet is added, as before. `merge` applies the same rule; so does `overwrite`, because Delta keeps the old column type even when the whole table is replaced.
+
+To get out of a table that froze the wrong type, rewrite the column:
+
+```python
+from flume_lib import retype_columns
+
+retype_columns("bronze", "ledger", {"amount": "double"})   # rows rewritten
+```
+
+`retype_columns(target_schema, target_table, column_types, lakehouse_tables_path=…, storage_options=None)` takes the same types as `write.column_types`. Every value is checked **before** anything is written, and one that does not fit stops the call with a count (never the values): text that is not a number, a `decimal` that would be rounded, an integer beyond 2^53 going to `double`. A float is not converted to a `decimal` (its value is binary: the conversion is a rounding), and a partition column cannot be retyped. The table is rewritten in one atomic commit, so its cost follows the size of the table, and the previous version stays readable by time travel until it is vacuumed. Run it between runs, not during one.
 
 ## Technical tables
 

@@ -20,6 +20,7 @@ from flume_lib._delta import (
     DEFAULT_LAKEHOUSE_TABLES_PATH,
     DEFAULT_LOG_SCHEMA,
     merge_records,
+    read_table_types,
     resolve_lakehouse_tables_path,
     table_uri,
     write_records,
@@ -732,6 +733,11 @@ class _BatchWriter:
         # conforment, sans quoi deux lots d'un même run pourraient typer
         # différemment la même colonne et casser le commit Delta.
         self._types: dict = {}
+        # Types de la table cible *avant* ce run, lus au premier lot : le
+        # contrat que tout lot doit respecter. delta-rs ne le fait pas
+        # respecter lui-même (voir `_conform_to_table`).
+        self._table_types: dict | None = None
+        self._table_types_read = False
         self.warnings: list[str] = []
         # plus grande valeur vue *dans ce run* — elle sert aussi au contrôle de
         # tri de `checkpoint`, qui ne doit pas se comparer au watermark d'un
@@ -825,6 +831,10 @@ class _BatchWriter:
                 )
 
         _add_lineage(batch, self._run_id)
+        if self._write_mode != WRITE_MERGE and not self._table_types_read:
+            # le merge relit la table à chaque lot de toute façon
+            self._table_types = read_table_types(self._uri, self._storage_options)
+            self._table_types_read = True
         if self._write_mode == WRITE_MERGE:
             types, fallbacks, inserted, updated = merge_records(
                 self._uri,
@@ -845,6 +855,7 @@ class _BatchWriter:
                 storage_options=self._storage_options,
                 known_types=self._types,
                 column_types=self._column_types,
+                table_types=self._table_types,
             )
         self._types.update(types)
         for message in fallbacks:
