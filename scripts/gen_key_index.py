@@ -315,6 +315,10 @@ _NOTES = {
         "lets a GET carry a body — refused by default, most APIs ignore it",
     ("config", "fail_on_empty"):
         "fails the run when no row was loaded, before the watermark moves",
+    ("config", "allow_literal_secrets"):
+        "lifts the refusal of a literal secret in `auth` — throwaway tests only",
+    ("config", "allow_insecure_http"):
+        "accepts plain `http://` for `base_url` / `token_url`; `localhost` is always accepted",
     ("pagination.*", "items_field"):
         "dotted path; without it, `data`/`items`/`results`/`value` are probed",
     ("pagination.*", "record_field"): "extracts a sub-object out of each record",
@@ -334,6 +338,8 @@ _NOTES = {
     ("pagination.cursor", "has_more_field"):
         "set it whenever the API provides it — an empty mid-result page otherwise reads as the end",
     ("pagination.next_link", "next_field"): "top-level key, not a dotted path",
+    ("pagination.next_link", "allowed_hosts"):
+        "bare hosts the next-page URL may name besides `base_url`'s own; others fail the run",
     ("pagination.keyset", "value_format"):
         f"one of {_ENUM_VALUE_FORMATS}; an explicit value is mandatory with `body_template`",
     ("pagination.keyset", "initial_value"): "floor of the first request",

@@ -342,6 +342,8 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `write` | — | — |  |
 | `allow_body_on_get` | — | — | lets a GET carry a body — refused by default, most APIs ignore it |
 | `fail_on_empty` | — | `false` | fails the run when no row was loaded, before the watermark moves |
+| `allow_insecure_http` | — | — | accepts plain `http://` for `base_url` / `token_url`; `localhost` is always accepted |
+| `allow_literal_secrets` | — | — | lifts the refusal of a literal secret in `auth` — throwaway tests only |
 
 #### `pagination` — common to every strategy
 
@@ -399,6 +401,7 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | Key | Required | Default | Note |
 |---|---|---|---|
 | `next_field` | — | `"next"` | top-level key, not a dotted path |
+| `allowed_hosts` | — | — | bare hosts the next-page URL may name besides `base_url`'s own; others fail the run |
 
 #### `auth` — `"type": "bearer_token"`
 

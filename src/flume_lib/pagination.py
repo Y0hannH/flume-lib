@@ -5,8 +5,10 @@ l'auth sont gérés par l'appelant."""
 
 import hashlib
 from collections.abc import Callable, Iterator
+from urllib.parse import urlsplit
 
 from flume_lib.templating import check_value
+from flume_lib.urls_ import safe_url
 
 _DEFAULT_ITEMS_FIELDS = ("data", "items", "results", "value")
 
@@ -161,6 +163,66 @@ def paginate_offset(
             return
 
 
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _origin(url: str) -> tuple[str, str, int | None]:
+    """(schéma, hôte, port) d'une URL, port par défaut résolu : `https://h` et
+    `https://h:443` sont la même origine."""
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    return scheme, (parts.hostname or "").lower(), parts.port or _DEFAULT_PORTS.get(scheme)
+
+
+def check_next_url(url, base_url: str, allowed_hosts=None) -> str:
+    """Refuse une URL de page suivante qui sort de l'origine de `base_url`.
+
+    `next_link` requête l'URL que la réponse désigne, sur la session
+    authentifiée : un endpoint compromis y mettait l'hôte de son choix et
+    recevait les headers d'auth avec la requête. Ce n'est pas une redirection,
+    donc rien dans `requests` ne s'y oppose — le contrôle est ici.
+
+    Même origine (schéma, hôte, port) : acceptée. Autre hôte : refusée, sauf
+    s'il figure dans `allowed_hosts` (un CDN, un hôte régional) ; et jamais de
+    rétrogradation de https vers http, même vers un hôte autorisé. Une URL
+    relative n'a pas d'hôte à contrôler : elle est rendue telle quelle, et
+    `requests` la refusera.
+    """
+    if not isinstance(url, str):
+        raise PaginationError(
+            f"pagination next_link: the next-page field holds a "
+            f"{type(url).__name__}, not a URL"
+        )
+    try:
+        target = urlsplit(url)
+        wanted = _origin(url)
+        base = _origin(base_url)
+    except ValueError as exc:
+        raise PaginationError(
+            f"pagination next_link: unreadable next-page URL ({exc})"
+        ) from None
+    if not target.scheme and not target.netloc:
+        return url
+    if wanted == base:
+        return url
+    host = wanted[1]
+    allowed = {str(h).lower() for h in (allowed_hosts or [])}
+    downgrade = base[0] == "https" and wanted[0] != "https"
+    if host in allowed and not downgrade:
+        return url
+    reason = (
+        "downgrades https to http"
+        if downgrade and host in allowed
+        else f"is outside the origin of base_url ({base[1]})"
+    )
+    raise PaginationError(
+        f"pagination next_link: the API points the next page at {safe_url(url)}, "
+        f"which {reason}. The request would carry the session's credentials "
+        "there, so it was refused. If this host is legitimate (a CDN, a "
+        "regional host), list it in 'allowed_hosts'."
+    )
+
+
 def paginate_next_link(
     fetch_page: Callable,
     base_url: str,
@@ -171,6 +233,7 @@ def paginate_next_link(
     next_field = pagination_config.get("next_field", "next")
     items_field = pagination_config.get("items_field")
     record_field = pagination_config.get("record_field")
+    allowed_hosts = pagination_config.get("allowed_hosts")
 
     url = base_url
     page_params = params
@@ -182,6 +245,8 @@ def paginate_next_link(
         if not isinstance(payload, dict):
             return
         url = payload.get(next_field)
+        if url:
+            url = check_next_url(url, base_url, allowed_hosts)
         # l'URL suivante embarque déjà ses query params
         page_params = {}
 

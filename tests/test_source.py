@@ -278,6 +278,8 @@ class TestStaticHeaders:
         config = {
             **BASE_CONFIG,
             "headers": {"Authorization": "Bearer usurpe", "Prefer": "transient"},
+            # le test porte sur la précédence, pas sur le littéral
+            "allow_literal_secrets": True,
             "auth": {"type": "bearer_token", "token": {"env_var": "TOK"}},
         }
         http.next_payloads = [[{"id": 1}]]
@@ -1151,6 +1153,7 @@ class TestTokenRefresh:
 
     SP_CONFIG = {
         **BASE_CONFIG,
+        "allow_literal_secrets": True,
         "auth": {
             "type": "oauth2_client_credentials",
             "token_url": "https://idp.test/token",
@@ -1160,6 +1163,7 @@ class TestTokenRefresh:
     }
     STATIC_CONFIG = {
         **BASE_CONFIG,
+        "allow_literal_secrets": True,
         "auth": {"type": "bearer_token", "token": "static-tok"},
     }
 

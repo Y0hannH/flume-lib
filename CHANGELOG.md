@@ -2,6 +2,30 @@
 
 All notable changes to this project are documented here. Versions follow [semantic versioning](https://semver.org/); until 1.0.0, minor versions may contain breaking changes — these are always listed first.
 
+## [Unreleased]
+
+Security hardening of the places where the library trusts its inputs: the configuration, the API's next-page link, and the messages it writes to a table everyone with lakehouse access can read. Found by a code audit; each point was reproduced before it was fixed.
+
+### Changed — breaking
+
+- **A literal secret in the configuration is refused.** `auth.token`, `auth.key`, `auth.password`, `auth.client_secret`, the OAuth 1.0a `consumer_secret` / `token` / `token_secret`, `token_endpoint` `body` / `headers` entries whose name looks like a credential (`secret`, `passw`, `token`, `api-key`, `credential`, `authorization`, `signature`), and top-level `headers` of the same kind now require a reference (`{"env_var": …}` or Key Vault) or the legacy `*_env_var` form. Validation accepted `{"type": "bearer_token", "token": "sk-live-…"}` in silence, although the documentation said secrets never sit in the configuration. The error names the field and never repeats the value. **`"allow_literal_secrets": true` restores the previous behavior.** A config that used a literal fails validation at the start of the run, before any request.
+- **`base_url` and `auth.token_url` must be `https://`, without embedded credentials.** Plain `http://` is refused except towards `localhost`, `127.0.0.1`, `[::1]` and `*.localhost`; `"allow_insecure_http": true` accepts a trusted network. `https://user:password@host` is refused whatever the scheme, as are non-`http(s)` schemes and relative URLs.
+- **`next_link` no longer follows a page URL outside the origin of `base_url`.** The URL comes from the API and the request that follows carries the session's credentials: a compromised endpoint could name any host and receive them. A URL on another scheme, host or port fails the run before the request, naming the host. `pagination.allowed_hosts` declares a legitimate second host (CDN, regional endpoint); a downgrade from `https` to `http` is refused even towards a listed host. Microsoft Graph's `@odata.nextLink` stays on `graph.microsoft.com` and is unaffected.
+
+### Fixed
+
+- **Credentials in a URL no longer reach `log_runs`.** `safe_url` stripped the query string but kept the `netloc`, so `https://user:password@host/…` was copied verbatim into an error message. The user information is now stripped too.
+- **An API that echoes a credential back can no longer put it in `log_runs`.** The library resolves every secret itself, so it can recognise them: values read from an environment variable or Key Vault, tokens obtained from an IdP and the Base64 form of a Basic header are remembered, and replaced by `<redacted>` (raw and percent-encoded) in `RunResult.error_message`, `RunResult.warnings` and the `log_runs` row. Masking happens before truncation, so a secret cut by the cap leaves no readable fragment. Values under 6 characters are not masked.
+- **The body of a failing token endpoint is compacted** like that of a failing data call (whitespace collapsed), instead of spending its 500 characters on line breaks.
+
+### Added
+
+- **The error message of a run is capped at 2 000 characters** (`MAX_RUN_MESSAGE_CHARS`), whatever its content. The existing caps bound each remote source of text; this one bounds their sum, which is what is stored.
+
+### Documentation
+
+- `docs/security.md`: the `next_link` section describes the origin check instead of an open risk, the secrets section describes the enforcement and the masking, the network section lists the transport rules. `docs/configuration.md`: the two new top-level keys, `allowed_hosts`, "Literal secrets are refused", "Which URLs are accepted". The key index is regenerated.
+
 ## [0.18.0] — 2026-10-23
 
 Incremental loading made safe for APIs filtered by a window of dates, where the date the server filters on is not a field of the response — a report endpoint taking `Date_From` / `Date_To` is the typical case. The watermark was derived from the data returned, and on such a source the data is only an approximation: an outlier row could move it past a stretch of time that was never requested, a window with only boundary-day rows made no progress, and a lower value silently lowered it. Everything new is opt-in except the first fix below, which has an opt-out.

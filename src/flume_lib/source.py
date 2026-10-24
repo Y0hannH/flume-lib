@@ -26,6 +26,7 @@ from flume_lib.auth import AuthProvider
 from flume_lib.incremental import compare, shift_days
 from flume_lib.logging_ import write_log_run
 from flume_lib.pagination import _MISSING, get_path, paginate
+from flume_lib.secrets_ import redact
 from flume_lib.templating import (
     check_value,
     normalize_value,
@@ -84,6 +85,11 @@ DEFAULT_BATCH_SIZE = 50_000
 # requête et sa position) — inutile de le stocker en entier ligne après ligne.
 MAX_ERRORS_REPORTED = 3
 MAX_ERROR_DETAIL_CHARS = 500
+
+# Plafond du message d'erreur d'un run, tous contenus confondus. Les bornes
+# ci-dessus limitent chaque source de texte distante ; celle-ci limite la somme,
+# qui part dans log_runs (lisible par tout le lakehouse) et dans RunResult.
+MAX_RUN_MESSAGE_CHARS = 2000
 
 DEFAULT_ERRORS_PATH = "errors"
 # Formes par défaut de la spécification GraphQL : `errors[].message` et
@@ -252,6 +258,21 @@ class RunResult:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _publishable(message: str) -> str:
+    """Message prêt à quitter la lib : valeurs secrètes masquées, puis borné.
+
+    Le masquage passe **avant** la troncature : couper un secret en deux
+    laisserait un fragment que plus aucune valeur connue ne reconnaît. Il
+    couvre ce que les règles sur la forme des messages ne peuvent pas voir —
+    une API qui recopie un credential dans le corps d'une erreur, ou un secret
+    placé dans le chemin d'une URL. Seules les valeurs que la lib a elle-même
+    résolues (variable d'environnement, Key Vault, token obtenu) sont connues."""
+    text = redact(str(message))
+    if len(text) > MAX_RUN_MESSAGE_CHARS:
+        return text[: MAX_RUN_MESSAGE_CHARS - 1] + "…"
+    return text
 
 
 def _check_response_errors(
@@ -1013,6 +1034,11 @@ def run_source(
         if session is not None:
             session.close()
 
+    # Une seule porte de sortie pour ce qui est persisté ou rendu à l'appelant
+    if error_message is not None:
+        error_message = _publishable(error_message)
+    warnings = [_publishable(w) for w in warnings]
+
     end_ts = _utc_now()
     result = RunResult(
         source_name=source_name,
@@ -1049,7 +1075,7 @@ def run_source(
         )
     except Exception as exc:  # noqa: BLE001
         log_error = f"écriture log_runs impossible — {type(exc).__name__}: {exc}"
-        result.error_message = (
+        result.error_message = _publishable(
             f"{error_message} | {log_error}" if error_message else log_error
         )
 

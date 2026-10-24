@@ -6,6 +6,8 @@ ferait un appel unique, le run serait marqué `success` et la majorité des
 données seraient perdues sans aucun signal."""
 
 import difflib
+import re
+from urllib.parse import urlsplit
 
 from flume_lib.auth import CLIENT_AUTH_MODES
 from flume_lib.oauth1 import SIGNATURE_METHODS
@@ -17,7 +19,7 @@ _OPTIONAL = (
     "name", "params", "auth", "pagination", "incremental", "retry",
     "timeout_seconds", "method", "body", "body_format", "headers",
     "errors", "template_paths", "batch_size", "write", "allow_body_on_get",
-    "fail_on_empty",
+    "fail_on_empty", "allow_insecure_http", "allow_literal_secrets",
 )
 
 # Clés autorisées par type d'auth. Les formes historiques *_env_var sont
@@ -79,7 +81,7 @@ _PAGINATION_KEYS = {
         "page_param", "start_page", "size_param", "page_size",
         "total_pages_header", "total_pages_field",
     ),
-    "next_link": ("next_field",),
+    "next_link": ("next_field", "allowed_hosts"),
     "cursor": (
         "cursor_param", "cursor_field", "has_more_field", "limit", "limit_param",
     ),
@@ -102,6 +104,28 @@ _INCREMENTAL_INJECTS = ("query_param", "body_template")
 _INCREMENTAL_WINDOW_KEYS = ("upper_param", "upper_value")
 _INCREMENTAL_ADVANCES = ("field_max", "field_max_capped", "upper_bound")
 _RETRY_KEYS = ("max_attempts", "backoff_multiplier", "max_retry_after_seconds")
+
+# Champs d'auth dont la valeur est un secret : une chaîne littérale y est
+# refusée. Les identifiants publics (client_id, username, consumer_key) n'y
+# figurent pas. Les formes historiques `*_env_var` sont des références, pas des
+# littéraux, et ne passent jamais par là.
+_AUTH_SECRET_FIELDS = {
+    "bearer_token": ("token",),
+    "api_key_header": ("key",),
+    "basic": ("password",),
+    "oauth2_client_credentials": ("client_secret",),
+    "oauth1": ("consumer_secret", "token", "token_secret"),
+}
+
+# Nom d'une clé de header ou de corps qui porte un secret. Les valeurs de
+# `token_endpoint.body` / `.headers` et de `headers` peuvent être littérales —
+# un grant_type, un nom d'utilisateur — mais pas celles-ci.
+_SENSITIVE_NAME_RE = re.compile(
+    r"secret|passw|token|api[-_]?key|credential|authorization|signature",
+    re.IGNORECASE,
+)
+
+_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 
 _WRITE_KEYS = ("mode", "replace_where", "partition_by", "merge_keys", "when_matched")
 _WRITE_MODES = ("append", "overwrite", "replace_where", "merge")
@@ -149,6 +173,61 @@ def _resolve_body_path(section: str, body, path: str, required: bool):
             return None
         node = node[part]
     return node
+
+
+def _is_local_host(host: str) -> bool:
+    return host in _LOCAL_HOSTS or host.endswith(".localhost")
+
+
+def _check_url(label: str, url, allow_insecure_http: bool) -> None:
+    """Contrôle d'une URL de configuration qui recevra des credentials.
+
+    Pas d'identifiants dans l'URL : ils finiraient dans les messages d'erreur
+    et les logs de proxy, et `auth` existe pour cela. Pas de `http://` : le
+    token et les données voyageraient en clair — sauf vers la machine locale,
+    ou avec `allow_insecure_http` pour un réseau de confiance (une recette
+    interne, un bac à sable)."""
+    if not isinstance(url, str) or not url.strip():
+        raise ConfigError(f"{label}: must be a URL string")
+    try:
+        parts = urlsplit(url.strip())
+        host = (parts.hostname or "").lower()
+        _ = parts.port  # lève ValueError sur un port illisible
+    except ValueError as exc:
+        raise ConfigError(f"{label}: not a valid URL ({exc})") from None
+    if parts.scheme.lower() not in ("http", "https") or not host:
+        raise ConfigError(
+            f"{label}: must be an absolute http(s) URL, e.g. https://api.example.com/v1"
+        )
+    if "@" in parts.netloc:
+        raise ConfigError(
+            f"{label}: must not embed credentials (user:password@host) — they "
+            "would be copied into logs and error messages; declare them under "
+            "'auth' as secret references"
+        )
+    if (
+        parts.scheme.lower() == "http"
+        and not allow_insecure_http
+        and not _is_local_host(host)
+    ):
+        raise ConfigError(
+            f"{label}: plain http:// sends credentials and data in clear text — "
+            'use https://, or set "allow_insecure_http": true if the network is '
+            "trusted (localhost is always accepted)"
+        )
+
+
+def _check_literal_secret(section: str, key: str, value, allow: bool) -> None:
+    """Refuse une chaîne littérale là où un secret est attendu. Le message ne
+    recopie jamais la valeur."""
+    if allow or not isinstance(value, str):
+        return
+    raise ConfigError(
+        f"{section}: '{key}' is a literal string — a secret must not sit in the "
+        'configuration. Reference it: {"env_var": "NAME"} or '
+        '{"keyvault_url": "...", "secret_name": "..."}. For a throwaway local '
+        'test only, set "allow_literal_secrets": true.'
+    )
 
 
 def _check_number(
@@ -282,6 +361,13 @@ def validate_config(config: dict) -> None:
     fail_on_empty = config.get("fail_on_empty", False)
     if not isinstance(fail_on_empty, bool):
         raise ConfigError("config: 'fail_on_empty' must be a boolean")
+    for flag in ("allow_insecure_http", "allow_literal_secrets"):
+        if not isinstance(config.get(flag, False), bool):
+            raise ConfigError(f"config: '{flag}' must be a boolean")
+    allow_http = config.get("allow_insecure_http", False)
+    allow_literals = config.get("allow_literal_secrets", False)
+
+    _check_url("config: 'base_url'", config["base_url"], allow_http)
 
     _check_number("config", config, "batch_size")
     _check_number("config", config, "timeout_seconds", integer=False)
@@ -296,6 +382,8 @@ def validate_config(config: dict) -> None:
                     f"headers: '{key}' must be a literal string — for a "
                     "credential, use 'auth' (api_key_header, bearer_token…)"
                 )
+            if _SENSITIVE_NAME_RE.search(key):
+                _check_literal_secret("headers", key, value, allow_literals)
 
     errors_config = config.get("errors")
     if errors_config is not None:
@@ -333,6 +421,20 @@ def validate_config(config: dict) -> None:
         _check_unknown("auth", auth, ("type",) + _AUTH_KEYS[auth_type])
         _check_required_groups("auth", auth, _AUTH_REQUIRED.get(auth_type, ()))
         _check_number("auth", auth, "timeout_seconds", integer=False)
+        for secret_field in _AUTH_SECRET_FIELDS.get(auth_type, ()):
+            if secret_field in auth:
+                _check_literal_secret(
+                    "auth", secret_field, auth[secret_field], allow_literals
+                )
+        if "token_url" in auth:
+            _check_url("auth: 'token_url'", auth["token_url"], allow_http)
+        if auth_type == "token_endpoint":
+            for section in ("body", "headers"):
+                for key, ref in (auth.get(section) or {}).items():
+                    if _SENSITIVE_NAME_RE.search(str(key)):
+                        _check_literal_secret(
+                            f"auth.{section}", key, ref, allow_literals
+                        )
         if auth_type == "oauth1":
             signature_method = auth.get("signature_method", "HMAC-SHA256")
             if signature_method not in SIGNATURE_METHODS:
@@ -439,6 +541,22 @@ def validate_config(config: dict) -> None:
                     raise ConfigError(
                         f"pagination: '{key}' must be a non-empty string"
                     )
+
+        if pagination_type == "next_link" and "allowed_hosts" in pagination:
+            hosts = pagination["allowed_hosts"]
+            if (
+                not isinstance(hosts, (list, tuple))
+                or not hosts
+                or not all(
+                    isinstance(h, str) and h and not re.search(r"[/@:\s]", h)
+                    for h in hosts
+                )
+            ):
+                raise ConfigError(
+                    "pagination: 'allowed_hosts' must be a non-empty list of "
+                    "bare host names (no scheme, port or path), e.g. "
+                    '["cdn.example.com"]'
+                )
 
         if pagination_type == "cursor":
             for key in ("cursor_param", "cursor_field"):
