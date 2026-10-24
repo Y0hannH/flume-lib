@@ -1,0 +1,5 @@
+# Outils qui construisent le wheel de la lib (hatchling est le backend déclaré dans
+# pyproject.toml). Figés avec leurs hashes dans build.txt : un wheel construit par
+# un backend que personne n'a relu serait signé par l'attestation de release.
+build
+hatchling

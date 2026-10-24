@@ -55,10 +55,13 @@ def run(cmd: list[str]) -> None:
     subprocess.run(cmd, check=True, cwd=REPO_ROOT)
 
 
-def build_lib_wheel() -> Path:
+def build_lib_wheel(no_isolation: bool = False) -> Path:
+    """Construit le wheel de la lib. `no_isolation` : utilise les outils déjà
+    installés au lieu d'en télécharger dans un environnement jetable — c'est ce
+    qui permet de les figer (requirements/build.txt, avec hashes)."""
     dist = REPO_ROOT / "dist"
     shutil.rmtree(dist, ignore_errors=True)
-    run([sys.executable, "-m", "build", "--wheel"])
+    run([sys.executable, "-m", "build", "--wheel"] + (["--no-isolation"] if no_isolation else []))
     wheels = list(dist.glob("flume_lib-*.whl"))
     if len(wheels) != 1:
         raise SystemExit(f"Attendu un seul wheel dans {dist}, trouvé : {wheels}")
@@ -142,6 +145,11 @@ def main() -> None:
              "conditionnelles — voir la docstring.",
     )
     parser.add_argument(
+        "--no-isolation", action="store_true",
+        help="Construire avec les outils installés (pip install --require-hashes -r "
+             "requirements/build.txt) plutôt qu'avec ceux que `build` téléchargerait.",
+    )
+    parser.add_argument(
         "--out", default="fabric-wheels",
         help="Dossier de sortie, relatif à la racine du repo (défaut : fabric-wheels)",
     )
@@ -164,7 +172,7 @@ def main() -> None:
     shutil.rmtree(out_dir, ignore_errors=True)
     out_dir.mkdir(parents=True)
 
-    lib_wheel = build_lib_wheel()
+    lib_wheel = build_lib_wheel(args.no_isolation)
     version = lib_wheel.name.split("-")[1]
     shutil.copy2(lib_wheel, out_dir)
     download_dependencies(out_dir, args.python_version)

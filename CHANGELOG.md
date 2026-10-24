@@ -4,6 +4,16 @@ All notable changes to this project are documented here. Versions follow [semant
 
 ## [Unreleased]
 
+### Fixed (validation)
+
+- **`validate_config` only raises `ConfigError`.** Mutating configurations at random (150 000 of them) found seven places where a malformed value escaped as `TypeError` or `AttributeError` instead: a list or object as `auth.type` / `pagination.type`; a number or `null` as `params`; `incremental: null`; a `token_endpoint` `body` or `headers` that is not an object; a number or list as `pagination.key_param`. They are fixed at the source (the value is now checked), not caught: every name that designates a field or a parameter — `items_field`, `record_field`, the `*_param` keys, `key_field`, `incremental.field`, `param_name`, `placeholder`, the `token_endpoint` JSON paths — must be a non-empty string. `null` still means "not given" for those. A test mutates 6 000 configurations on every run and fails on anything but `ConfigError`.
+- **A block set to `null` means the block is absent**, consistently: `incremental: null` passed validation and then crashed `run_source`.
+- **Newly refused**, because each would have failed at the first request: a non-string name in the keys above, an empty `incremental.param_name` or `field`, a `null` `token_endpoint.body`. Of 60 000 mutated configurations compared with the previous validation, 287 turned from accepted to refused, all of these kinds.
+
+### Changed (supply chain)
+
+- **The build tools are pinned with hashes.** `build` and `hatchling` come from `requirements/build.txt` (compiled from `requirements/build.in`), and the wheel is built with `--no-isolation`: the release used to let `build` download an unpinned `hatchling`. The CI job `lockfile` checks both lockfiles. `scripts/build_fabric_wheels.py` gains `--no-isolation`.
+
 ### Changed (supply chain)
 
 - **The offline bundle is built from a lockfile with hashes.** `requirements/runtime.txt` (one universal file, produced by `uv pip compile --universal --generate-hashes`) holds the full closure — one version and every published digest per package. `build_fabric_wheels.py` downloads with `--require-hashes --no-deps`, so a file that is not the one reviewed stops the build; on Linux it then installs the library from the bundle alone, offline and dry, to prove the closure is complete. The versions used to be resolved on release day. The CI job `lockfile` fails when `pyproject.toml` and the lockfile disagree.

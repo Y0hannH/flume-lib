@@ -293,7 +293,7 @@ An `audit` job queries [OSV.dev](https://osv.dev) for known vulnerabilities in t
 ### Release procedure
 
 1. Bump the version in `pyproject.toml` and `src/flume_lib/__init__.py`, **and the pinned version of the `%pip install` lines** in this README and in `examples/` (`grep -rn "flume-lib==" README.md examples/`). These belong to the release commit, not after the tag: otherwise the tagged tree — and every artifact built from it — tells readers to install the previous version.
-2. If the dependencies should move, refresh the lockfile — `uv pip compile pyproject.toml --universal --python-version 3.10 --generate-hashes --no-header --upgrade -o requirements/runtime.txt` — and review the diff: it is the list of what will enter the offline bundle. Dependabot proposes the same weekly. CI fails when the lockfile and `pyproject.toml` disagree.
+2. If the dependencies should move, refresh the lockfile — `uv pip compile pyproject.toml --universal --python-version 3.10 --generate-hashes --no-header --upgrade -o requirements/runtime.txt` — and review the diff: it is the list of what will enter the offline bundle. The build tools have their own (`requirements/build.in` to `requirements/build.txt`, same command). Dependabot proposes the same weekly. CI fails when a lockfile and its source disagree.
 3. Add the version's section to [CHANGELOG.md](CHANGELOG.md), breaking changes first. The release workflow uses it as the release notes and refuses to publish without it.
 4. `ruff check . && mypy && pytest --cov`
 5. Commit the release, then tag that commit: `git tag -a vX.Y.Z`

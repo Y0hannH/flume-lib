@@ -265,7 +265,7 @@ def _check_type(section: str, config: dict, allowed_types: dict, default: str):
     if not isinstance(config, dict):
         raise ConfigError(f"{section}: must be an object")
     type_name = config.get("type", default)
-    if type_name not in allowed_types:
+    if not isinstance(type_name, str) or type_name not in allowed_types:
         known = ", ".join(sorted(allowed_types))
         raise ConfigError(
             f"{section}: unknown type '{type_name}' — expected one of: {known}"
@@ -385,6 +385,8 @@ def _validate_top_level(config: dict) -> _Flags:
 
     _check_number("config", config, "batch_size")
     _check_number("config", config, "timeout_seconds", integer=False)
+    if "params" in config and not isinstance(config["params"], dict):
+        raise ConfigError("params: must be an object")
     return _Flags(method, allow_body_on_get, allow_http, allow_literals)
 
 
@@ -441,6 +443,19 @@ def _validate_template_paths(config: dict) -> None:
         )
     for path in template_paths:
         _resolve_body_path("template_paths", config["body"], path, required=True)
+
+
+def _validate_token_endpoint_shape(auth: dict) -> None:
+    """`body` et `headers` sont des objets ; les chemins JSON, des chaînes. Sans
+    ce contrôle, un `body` en liste ou un `token_json_path` numérique passait la
+    validation et plantait plus loin, hors de `ConfigError`."""
+    for section in ("body", "headers"):
+        if section in auth and not isinstance(auth[section], dict):
+            raise ConfigError(f"auth: '{section}' must be an object")
+    for key in ("token_json_path", "expires_in_json_path", "token_url", "header_name",
+                "value_prefix"):
+        if key in auth and not (isinstance(auth[key], str) and auth[key]):
+            raise ConfigError(f"auth: '{key}' must be a non-empty string")
 
 
 def _validate_auth_secrets(
@@ -501,7 +516,7 @@ def _validate_oauth2(auth: dict) -> None:
 def _validate_token_endpoint_method(auth: dict) -> None:
     token_method = str(auth.get("method", "POST")).upper()
     if token_method == "GET" and any(
-        isinstance(v, dict) for v in auth.get("body", {}).values()
+        isinstance(v, dict) for v in (auth.get("body") or {}).values()
     ):
         raise ConfigError(
             "auth: secret references are not allowed in 'body' on GET — "
@@ -518,6 +533,8 @@ def _validate_auth(config: dict, allow_http: bool, allow_literals: bool) -> None
     _check_unknown("auth", auth, ("type",) + _AUTH_KEYS[auth_type])
     _check_required_groups("auth", auth, _AUTH_REQUIRED.get(auth_type, ()))
     _check_number("auth", auth, "timeout_seconds", integer=False)
+    if auth_type == "token_endpoint":
+        _validate_token_endpoint_shape(auth)
     _validate_auth_secrets(auth, auth_type, allow_http, allow_literals)
     if auth_type == "oauth1":
         _validate_oauth1(auth)
@@ -525,6 +542,23 @@ def _validate_auth(config: dict, allow_http: bool, allow_literals: bool) -> None
         _validate_oauth2(auth)
     if auth_type == "token_endpoint":
         _validate_token_endpoint_method(auth)
+
+
+# Clés de pagination qui nomment un champ de la réponse ou un paramètre de la
+# requête : des chaînes. Une liste ou un nombre n'était refusé nulle part, et
+# plantait à la première page — ou dans la validation elle-même.
+_PAGINATION_NAME_KEYS = (
+    "items_field", "record_field", "limit_param", "offset_param",
+    "page_param", "size_param", "cursor_param", "cursor_field", "has_more_field",
+    "key_field", "key_param", "next_field", "total_pages_header", "total_pages_field",
+)
+
+
+def _validate_pagination_names(pagination: dict) -> None:
+    for key in _PAGINATION_NAME_KEYS:
+        value = pagination.get(key)
+        if value is not None and not (isinstance(value, str) and value):
+            raise ConfigError(f"pagination: '{key}' must be a non-empty string")
 
 
 def _validate_params_in(
@@ -663,6 +697,7 @@ def _validate_pagination(config: dict, method: str, allow_body_on_get: bool) -> 
         pagination,
         ("type",) + _PAGINATION_COMMON + _PAGINATION_KEYS[pagination_type],
     )
+    _validate_pagination_names(pagination)
     params_in = _validate_params_in(config, pagination, method, allow_body_on_get)
 
     for key in ("max_pages", "max_rows", "limit", "page_size"):
@@ -719,6 +754,10 @@ def _validate_incremental(config: dict) -> None:
             "incremental: 'checkpoint' commits the watermark batch by batch "
             "and only makes sense with \"enabled\": true"
         )
+    for key in ("field", "param_name", "placeholder"):
+        value = incremental.get(key)
+        if value is not None and not (isinstance(value, str) and value):
+            raise ConfigError(f"incremental: '{key}' must be a non-empty string")
     _validate_incremental_options(config, incremental)
     if incremental.get("enabled"):
         if not incremental.get("field"):
@@ -865,8 +904,8 @@ def _validate_checkpoint_mode(config: dict) -> None:
     # `merge` est idempotent — rejouer un lot met à jour les mêmes lignes — donc
     # la reprise de `checkpoint` ne l'abîme pas, contrairement à un
     # remplacement qui effacerait ce que le run interrompu avait déjà écrit.
-    if config.get("incremental", {}).get("checkpoint") and (
-        config.get("write", {}).get("mode", "append") not in ("append", "merge")
+    if (config.get("incremental") or {}).get("checkpoint") and (
+        (config.get("write") or {}).get("mode", "append") not in ("append", "merge")
     ):
         raise ConfigError(
             "write: \"mode\": \"{mode}\" is incompatible with "
