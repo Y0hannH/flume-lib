@@ -1,15 +1,22 @@
 """Interroge OSV.dev pour les vulnérabilités connues des dépendances.
 
-Deux modes, deux questions différentes :
+Trois modes, trois questions différentes :
 
 - **Sans argument** — audite la fermeture des dépendances d'exécution telle
-  qu'elle est installée. C'est ce que joue la CI : « en installant flume-lib
-  aujourd'hui, hérite-t-on d'une vulnérabilité connue ? »
+  qu'elle est installée : « en installant flume-lib aujourd'hui, hérite-t-on
+  d'une vulnérabilité connue ? » Ce sont les versions les plus récentes que
+  `pyproject.toml` autorise, pas celles d'un lakehouse déjà déployé.
 
 - **`--wheels <dossier>`** — audite un lot de wheels précis, d'après les noms
-  de fichiers. C'est ce qu'on joue avant de livrer un lot, et à intervalles
-  réguliers ensuite : l'installation hors ligne fige des versions, donc une
-  CVE publiée après la release ne se signale nulle part toute seule.
+  de fichiers. C'est ce qu'on joue avant de livrer un lot.
+
+- **`--requirements <fichier>`** — audite les versions figées d'un lockfile
+  (`requirements/runtime.txt`). C'est ce que joue la CI, à chaque poussée et
+  chaque lundi : l'installation hors ligne fige des versions, donc une CVE
+  publiée après la release ne se signale nulle part toute seule — sauf à
+  auditer **ces** versions-là, et non les plus récentes. Toutes les versions
+  du fichier sont auditées, y compris celles qu'un marqueur d'environnement
+  réserve à un seul noyau Fabric.
 
 Sort en 1 si une vulnérabilité est connue, 2 si le contrôle n'a pas pu être
 mené (réseau, OSV indisponible) — un contrôle qui n'a pas tourné n'est pas un
@@ -23,6 +30,7 @@ verify_wheels.py.
 Usage :
     python scripts/audit_dependencies.py
     python scripts/audit_dependencies.py --wheels fabric-wheels
+    python scripts/audit_dependencies.py --requirements requirements/runtime.txt
 
 Sans dépendance : stdlib seule.
 """
@@ -86,6 +94,21 @@ def wheel_closure(folder: pathlib.Path) -> list[tuple[str, str]]:
     return sorted(packages.items())
 
 
+# Une ligne de lockfile : « arro3-core==0.9.1 ; python_full_version >= '3.11' \ »
+_PINNED = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;\\]+)")
+
+
+def requirements_closure(path: pathlib.Path) -> list[tuple[str, str]]:
+    """Paquets et versions figés d'un lockfile. Un même paquet peut y figurer
+    en deux versions (une par noyau) : les deux sont retournées."""
+    pinned = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = _PINNED.match(line)
+        if match:
+            pinned.add((match.group(1).replace("_", "-").lower(), match.group(2)))
+    return sorted(pinned)
+
+
 def query_osv(packages: list[tuple[str, str]]) -> list[list[str]]:
     """Identifiants de vulnérabilité par paquet, dans l'ordre reçu."""
     body = json.dumps({
@@ -114,13 +137,25 @@ def describe(vulnerability_id: str) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument(
+    chosen = parser.add_mutually_exclusive_group()
+    chosen.add_argument(
         "--wheels", metavar="DOSSIER",
         help="Auditer un lot de wheels au lieu de l'environnement installé",
     )
+    chosen.add_argument(
+        "--requirements", metavar="FICHIER",
+        help="Auditer les versions figées d'un lockfile au lieu de l'environnement installé",
+    )
     args = parser.parse_args()
 
-    if args.wheels:
+    if args.requirements:
+        lockfile = pathlib.Path(args.requirements)
+        if not lockfile.is_file():
+            print(f"Fichier introuvable : {lockfile}")
+            return 2
+        packages = requirements_closure(lockfile)
+        source = f"lockfile {lockfile}"
+    elif args.wheels:
         folder = pathlib.Path(args.wheels)
         if not folder.is_dir():
             print(f"Dossier introuvable : {folder}")

@@ -31,7 +31,7 @@ Use `pytest`, not `python -m pytest`: the latter puts the current directory on `
 | `readme-shas` | Every published tag has its SHA in the table of [install.md](install.md#alternative-install-from-github-development-environments). |
 | `key-index` | The generated key references match the code. |
 | `lockfile` | `requirements/runtime.txt` and `requirements/build.txt` match their sources. |
-| `audit` | [OSV.dev](https://osv.dev) lists no known vulnerability in the runtime dependencies. |
+| `audit` | [OSV.dev](https://osv.dev) lists no known vulnerability in the **locked** versions of `requirements/runtime.txt` — the ones the offline bundles ship. |
 | `build` | The wheel builds and carries every module and the `py.typed` marker. |
 
 The weekly run is the point of `audit`: an offline install freezes its versions, so a CVE published after a release would surface nowhere otherwise. See [Verifying a batch](security.md#verifying-a-batch) for what the two verification scripts do — and do not — prove.
@@ -42,7 +42,7 @@ Dependabot proposes updates to the GitHub Actions (pinned by commit SHA), to the
 
 [`docs/cookbook.md`](cookbook.md) and [`docs/agent-cookbook.md`](agent-cookbook.md) each carry a key reference between `BEGIN GENERATED KEY INDEX` and `END GENERATED KEY INDEX`. It is written by [`scripts/gen_key_index.py`](../scripts/gen_key_index.py) from the validator and from the defaults read in the implementation. Do not edit it by hand: after adding or changing a config key, run `python scripts/gen_key_index.py` and commit the result.
 
-`tests/test_docs.py` also checks the documentation: every complete config in the agent cookbook validates, every Python block parses and imports only names the package exports, every relative link and anchor in the README and `docs/` resolves, and the pinned `flume-lib==X.Y.Z` of the install lines equals the package version.
+`tests/test_security_notes.py` ties [security.md](security.md) to what it describes: the numbers it quotes equal the constants in the code, every workflow action is pinned by SHA, the release is attested and built with hashed tools, the lockfiles carry hashes, and the weekly audit reads the lockfile. `tests/test_docs.py` also checks the documentation: every complete config in the agent cookbook validates, every Python block parses and imports only names the package exports, every relative link and anchor in the README and `docs/` resolves, and the pinned `flume-lib==X.Y.Z` of the install lines equals the package version.
 
 ## Release procedure
 
