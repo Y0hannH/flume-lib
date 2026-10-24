@@ -941,11 +941,14 @@ def retype_table_columns(
     qb = QueryBuilder()
     qb.register("t", dt)
     # noms cités par `_quote_column`, types issus de `_sql_type`
-    reader = qb.execute(f"select {select} from t")  # nosec B608
+    # Matérialisée avant d'écrire : passer le lecteur en flux à `write_deltalake`
+    # fait avorter le processus avec deltalake 1.3.2 (le plancher déclaré). Le
+    # coût est la table en mémoire, qui est de toute façon réécrite en entier.
+    data = ac.Table.from_arrow(qb.execute(f"select {select} from t"))  # nosec B608
     try:
         write_deltalake(
             uri,
-            reader,
+            data,
             mode="overwrite",
             schema_mode="overwrite",
             partition_by=partitions or None,
