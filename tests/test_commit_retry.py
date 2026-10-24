@@ -20,11 +20,14 @@ from flume_lib._delta import (
 )
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def no_pause(monkeypatch):
+    """Les tests unitaires ne dorment pas. Pas les tests de contention : ils
+    mesurent justement que la pause aléatoire désynchronise les écrivains."""
     monkeypatch.setattr(_delta.time, "sleep", lambda seconds: None)
 
 
+@pytest.mark.usefixtures("no_pause")
 class TestCommitWithRetry:
     def test_a_lost_commit_is_replayed_until_it_passes(self):
         calls = []
@@ -96,6 +99,7 @@ class TestWritesUnderContention:
         rows = query_table(uri, "select n from t", alias="t")
         assert sorted(r["n"] for r in rows) == list(range(8))
 
+    @pytest.mark.usefixtures("no_pause")
     def test_a_write_that_keeps_losing_says_so(self, tmp_path, monkeypatch):
         def always_lost(*args, **kwargs):
             raise CommitFailedError("Failed to commit transaction: Metadata changed")
