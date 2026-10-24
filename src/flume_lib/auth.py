@@ -4,6 +4,7 @@ jamais lus depuis la config en clair."""
 
 import base64
 import time
+from urllib.parse import quote_plus
 
 import requests
 
@@ -31,7 +32,11 @@ REFRESHABLE_TYPES = ("oauth2_client_credentials", "token_endpoint")
 
 # Marge avant l'expiration annoncée. Un token renouvelé à la seconde près
 # arriverait expiré sur une API dont l'horloge avance de quelques secondes.
+# C'est un plafond : la marge réelle est au plus `TOKEN_EXPIRY_MARGIN_RATIO`
+# de la durée de vie. Une marge fixe de 60 s sur un token de 30 s le déclarait
+# expiré dès sa réception, et le endpoint était rappelé à chaque requête.
 TOKEN_EXPIRY_MARGIN_SECONDS = 60
+TOKEN_EXPIRY_MARGIN_RATIO = 0.1
 
 
 class AuthError(Exception):
@@ -110,6 +115,10 @@ def _fetch_oauth2_client_credentials(auth_config: dict) -> tuple[str, float | No
     `Authorization: Basic` ('basic', ce qu'exigent Cisco Umbrella et d'autres).
     Un IdP qui attend 'basic' et reçoit 'body' ne voit aucun credential : il
     répond 401, exactement comme si le secret était faux.
+
+    `urlencode_credentials` (avec 'basic') applique l'encodage de la RFC 6749
+    §2.3.1. Il est optionnel : certains IdP lisent l'en-tête sans le décoder,
+    et l'activer par défaut casserait les configurations qui fonctionnent.
     """
     token_url = auth_config.get("token_url")
     if not token_url:
@@ -133,6 +142,11 @@ def _fetch_oauth2_client_credentials(auth_config: dict) -> tuple[str, float | No
     data = {"grant_type": "client_credentials"}
     headers = {}
     if client_auth == "basic":
+        if auth_config.get("urlencode_credentials"):
+            # RFC 6749 §2.3.1 : identifiant et secret sont d'abord encodés en
+            # application/x-www-form-urlencoded. Sans cela, un secret portant
+            # `:`, `+` ou `%` est lu de travers par un IdP conforme.
+            client_id, client_secret = quote_plus(client_id), quote_plus(client_secret)
         encoded = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
         headers["Authorization"] = f"Basic {encoded}"
         register_secret(encoded)
@@ -242,6 +256,18 @@ def _build_oauth1(auth_config: dict) -> OAuth1Signer:
         raise AuthError(str(exc)) from exc
 
 
+def _renewal_instant(expires_in: float | None) -> float | None:
+    """Instant (horloge monotone) à partir duquel le token doit être renouvelé.
+
+    None quand l'endpoint n'annonce aucune durée, ou une durée nulle ou
+    négative — illisible, donc traitée comme absente : le token n'est alors
+    renouvelé qu'en réaction à un 401, jamais par anticipation."""
+    if expires_in is None or expires_in <= 0:
+        return None
+    margin = min(TOKEN_EXPIRY_MARGIN_SECONDS, expires_in * TOKEN_EXPIRY_MARGIN_RATIO)
+    return time.monotonic() + expires_in - margin
+
+
 class AuthProvider:
     """Porte les headers d'authentification d'un run et sait les régénérer.
 
@@ -282,7 +308,7 @@ class AuthProvider:
     def _is_expiring(self) -> bool:
         if self._expires_at is None:
             return False
-        return time.monotonic() >= self._expires_at - TOKEN_EXPIRY_MARGIN_SECONDS
+        return time.monotonic() >= self._expires_at
 
     def _fetch(self) -> None:
         if self.signer is not None:
@@ -290,9 +316,7 @@ class AuthProvider:
             return
         headers, expires_in = _build_headers(self._config)
         self._headers = headers
-        self._expires_at = (
-            time.monotonic() + expires_in if expires_in is not None else None
-        )
+        self._expires_at = _renewal_instant(expires_in)
 
 
 def build_auth(auth_config: dict | None) -> tuple[dict[str, str], object | None]:

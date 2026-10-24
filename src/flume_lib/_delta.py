@@ -3,6 +3,8 @@ sans pyspark ni pyarrow)."""
 
 import json
 import re
+from datetime import date
+from decimal import Decimal, InvalidOperation
 
 import arro3.core as ac
 from deltalake import DeltaTable, QueryBuilder, write_deltalake
@@ -25,6 +27,34 @@ DEFAULT_LOG_SCHEMA = "flume"
 WORKSPACE_CONTEXT_KEYS = ("defaultLakehouseWorkspaceId", "currentWorkspaceId")
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# Types qu'une config peut imposer à une colonne (`write.column_types`).
+# Délibérément courts : ce sont ceux que l'inférence ne peut pas deviner —
+# un montant est un décimal, pas un flottant ; une date reste du texte dans le
+# JSON. `timestamp` en est absent : le cast d'arro3 vers un fuseau exige la base
+# tz du système, absente de certains environnements.
+_ISO_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_DECIMAL_TYPE_RE = re.compile(r"^decimal\(\s*(\d{1,2})\s*,\s*(\d{1,2})\s*\)$")
+COLUMN_TYPE_HELP = "decimal(precision,scale), date or string"
+MAX_DECIMAL_PRECISION = 38
+
+
+def parse_column_type(spec) -> tuple[str, int | None, int | None]:
+    """Décode un type de colonne déclaré : (genre, précision, échelle).
+    Lève ValueError si le texte n'en est pas un."""
+    if isinstance(spec, str):
+        text = spec.strip().lower()
+        if text in ("date", "string"):
+            return text, None, None
+        match = _DECIMAL_TYPE_RE.match(text)
+        if match:
+            precision, scale = int(match.group(1)), int(match.group(2))
+            if 1 <= precision <= MAX_DECIMAL_PRECISION and 0 <= scale <= precision:
+                return "decimal", precision, scale
+    raise ValueError(
+        f"unknown column type {spec!r} — expected {COLUMN_TYPE_HELP} "
+        f"(precision 1-{MAX_DECIMAL_PRECISION}, scale not above precision)"
+    )
 
 
 def validate_identifier(name, kind: str) -> str:
@@ -164,6 +194,84 @@ def _normalizer(dtype: ac.DataType):
     return normalize
 
 
+def _declared_text(name: str, index: int, value, kind: str, precision, scale) -> str:
+    """Forme texte, validée, d'une valeur destinée à un type déclaré.
+
+    Validée en Python parce que le cast d'Arrow ne proteste pas : une valeur
+    illisible, trop large ou en notation exponentielle devient un **nul**, sans
+    erreur — pour un montant, une perte silencieuse. Le message donne la
+    colonne, le rang de l'enregistrement dans le lot et le type Python, jamais
+    la valeur : il part dans log_runs."""
+
+    def refuse(reason: str):
+        return DeltaWriteError(
+            f"column '{name}' is declared {_declared_label(kind, precision, scale)} "
+            f"but record {index} of the batch {reason} "
+            f"(received a {type(value).__name__})"
+        )
+
+    if isinstance(value, bool) or isinstance(value, (dict, list)):
+        raise refuse("holds a value that is not a scalar number or text")
+    if kind == "decimal":
+        try:
+            number = Decimal(repr(value) if isinstance(value, float) else str(value).strip())
+        except InvalidOperation:
+            raise refuse("is not a decimal number") from None
+        if not number.is_finite():
+            raise refuse("is not a finite number")
+        exponent = int(number.normalize().as_tuple().exponent)
+        if -exponent > scale:
+            raise refuse(f"has more than {scale} decimals — it would be rounded")
+        if number.adjusted() + 1 > precision - scale and number != 0:
+            raise refuse(f"does not fit in {precision - scale} integer digits")
+        return format(number, "f")
+    text = str(value).strip()
+    if kind == "date":
+        # un instant ISO (2026-01-02T03:04:05Z) donne son jour
+        day = text[:10] if len(text) > 10 and text[10] in "T " else text
+        # le motif d'abord : `fromisoformat` accepte « 20260102 » à partir de
+        # Python 3.11 et pas avant, et un entier n'est pas une date
+        if not isinstance(value, str) or not _ISO_DAY_RE.match(day):
+            raise refuse("is not a yyyy-MM-dd date")
+        try:
+            date.fromisoformat(day)
+        except ValueError:
+            raise refuse("is not a yyyy-MM-dd date") from None
+        return day
+    return text
+
+
+def _declared_label(kind: str, precision, scale) -> str:
+    return f"decimal({precision},{scale})" if kind == "decimal" else kind
+
+
+def _declared_array(name: str, values: list, spec: str) -> ac.Array:
+    """Colonne au type imposé par la config. Un échec est une erreur, pas un
+    repli sur du texte : le type a été demandé, et le dégrader en silence
+    reviendrait à l'ignorer."""
+    kind, precision, scale = parse_column_type(spec)
+    if kind == "string":
+        to_text = _normalizer(ac.DataType.string())
+        return ac.Array([to_text(v) for v in values], type=ac.DataType.string())
+    texts = [
+        None if v is None else _declared_text(name, i, v, kind, precision, scale)
+        for i, v in enumerate(values, start=1)
+    ]
+    source = ac.Array(texts, type=ac.DataType.string())
+    if kind == "decimal" and precision is not None and scale is not None:
+        target = ac.DataType.decimal128(precision, scale)
+    else:
+        target = ac.DataType.date32()
+    converted = source.cast(target)
+    if converted.null_count != source.null_count:
+        # défense : la validation ci-dessus doit rendre ce cas impossible
+        raise DeltaWriteError(
+            f"column '{name}': the conversion to "
+            f"{_declared_label(kind, precision, scale)} lost values"
+        )
+    return converted
+
+
 def _build_column(
     name: str, values: list, known_types: dict, fallbacks: list[str]
 ) -> ac.Array:
@@ -220,16 +328,23 @@ def _build_column(
 
 
 def records_to_table(
-    records: list[dict], known_types: dict | None = None
+    records: list[dict],
+    known_types: dict | None = None,
+    column_types: dict | None = None,
 ) -> tuple[ac.Table, list[str]]:
     """Convertit une liste de dicts JSON en table Arrow. Types scalaires
     inférés par colonne ; les structures imbriquées sont sérialisées en JSON.
 
     `known_types` fixe le type de colonnes déjà écrites par un lot précédent.
+    `column_types` impose le type de colonnes nommées (`decimal(p,s)`, `date`,
+    `string`) : il prime sur l'inférence et sur `known_types`, et une valeur
+    qui n'y rentre pas fait échouer l'écriture.
+
     Retourne la table et la liste des dégradations subies — une colonne
     repliée sur du texte n'est plus silencieuse.
     """
     known_types = known_types or {}
+    column_types = column_types or {}
     fallbacks: list[str] = []
     columns: dict[str, ac.Array] = {}
     # `seen` à côté de `keys` : le `key not in keys` d'origine balayait la
@@ -245,7 +360,10 @@ def records_to_table(
                 keys.append(key)
     for key in keys:
         values = [r.get(key) for r in records]
-        columns[key] = _build_column(key, values, known_types, fallbacks)
+        if key in column_types:
+            columns[key] = _declared_array(key, values, column_types[key])
+        else:
+            columns[key] = _build_column(key, values, known_types, fallbacks)
     return ac.Table.from_pydict(columns), fallbacks
 
 
@@ -301,6 +419,7 @@ def write_records(
     schema_mode: str = "merge",
     storage_options: dict | None = None,
     known_types: dict | None = None,
+    column_types: dict | None = None,
 ) -> tuple[dict, list[str]]:
     """Écrit des enregistrements dans une table Delta.
 
@@ -317,7 +436,7 @@ def write_records(
         raise ValueError(
             f"predicate only makes sense with mode='overwrite', not '{mode}'"
         )
-    table, fallbacks = records_to_table(records, known_types)
+    table, fallbacks = records_to_table(records, known_types, column_types)
     try:
         write_deltalake(
             uri,
@@ -394,6 +513,7 @@ def merge_records(
     partition_by: list | None = None,
     storage_options: dict | None = None,
     known_types: dict | None = None,
+    column_types: dict | None = None,
 ) -> tuple[dict, list[str], int, int]:
     """Fusionne des enregistrements dans une table Delta : une ligne dont la
     clé existe est mise à jour (toutes ses colonnes, lignage compris), les
@@ -421,11 +541,14 @@ def merge_records(
             partition_by=partition_by,
             storage_options=storage_options,
             known_types=known_types,
+            column_types=column_types,
         )
         return types, fallbacks, len(records), 0
 
     target_types = {field.name: field.type for field in dt.schema().to_arrow()}
-    table, fallbacks = records_to_table(records, {**(known_types or {}), **target_types})
+    table, fallbacks = records_to_table(
+        records, {**(known_types or {}), **target_types}, column_types
+    )
     try:
         metrics = (
             dt.merge(

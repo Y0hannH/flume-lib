@@ -334,6 +334,14 @@ Every written row carries two extra columns:
 
 They make it possible to trace a row back to the run that produced it, de-duplicate after a partial retry, or isolate the rows of a bad run. The `_flume_` prefix avoids collisions with API fields.
 
+### Interrupted runs
+
+A notebook cancelled mid-run (`KeyboardInterrupt`, `SystemExit`) used to leave written batches — and, with `checkpoint`, an advanced watermark — without any trace in `log_runs`. The run is now recorded as `failed` (`KeyboardInterrupt: run interrupted before completion`, `rows_loaded` being what had really been written), the session is closed, and the interruption is **raised again** to the caller: `run_source` still returns instead of raising for every ordinary error, but it never swallows a request to stop. A dry run raises without logging. Two runs of the same source at the same time are not detected; do not schedule them concurrently.
+
+### Unresolved lakehouse path
+
+If `lakehouse_tables_path` still starts with `/lakehouse/default/` after resolution — outside Fabric, or in a notebook whose context does not expose the default lakehouse — the run adds a warning to `RunResult.warnings`: the local mount cannot take the Delta commit, and the writes usually fail with `os error 1`. Pass the `abfss://` URI explicitly.
+
 ## Secret references
 
 Wherever a value is marked *secret ref*, three forms are accepted:
@@ -381,7 +389,7 @@ All of them side by side in one runnable notebook, with a probe loop that checks
 
 The token of an `oauth2_client_credentials` or `token_endpoint` auth expires — 60 minutes is common. A run longer than that used to see its last pages answered with 401, a status that is never retried: the whole run failed. Both types are now renewed mid-run, in two ways.
 
-**Proactively**, when the token endpoint announces a lifetime: `expires_in` for `oauth2_client_credentials` (standard OAuth2, read automatically), or the path declared in `expires_in_json_path` for `token_endpoint`. The token is renewed 60 seconds before the announced expiry, so the API never sees an expired credential.
+**Proactively**, when the token endpoint announces a lifetime: `expires_in` for `oauth2_client_credentials` (standard OAuth2, read automatically), or the path declared in `expires_in_json_path` for `token_endpoint`. The token is renewed shortly before the announced expiry, so the API never sees an expired credential: 10 % of the lifetime ahead, at most 60 seconds (a 3 600 s token is renewed after 3 540 s, a 30 s token after 27 s). A fixed 60-second margin used to declare a token of 30 seconds expired on arrival and call the endpoint again before every request. A lifetime of zero or less is unreadable and treated as absent.
 
 **Reactively**, on a 401, for endpoints that announce nothing. The token is renewed and the page replayed immediately, without backoff — nothing is saturated, the credential was simply stale. This happens **once per page**: if a freshly issued token is refused again, the run fails with the 401, because that is no longer an expiry and replaying would only delay the diagnosis.
 
@@ -440,6 +448,7 @@ Sends `grant_type=client_credentials` (+ `scope` if provided) **form-encoded** t
 | `client_id` | **yes** | — | Secret ref (or literal — an Entra app id is not a secret). |
 | `client_secret` | **yes** | — | Secret ref. |
 | `client_auth` | no | `body` | Where the client credentials travel: `body` (form fields, what Entra ID expects) or `basic` (`Authorization: Basic base64(id:secret)`, what Cisco Umbrella and others require). See below. |
+| `urlencode_credentials` | no | `false` | With `client_auth: "basic"` only. Form-urlencodes the id and the secret before the Base64, as RFC 6749 §2.3.1 specifies. Needed when the secret contains `:`, `+`, `%` or a space and the IdP follows the RFC; **off by default** because some IdPs read the header without decoding it, and turning it on would break a configuration that works. Try it on a 401 with such a secret. |
 | `scope` | no | absent | E.g. `https://graph.microsoft.com/.default` (Entra) or a proprietary scope. |
 | `timeout_seconds` | no | `30` | Token call timeout. |
 
@@ -793,6 +802,7 @@ By default every run **appends**. That is the safe behavior and it stays the def
 | `merge_keys` | **yes** with `mode: "merge"` | Columns that identify a row. A row whose key exists is updated, the others are inserted. |
 | `when_matched` | no (default `update`) | What a matching row does. Only `update` exists for now. |
 | `partition_by` | no | Partition columns of the target table. Fixed at creation. |
+| `column_types` | no | Types imposed on named columns: `{"amount": "decimal(18,4)", "day": "date", "id": "string"}`. See [Typed columns](#typed-columns). |
 
 ```json
 "write": {
@@ -845,7 +855,7 @@ Each batch is merged into the table (Delta's `MERGE`: `when matched update all`,
 - **Nested values** (a list of lines inside an invoice) are stored as a JSON string, like everywhere else; they are compared as part of the row, not as part of the key.
 - **A source that returns nothing changes nothing**, as for the other modes; under `incremental` the run says so in `warnings`.
 
-A merge rewrites the data files that hold matching keys, so it costs more than an append on a large table. Partition on a column your keys correlate with if that matters. It needs a delta-rs with `merge_schema` on `DeltaTable.merge` (the 1.6 line used by the Fabric bundle has it).
+A merge rewrites the data files that hold matching keys, so it costs more than an append on a large table. Partition on a column your keys correlate with if that matters. Measured on a local filesystem — a 1 000 000-row table in four files, a batch of 100 000 rows half updating and half inserting, keys spread at random across the files — one merge took 0.08 s and rewrote all four files (950 000 rows copied): **the cost of a batch follows the size of the table, not the size of the batch**. A 2.8 M-row table merged in 56 batches of 50 000 therefore rewrites itself 56 times. OneLake adds network latency to every file and was not measured; a larger `batch_size` or a partition the keys follow are the levers. It needs a delta-rs with `merge_schema` on `DeltaTable.merge` (the 1.6 line used by the Fabric bundle has it).
 
 ### Every mode side by side
 
@@ -988,11 +998,31 @@ Each column is typed from **all** the values of the batch being written, not fro
 | booleans only | `boolean` |
 | anything else — strings, mixed scalars, objects, lists | `string` |
 
-Objects and lists are serialized to a JSON string. Dates and timestamps arrive as strings and stay strings: the library does not parse them, so downstream casting is the consumer's job.
+Objects and lists are serialized to a JSON string. Dates and timestamps arrive as strings and stay strings unless you declare otherwise — see [Typed columns](#typed-columns); amounts inferred as `double` can be declared exact there too.
 
 A column whose values fit none of those types — an integer beyond `bigint`, say — is still written, as text, and the degradation is reported in `RunResult.warnings`. A run can be `success` and carry warnings; that is the point. It used to be silent, which is how a column of amounts became a column of text without anyone noticing.
 
 Within a run, the types chosen by the first batch are applied to the following ones, so a source whose later rows look different cannot produce two incompatible schemas for the same table. One case deserves attention: a column holding only nulls in the first batch is typed `string`, for want of anything to go on, and later batches conform to that — their numbers are written as text. The type cannot be revised without breaking the commit, and the table would carry it anyway, so the library reports it in `RunResult.warnings` instead of failing. A source with sparse optional fields and a small `batch_size` makes this more likely; a larger first batch makes it rarer. Across runs, Delta's `schema_mode=merge` handles new columns, but not a column that changes type from one run to the next — that is a `SchemaMismatchError` at commit time.
+
+### Typed columns
+
+Inference cannot know that `1234567.89` is money, or that `"2026-01-02"` is a date. `write.column_types` says so:
+
+```json
+"write": {"column_types": {"amount": "decimal(18,4)", "invoice_date": "date", "account_id": "string"}}
+```
+
+| Type | Source values accepted | Stored as |
+|---|---|---|
+| `decimal(precision,scale)` | integers, floats, numeric texts (`"1234.5"`, `"1.5e3"`); precision 1 to 38, scale up to precision | `decimal(p,s)` — exact |
+| `date` | `yyyy-MM-dd`, or an ISO instant (`2026-01-02T03:04:05Z`), which gives its day | `date` |
+| `string` | anything; objects and lists become JSON, numbers their text | `string` |
+
+The declared type wins over the inferred one, in every write mode, and a column that is absent from a batch is simply not written. **A value that does not fit fails the run** — more decimals than the scale, more integer digits than the precision allows, a non-numeric text, an invalid date. It is never rounded, truncated or turned into text: asking for a type and receiving something else would be the silent degradation this feature exists to end. Floats are read by their shortest form (`0.1`, not its binary expansion), so `0.1 + 0.2` — `0.30000000000000004` — needs a scale of 17 or more. The error names the column and the record's position in the batch, never the value, since it is stored in `log_runs`.
+
+`timestamp` is not offered: Arrow's conversion to a time zone needs the system's tz database, which not every runtime ships. Keep timestamps as text, or declare a `date`.
+
+Declare the type **before the first run**. Delta cannot change a column's type afterwards: declaring `decimal` over a table that holds `double` fails at commit with a schema error, which is the correct outcome.
 
 ## Technical tables
 

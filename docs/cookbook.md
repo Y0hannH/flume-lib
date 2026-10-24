@@ -441,6 +441,7 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `client_secret_env_var` | one of | — |  |
 | `scope` | — | — |  |
 | `client_auth` | — | `"body"` |  |
+| `urlencode_credentials` | — | — | form-urlencodes id and secret in the Basic header (RFC 6749 §2.3.1); needs `"client_auth": "basic"` |
 | `timeout_seconds` | — | `30` | of the token call only |
 
 #### `auth` — `"type": "token_endpoint"`
@@ -507,6 +508,7 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `partition_by` | — | — | Delta partition columns |
 | `merge_keys` | conditional | — | columns identifying a row; required with `merge`, which accepts `checkpoint` |
 | `when_matched` | — | — | only `update` for now, which is also the default |
+| `column_types` | — | — | imposed types: `decimal(p,s)`, `date`, `string`; a value that does not fit fails the run |
 
 #### `retry`
 
