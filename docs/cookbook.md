@@ -58,7 +58,7 @@ Two traps worth naming, because both fail silently rather than loudly:
 | An object that comes back changed (an invoice that gets paid) and the table should hold its latest version | `"write": {"mode": "merge", "merge_keys": ["<id>"]}` |
 | The API filters on a date window and the date it filters on is not a field of the response | [section 4.3](#43-date-window-apis-whose-filter-date-is-not-a-response-field) |
 
-`overwrite` and `replace_where` share one deliberate behaviour: **a run that loads zero rows replaces nothing.** The target keeps its previous contents and `RunResult.warnings` says so, on a run still marked `success`. An API that is down and a genuinely empty window both answer "0 rows", and emptying the table on that signal would destroy data without anything having failed. Read `warnings` in your run loop — it does not reach `log_runs`.
+`overwrite` and `replace_where` share one deliberate behaviour: **a run that loads zero rows replaces nothing.** The target keeps its previous contents and `RunResult.warnings` says so, on a run still marked `success`. An API that is down and a genuinely empty window both answer "0 rows", and emptying the table on that signal would destroy data without anything having failed. Read `warnings` in your run loop; it is also stored in `log_runs.warnings`, so a backfill that replaced nothing can be found afterwards.
 
 ---
 

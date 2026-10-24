@@ -293,6 +293,14 @@ class AuthProvider:
         self.signer = _build_oauth1(self._config) if self._type == "oauth1" else None
         self._headers: dict[str, str] | None = None
         self._expires_at: float | None = None
+        self._fetches = 0
+
+    @property
+    def renewals(self) -> int:
+        """Nombre de fois où le credential a été obtenu *de nouveau* après le
+        premier : un token renouvelé par anticipation ou après un 401. Un
+        credential statique n'en compte jamais."""
+        return max(0, self._fetches - 1)
 
     def headers(self) -> dict[str, str]:
         """Headers courants. Les régénère si le token est expiré ou sur le
@@ -315,6 +323,7 @@ class AuthProvider:
             self._headers, self._expires_at = {}, None
             return self._headers
         headers, expires_in = _build_headers(self._config)
+        self._fetches += 1
         self._headers = headers
         self._expires_at = _renewal_instant(expires_in)
         return headers

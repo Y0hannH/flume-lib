@@ -291,7 +291,8 @@ Working notebook, auth to Delta: [examples/graphql_cursor_api.py](../examples/gr
 ## `run_source` parameters
 
 ```python
-run_source(config, lakehouse_tables_path=..., storage_options=..., log_schema=..., dry_run=False)
+run_source(config, lakehouse_tables_path=..., storage_options=..., log_schema=..., dry_run=False,
+           on_progress=None)
 ```
 
 | Parameter | Type | Default | Description |
@@ -301,6 +302,7 @@ run_source(config, lakehouse_tables_path=..., storage_options=..., log_schema=..
 | `storage_options` | dict \| None | `None` | Passed through to delta-rs. If absent with an `abfss://` URI, a storage bearer token is obtained via `notebookutils`. |
 | `log_schema` | str | `flume` | Schema of the technical tables `watermark` and `log_runs`. |
 | `dry_run` | bool | `False` | See [Dry run](#dry-run). |
+| `on_progress` | callable \| None | `None` | `on_progress(pages, rows)`, called after each page. See [Following a run](#following-a-run). |
 
 Returns a `RunResult` with `source_name`, `status` (`success`/`failed`), `rows_loaded`, `error_message` (None on success), `start_ts`, `end_ts` (ISO 8601 UTC), `run_id` (UUID), `warnings`, and `sample` (dry run only). **Never raises.**
 
@@ -310,10 +312,32 @@ Returns a `RunResult` with `source_name`, `status` (`success`/`failed`), `rows_l
 | `watermark_after` | `incremental.enabled` | Where the next run will start. **Equal to `watermark_before` means the run did not advance the source**, whatever `rows_loaded` says. After a failed run it is the last watermark actually committed. |
 | `window_end` | `incremental.window` | The upper bound the request carried (`window.upper_value`). |
 | `rows_inserted`, `rows_updated` | `write.mode: "merge"` | Rows the merge added and rows it updated. `rows_loaded` stays "rows processed" — before in-batch de-duplication. |
+| `pages` | always | Data responses received, the last (empty) one included. |
+| `retries` | always | Requests replayed: network error, `429`, `5xx`, a retryable application error, the replay that follows a token renewal. |
+| `token_renewals` | always | Tokens obtained again after the first — anticipated by `expires_in`, or after a `401`. Always 0 for a static credential. |
+| `duration_seconds` | always | Wall-clock duration of the run, measured on a monotonic clock. |
 
 The same functions are importable beside `run_source`: `read_watermark`, `write_watermark`, `reset_watermark`, `resolve_lakehouse_tables_path` and `run_source_windows` (see [Reading the source by window](#reading-the-source-by-window)).
 
 All four parameters worked through, with the cases each one exists for: [examples/run_options.py](../examples/run_options.py).
+
+### Following a run
+
+A run that takes an hour used to give no sign of life until its last line. `on_progress` is called after every page with the number of pages received and rows read so far:
+
+```python
+def show(pages, rows):
+    if pages % 50 == 0:
+        print(f"{pages} pages, {rows} rows")
+
+result = run_source(config, on_progress=show)
+```
+
+`rows` counts what the source has given, not what is in the table: rows wait in a buffer until `batch_size` is reached, and `RunResult.rows_loaded` stays the count of rows actually written. The callback also runs in a dry run, and `run_source_windows` passes it to every window (the counters start again at zero for each one).
+
+It cannot fail the run. If it raises, it is dropped for the rest of the run and `warnings` says so once, without quoting the exception; a `KeyboardInterrupt` raised from it is the exception to that rule, since it is how a notebook is stopped. Keep it short — it runs between two pages, on the thread that reads them.
+
+Everything a run reports is also written to `log_runs`, see [Technical tables](#technical-tables).
 
 ### Dry run
 
@@ -1099,7 +1123,7 @@ Created automatically on first run in `<log_schema>` (default `flume`):
 | Table | Columns |
 |---|---|
 | `watermark` | `source_name`, `last_value`, `updated_ts` — one row appended per advance (the current value is the max `updated_ts` per source). Appended rather than upserted so that sources can commit concurrently; `reset_watermark(source_name)` removes a source's rows. |
-| `log_runs` | `run_id`, `source_name`, `start_ts`, `end_ts`, `status`, `rows_loaded`, `error_message` — one row per `run_source` call, success or failure. `RunResult.warnings` is **not** stored there. |
+| `log_runs` | One row per `run_source` call, success or failure. `run_id`, `source_name`, `start_ts`, `end_ts`, `status`, `rows_loaded`, `error_message`, then the detail of the run: `warnings` (the `RunResult.warnings`, joined with ` \| `, NULL when there are none, capped like `error_message`), `pages`, `retries`, `token_renewals`, `rows_inserted`, `rows_updated`, `duration_seconds`, `watermark_before`, `watermark_after`, `window_end`, `target_table` (`schema.table`), `write_mode` and `lib_version`. A table created by an earlier version gains these columns at its next write; its older rows have them NULL. |
 | `run_locks` | `source_name`, `run_id`, `state` (`acquired` / `released`), `ts`, `expires_ts` — only for sources with `single_instance`. See [One run at a time](#one-run-at-a-time). |
 
 `error_message` holds the exception type and message of whatever failed. When the failure came from an [application error](#application-errors-in-a-200), that message is the API's own, truncated to the first 3 errors and 500 characters — a GraphQL error quotes the failing query in full, and `log_runs` is a table, not a log file. URLs in it are stripped of their query string (see [docs/security.md](security.md)).

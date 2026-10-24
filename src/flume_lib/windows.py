@@ -76,6 +76,7 @@ def run_source_windows(
     lakehouse_tables_path: str = DEFAULT_LAKEHOUSE_TABLES_PATH,
     storage_options: dict | None = None,
     log_schema: str = DEFAULT_LOG_SCHEMA,
+    on_progress=None,
 ) -> list[RunResult]:
     """Lance `run_source` fenêtre après fenêtre jusqu'à `until`.
 
@@ -95,6 +96,9 @@ def run_source_windows(
       sans rien de plus récent : la même requête serait relancée à l'infini,
       d'où `"advance": "upper_bound"` pour ces sources ;
     - `max_iterations` fenêtres ont tourné sans atteindre `until`.
+
+    `on_progress(pages, rows)` est passé à chaque run : les compteurs repartent
+    de zéro à chaque fenêtre.
 
     Retourne la liste des `RunResult`, dans l'ordre. Liste vide si la source
     est déjà à `until` ou au-delà."""
@@ -130,6 +134,7 @@ def run_source_windows(
             lakehouse_tables_path=tables,
             storage_options=storage_options,
             log_schema=log_schema,
+            on_progress=on_progress,
         )
         results.append(result)
 

@@ -51,9 +51,9 @@ from flume_lib import (
 
 | Name | Signature | Returns / raises |
 |---|---|---|
-| `run_source` | `(config, lakehouse_tables_path="/lakehouse/default/Tables", storage_options=None, log_schema="flume", dry_run=False)` | `RunResult`. Never raises on a source problem. |
+| `run_source` | `(config, lakehouse_tables_path="/lakehouse/default/Tables", storage_options=None, log_schema="flume", dry_run=False, on_progress=None)` | `RunResult`. Never raises on a source problem. `on_progress(pages, rows)` is called after each page; if it raises it is dropped and `warnings` says so. |
 | `validate_config` | `(config)` | `None`. Raises only `ConfigError`. |
-| `run_source_windows` | `(config_factory, until, max_span_days, max_iterations=1000, lakehouse_tables_path=…, storage_options=None, log_schema="flume")` | `list[RunResult]`. Raises `WindowRunError` (`.results` holds the runs so far) or `ValueError` on bad arguments. |
+| `run_source_windows` | `(config_factory, until, max_span_days, max_iterations=1000, lakehouse_tables_path=…, storage_options=None, log_schema="flume", on_progress=None)` | `list[RunResult]`. Raises `WindowRunError` (`.results` holds the runs so far) or `ValueError` on bad arguments. |
 | `read_watermark` | `(lakehouse_tables_path=…, source_name=None, schema="flume", storage_options=None)` | `str \| None`. `source_name` is required: **call by keyword**. |
 | `write_watermark` | `(lakehouse_tables_path=…, source_name=None, last_value=None, schema="flume", storage_options=None)` | `None`. Appends a row. |
 | `reset_watermark` | `(source_name, schema="flume", storage_options=None, lakehouse_tables_path=…)` | `int`, rows deleted for that source only. |
@@ -695,11 +695,12 @@ Values of `body` and `headers` in `token_endpoint` are literals **or** reference
 | `status` | `"success"` or `"failed"` |
 | `rows_loaded` | rows **actually written**, also on a failed run (and rows counted in a dry run) |
 | `error_message` | `None` on success; `ExceptionClassName: message` on failure, secrets redacted, at most 2 000 characters |
-| `warnings` | `list[str]`: degradations that did not fail the run. **Read it on a `success`.** Not stored in `log_runs`. |
+| `warnings` | `list[str]`: degradations that did not fail the run. **Read it on a `success`.** Also stored in `log_runs.warnings`. |
 | `sample` | dry run only: the first 3 raw records |
 | `watermark_before`, `watermark_after` | with `incremental`: where the run started and where the next one will start. **Equal means the source did not advance**, whatever `rows_loaded` says |
 | `window_end` | with `incremental.window`: the upper bound sent |
 | `rows_inserted`, `rows_updated` | `merge` only; `rows_loaded` stays "rows processed" |
+| `pages`, `retries`, `token_renewals`, `duration_seconds` | what the run cost: data responses received, requests replayed, tokens obtained again, seconds. All are also columns of `log_runs`, with `target_table`, `write_mode` and `lib_version` |
 
 ### 6.2 `error_message` prefixes
 
