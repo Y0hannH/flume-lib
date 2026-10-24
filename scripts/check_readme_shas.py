@@ -1,8 +1,9 @@
-"""Vérifie que le tableau des SHA du README couvre bien les versions publiées.
+"""Vérifie que le tableau des SHA de docs/install.md couvre bien les versions
+publiées. (Le script garde son nom historique : le tableau vivait dans le README.)
 
 L'installation depuis GitHub épingle un SHA de commit, jamais un tag : un tag
 peut être redirigé par quelqu'un qui a le droit d'écrire sur le dépôt, un SHA
-non. Le tableau du README est donc ce qui rend cette forme d'installation
+non. Le tableau de docs/install.md est donc ce qui rend cette forme d'installation
 utilisable — une version absente du tableau est une version que personne ne
 peut installer sans aller la chercher dans l'historique git.
 
@@ -32,7 +33,7 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-README = ROOT / "README.md"
+README = ROOT / "docs" / "install.md"
 
 TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 ROW_RE = re.compile(r"^\|\s*(v\d+\.\d+\.\d+)\s*\|\s*`([0-9a-f]{40})`\s*\|", re.M)
@@ -79,7 +80,7 @@ def is_strict_ancestor(commit: str, head: str) -> bool:
 def main() -> int:
     documented = dict(ROW_RE.findall(README.read_text(encoding="utf-8")))
     if not documented:
-        print("check_readme_shas : tableau des SHA introuvable dans le README.")
+        print("check_readme_shas : tableau des SHA introuvable dans docs/install.md.")
         return 1
 
     # Plancher : la plus ancienne version documentée. Rien avant elle n'est
@@ -105,16 +106,16 @@ def main() -> int:
             wrong.append((tag, documented[tag], commit))
 
     for tag, listed, actual in wrong:
-        print(f"{tag} : le README annonce {listed}, le tag pointe sur {actual}")
+        print(f"{tag} : docs/install.md annonce {listed}, le tag pointe sur {actual}")
     if missing:
-        print("Versions publiées absentes du tableau des SHA du README :")
+        print("Versions publiées absentes du tableau des SHA de docs/install.md :")
         for tag, commit in reversed(missing):
             print(f"| {tag} | `{commit}` |")
         print("\nÀ insérer en tête du tableau (les versions y descendent).")
     if missing or wrong:
         return 1
 
-    print(f"README : {len(documented)} versions listées, tableau à jour.")
+    print(f"docs/install.md : {len(documented)} versions listées, tableau à jour.")
     for tag, commit in pending:
         print(
             f"\n{tag} vient d'être posé sur HEAD. Ligne à ajouter au tableau, "

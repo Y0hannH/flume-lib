@@ -185,7 +185,7 @@ The defaults follow the GraphQL specification (`errors[].message`, `errors[].ext
 Scope and timing:
 
 - **Data calls only.** The token calls of `oauth2_client_credentials` and `token_endpoint` are not covered — they have their own error handling, driven by the HTTP status.
-- **Checked on every page**, before the records are extracted. An error on page 7 of 12 fails the run, and nothing is written: `run_source` accumulates all pages and writes once at the end.
+- **Checked on every page**, before the records are extracted. An error on page 7 of 12 fails the run. Pages already read are written in batches of `batch_size` (see [Batched writes](#batched-writes)), so a source smaller than one batch writes nothing, and a larger one leaves its earlier batches in the table.
 - **Exercised by `dry_run=True`**, like the rest of the request path — a missing scope surfaces without writing anything.
 
 Without this block, two things go wrong. A **partial** failure — valid `data` next to an `errors` entry, e.g. one field refused by a missing scope — is reported `success` while quietly missing part of what was asked for. A **total** failure surfaces only as a pagination error ("Impossible de localiser les enregistrements"), which says nothing about the actual cause. The API's own message is what ends up in `log_runs`, truncated to 500 characters over at most 3 errors — an error message quoting the whole query would otherwise be stored page after page.
@@ -279,10 +279,10 @@ How scalars themselves are typed: [Column types in Delta](#column-types-in-delta
 
 | Symptom | Cause |
 |---|---|
-| `Impossible de localiser les enregistrements` | `items_field` missing on a GraphQL source — `data` is an object, so the default probing finds nothing. |
-| `Champ 'data.x.edges' : liste attendue, NoneType reçu` | The connection returned `null` — usually an error in the response the `errors` block would have named. Add it. |
-| `placeholder '{id}' sans variable correspondante` | The query text is being scanned for placeholders: add `template_paths`. |
-| `Champ 'node' absent d'un enregistrement` | `record_field` set on a connection that is not edge-wrapped (some APIs expose `nodes` directly — then drop `record_field` and point `items_field` at `nodes`). |
+| `Unable to locate the records in the response; set 'items_field'…` | `items_field` missing on a GraphQL source — `data` is an object, so the default probing finds nothing. |
+| `Field 'data.x.edges': expected a list, got NoneType` | The connection returned `null` — usually an error in the response the `errors` block would have named. Add it. |
+| `placeholder '{id}' has no matching variable` | The query text is being scanned for placeholders: add `template_paths`. |
+| `Field 'node' missing from a record` | `record_field` set on a connection that is not edge-wrapped (some APIs expose `nodes` directly — then drop `record_field` and point `items_field` at `nodes`). |
 | Run `success` with fewer rows than expected | An `errors` entry alongside valid `data`, with no `errors` block declared. |
 | `THROTTLED` even after retries | The cost limiter, not the request rate: lower `limit`, or ask for fewer fields. |
 
@@ -376,7 +376,7 @@ It prunes `watermark` to the latest row of each source (the current watermark is
 
 ### Interrupted runs
 
-A notebook cancelled mid-run (`KeyboardInterrupt`, `SystemExit`) used to leave written batches — and, with `checkpoint`, an advanced watermark — without any trace in `log_runs`. The run is now recorded as `failed` (`KeyboardInterrupt: run interrupted before completion`, `rows_loaded` being what had really been written), the session is closed, and the interruption is **raised again** to the caller: `run_source` still returns instead of raising for every ordinary error, but it never swallows a request to stop. A dry run raises without logging. Two runs of the same source at the same time are not detected; do not schedule them concurrently.
+A notebook cancelled mid-run (`KeyboardInterrupt`, `SystemExit`) used to leave written batches — and, with `checkpoint`, an advanced watermark — without any trace in `log_runs`. The run is now recorded as `failed` (`KeyboardInterrupt: run interrupted before completion`, `rows_loaded` being what had really been written), the session is closed, and the interruption is **raised again** to the caller: `run_source` still returns instead of raising for every ordinary error, but it never swallows a request to stop. A dry run raises without logging. Two runs of the same source at the same time are not detected unless the source sets `single_instance` — see [One run at a time](#one-run-at-a-time).
 
 ### Unresolved lakehouse path
 
@@ -421,7 +421,7 @@ Every value resolved from an environment variable or Key Vault, and every token 
 
 ## Auth
 
-The type is selected by `auth.type`. The token is obtained **once per run** (no mid-run refresh).
+The type is selected by `auth.type`. The token of `oauth2_client_credentials` and `token_endpoint` is obtained at the start of the run and renewed during it when needed — see [Token expiry on long runs](#token-expiry-on-long-runs).
 
 All of them side by side in one runnable notebook, with a probe loop that checks credentials without writing anything: [examples/rest_api_auth_variants.py](../examples/rest_api_auth_variants.py).
 
@@ -518,7 +518,7 @@ Cisco Umbrella — the `client_secret_basic` variant, with a one-hour token:
 }
 ```
 
-Umbrella answers `expires_in: 3600`, which the provider reads on its own — the token is renewed 60 seconds before expiry, so a backfill longer than an hour does not break. Cisco Secure Access is the same block against `https://api.sse.cisco.com/auth/v2/token`.
+Umbrella answers `expires_in: 3600`, which the provider reads on its own — the token is renewed 60 seconds before expiry (10 % of the lifetime, at most 60 s), so a backfill longer than an hour does not break. Cisco Secure Access is the same block against `https://api.sse.cisco.com/auth/v2/token`.
 
 Non-Microsoft IdP with a proprietary scope:
 
@@ -895,7 +895,7 @@ Each batch is merged into the table (Delta's `MERGE`: `when matched update all`,
 - **Nested values** (a list of lines inside an invoice) are stored as a JSON string, like everywhere else; they are compared as part of the row, not as part of the key.
 - **A source that returns nothing changes nothing**, as for the other modes; under `incremental` the run says so in `warnings`.
 
-A merge rewrites the data files that hold matching keys, so it costs more than an append on a large table. Partition on a column your keys correlate with if that matters. Measured on a local filesystem — a 1 000 000-row table in four files, a batch of 100 000 rows half updating and half inserting, keys spread at random across the files — one merge took 0.08 s and rewrote all four files (950 000 rows copied): **the cost of a batch follows the size of the table, not the size of the batch**. A 2.8 M-row table merged in 56 batches of 50 000 therefore rewrites itself 56 times. OneLake adds network latency to every file and was not measured; a larger `batch_size` or a partition the keys follow are the levers. It needs a delta-rs with `merge_schema` on `DeltaTable.merge` (the 1.6 line used by the Fabric bundle has it).
+A merge rewrites the data files that hold matching keys, so it costs more than an append on a large table. Partition on a column your keys correlate with if that matters. Measured on a local filesystem — a 1 000 000-row table in four files, a batch of 100 000 rows half updating and half inserting, keys spread at random across the files — one merge took 0.08 s and rewrote all four files (950 000 rows copied): **the cost of a batch follows the size of the table, not the size of the batch**. A 2.8 M-row table merged in 56 batches of 50 000 therefore rewrites itself 56 times. OneLake adds network latency to every file and was not measured; a larger `batch_size` or a partition the keys follow are the levers. It needs a delta-rs with `merge_schema` on `DeltaTable.merge`; the declared floor, `deltalake>=1.3.2`, is the lowest version the test suite passes on.
 
 ### Every mode side by side
 
@@ -905,7 +905,7 @@ A merge rewrites the data files that hold matching keys, so it costs more than a
 
 `partition_by` sets the partition columns **when the table is created**. Delta fixes them at that point: passing them for an existing unpartitioned table fails with an explicit message, since changing them means rewriting the table whole, which this library does not do. Partition on a column a `replace_where` predicate filters on and the replacement only rewrites the matching partitions.
 
-The library performs no `OPTIMIZE` and no `VACUUM`. A table written batch after batch accumulates small files, and the replaced files stay on disk until vacuumed — schedule both out of band if a table grows enough to need them.
+The library performs no `OPTIMIZE` and no `VACUUM` on **your data tables** (its own technical tables have [`compact_technical_tables`](#keeping-the-technical-tables-small)). A table written batch after batch accumulates small files, and the replaced files stay on disk until vacuumed — schedule both out of band if a table grows enough to need them.
 
 ### A body on a GET
 
@@ -1071,6 +1071,7 @@ Created automatically on first run in `<log_schema>` (default `flume`):
 | Table | Columns |
 |---|---|
 | `watermark` | `source_name`, `last_value`, `updated_ts` — one row appended per advance (the current value is the max `updated_ts` per source). Appended rather than upserted so that sources can commit concurrently; `reset_watermark(source_name)` removes a source's rows. |
-| `log_runs` | `run_id`, `source_name`, `start_ts`, `end_ts`, `status`, `rows_loaded`, `error_message` — one row per `run_source` call, success or failure. |
+| `log_runs` | `run_id`, `source_name`, `start_ts`, `end_ts`, `status`, `rows_loaded`, `error_message` — one row per `run_source` call, success or failure. `RunResult.warnings` is **not** stored there. |
+| `run_locks` | `source_name`, `run_id`, `state` (`acquired` / `released`), `ts`, `expires_ts` — only for sources with `single_instance`. See [One run at a time](#one-run-at-a-time). |
 
 `error_message` holds the exception type and message of whatever failed. When the failure came from an [application error](#application-errors-in-a-200), that message is the API's own, truncated to the first 3 errors and 500 characters — a GraphQL error quotes the failing query in full, and `log_runs` is a table, not a log file. URLs in it are stripped of their query string (see [docs/security.md](security.md)).

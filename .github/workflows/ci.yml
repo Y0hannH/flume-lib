@@ -22,11 +22,11 @@ jobs:
   tests:
     uses: ./.github/workflows/tests.yml
 
-  # Le tableau des SHA du README est ce qui rend l'install depuis GitHub
+  # Le tableau des SHA (docs/install.md) est ce qui rend l'install depuis GitHub
   # utilisable : une version absente n'est installable par personne. Il a été
   # oublié deux fois de suite, d'où ce contrôle plutôt qu'une ligne de plus
   # dans la procédure de release. Hors de tests.yml volontairement : Release
-  # s'appuie sur ce workflow-là, et l'état du README n'est pas une propriété
+  # s'appuie sur ce workflow-là, et l'état de la doc n'est pas une propriété
   # du code qu'on publie.
   readme-shas:
     runs-on: ubuntu-latest
