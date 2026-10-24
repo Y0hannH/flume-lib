@@ -102,12 +102,13 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      # sans [dev] : on audite ce qui part chez le client, pas l'outillage
-      - name: Install the runtime dependencies
-        run: pip install .
-
-      - name: Known vulnerabilities (OSV.dev)
-        run: python scripts/audit_dependencies.py
+      # Les versions du lockfile, pas celles qu'un `pip install .` résoudrait
+      # aujourd'hui : ce sont elles qui partent dans les lots hors ligne, et
+      # qu'un lakehouse déjà déployé garde figées. Une CVE publiée sur une
+      # version que le lockfile épingle encore doit sortir ici, le lundi, même
+      # si une version plus récente est saine.
+      - name: Known vulnerabilities in the locked versions (OSV.dev)
+        run: python scripts/audit_dependencies.py --requirements requirements/runtime.txt
 
   build:
     runs-on: ubuntu-latest

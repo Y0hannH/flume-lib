@@ -4,6 +4,17 @@ All notable changes to this project are documented here. Versions follow [semant
 
 ## [Unreleased]
 
+### Fixed (security audit)
+
+- **The weekly vulnerability audit now checks the versions that ship.** The `audit` job ran `pip install .` and audited whatever that resolved *today* — the newest versions `pyproject.toml` allows — while the offline bundles, and any lakehouse that froze an older batch, carry the versions pinned in `requirements/runtime.txt`. A CVE published against a pinned version could therefore stay invisible for as long as a newer, clean version existed. `scripts/audit_dependencies.py` gains `--requirements <lockfile>` (every pinned version, including the two `arro3-core` versions the lockfile carries for different kernels) and the job uses it. Exit codes are unchanged: 1 for a known vulnerability, 2 when the check could not run.
+
+### Documentation (security notes)
+
+- **`docs/security.md` is brought in line with the code and the repository**, found by reading each claim against its source: it counted "three" values coming back from a response and then listed four; it still called the next-page URL "only the API's own honesty" although it is now held to the origin of `base_url`; it described the offline batches as "resolved at release time" instead of fixed by the lockfile; it quoted the body of a `4xx` as read whole (only the first 16 KiB are); it listed two paths by which API text reaches `log_runs` and omitted the reply of a refused token call; it listed the forbidden characters of a watermark without the carriage return; it said secrets "never" appear in error messages where the guarantee is masking of the credentials the library resolved; and two bullets repeated each other.
+- **It now states what the repository does and does not enforce**, taken from GitHub's configuration: the two rulesets (`protect-main`, `protect-tags`) have no bypass actor, but do not require a pull request, a review or passing checks, and do not restrict who creates a `v*` tag — which starts a release.
+- **New notes**: the exit codes of the audit script and its three modes; that flume-lib's own wheel is not on PyPI and is covered only by `SHA256SUMS.txt` and the attestation; that `replace_where` is raw SQL from the configuration; that the technical tables are not a security boundary and `single_instance` is advisory; that `compact_technical_tables` deletes.
+- **`tests/test_security_notes.py`** keeps it that way: the quoted numbers equal the constants of the code, every action of every workflow is pinned to a 40-character SHA, the release is attested and built with hashed tools, both lockfiles carry hashes for every package, the audit job reads the lockfile, and the note does not contradict itself. Each guard was shown to fail when its target is changed.
+
 ### Documentation (README, agent cookbook)
 
 - **The README is rewritten for a person deciding whether to use the library**: what it does, when to use it and when not, what a source looks like, what it takes care of, what to know before committing (at-least-once, nested JSON stored as text, 0.x versioning), and a map of the other documents. It went from 327 to about 90 lines; a test keeps it under 120.
