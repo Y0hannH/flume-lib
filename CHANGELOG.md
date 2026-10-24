@@ -2,7 +2,11 @@
 
 All notable changes to this project are documented here. Versions follow [semantic versioning](https://semver.org/); until 1.0.0, minor versions may contain breaking changes — these are always listed first.
 
-## [Unreleased]
+## [0.20.0] — 2026-10-24
+
+A run that tells the truth about what it wrote, and that can run with others. Six pieces that came out of one question — what is still missing, functionally — each reproduced on the installed stack before it was fixed: a table whose column type silently truncated the next batch, a `log_runs` that said nothing of a run's warnings or cost, the loop every notebook rewrote around `run_source`, a 429 handled only after the limit was crossed, no way through a corporate proxy, and data tables that nothing ever compacted.
+
+**Before upgrading**, one breaking change: a source that has been silently truncating values into an integer column **fails on its next run** (see the first item below). Run `run_source(config, dry_run=True)` is not enough to see it — the check reads the target table, which a dry run does not touch. If a table already froze the wrong type, `retype_columns` is the way out.
 
 ### Changed — breaking
 

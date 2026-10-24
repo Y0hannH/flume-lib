@@ -73,7 +73,7 @@ from flume_lib import (
 - **Install** from wheels uploaded to the lakehouse, with the version pinned (a notebook cell of its own, run before the imports):
 
   ```text
-  %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.19.0
+  %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.20.0
   ```
 
   The library is not on PyPI. If the user has not uploaded the wheels, point them to [install.md](install.md); do not write `pip install flume-lib`.
