@@ -79,6 +79,16 @@ class TestCommitWithRetry:
         assert pauses == sorted(pauses) and pauses[0] < pauses[-1]
 
 
+# Écrivains concurrents sur le système de fichiers local : sous Windows, delta-rs
+# échoue parfois à ouvrir un fichier du journal en cours d'écriture
+# (os error 5), de l'ordre d'une fois sur quarante. Linux et OneLake n'ont pas
+# cette particularité ; leur CI porte ces tests.
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="le système de fichiers local de Windows refuse parfois d'ouvrir un fichier du "
+    "journal qu'un autre thread est en train d'écrire (os error 5) : une particularité "
+    "de ces tests, absente de Linux et d'OneLake, que la CI Windows transformerait en échec",
+)
 class TestWritesUnderContention:
     def test_eight_writers_creating_the_same_table_all_get_in(self, tmp_path):
         uri = str(tmp_path / "bronze" / "shared")
@@ -110,12 +120,6 @@ class TestWritesUnderContention:
             write_records(str(tmp_path / "t"), [{"n": 1}])
         assert f"{COMMIT_ATTEMPTS} attempts were not enough" in str(caught.value)
 
-    @pytest.mark.skipif(
-        sys.platform == "win32",
-        reason="le système de fichiers local de Windows refuse parfois l'ouverture d'un "
-        "fichier du journal qu'un autre thread est en train d'écrire (os error 5) : "
-        "une particularité de ce test, absente de Linux et d'OneLake",
-    )
     def test_concurrent_merges_on_one_table_all_apply(self, tmp_path):
         uri = str(tmp_path / "bronze" / "merged")
         write_records(uri, [{"id": -1, "v": 0}])

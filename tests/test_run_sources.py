@@ -4,6 +4,7 @@ Le parallélisme est testé sur de vraies tables Delta : le risque n'est pas dan
 la boucle, il est dans les commits concurrents sur les tables techniques que
 toutes les sources partagent."""
 
+import sys
 import threading
 import time
 
@@ -249,6 +250,15 @@ class TestOnProgress:
         assert seen == [("a", 1, 1), ("b", 1, 1)]
 
 
+# Plusieurs sources écrivent en même temps les mêmes tables techniques : voir
+# le commentaire de `TestWritesUnderContention` sur le système de fichiers local
+# de Windows.
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="le système de fichiers local de Windows refuse parfois d'ouvrir un fichier du "
+    "journal qu'un autre thread est en train d'écrire (os error 5) : une particularité "
+    "de ces tests, absente de Linux et d'OneLake, que la CI Windows transformerait en échec",
+)
 class TestParallel:
     def test_results_keep_the_input_order_whatever_finishes_first(self, tmp_path):
         slow_done = threading.Event()
