@@ -355,6 +355,8 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `single_instance` | — | — | refuses a second run of the same source while one is going (advisory lock) |
 | `lock_ttl_seconds` | — | — | how long a run's lock lives if the run dies; must exceed `max_run_seconds` |
 | `max_requests_per_second` | — | — | at most this many requests start per second, retries included; per run |
+| `proxy` | — | — | proxy URL, or a secret reference holding it (a login lives in the URL); data and token calls; wins over `HTTPS_PROXY` |
+| `ca_bundle` | — | — | PEM file of the authority to trust (TLS-inspecting proxy); verification cannot be disabled |
 
 #### `pagination` — common to every strategy
 

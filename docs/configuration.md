@@ -44,6 +44,8 @@ Looking something up rather than reading through? [cookbook.md](cookbook.md) map
 | `max_response_bytes` | integer | no | `104857600` (100 MiB) | Largest accepted body for one data response. See [Limits on a run](#limits-on-a-run). |
 | `max_run_seconds` | number | no | none | Wall-clock limit for the whole run. See [Limits on a run](#limits-on-a-run). |
 | `max_requests_per_second` | number | no | none | Spaces the requests of a run: at most that many start per second. See [Request rate](#request-rate). |
+| `proxy` | string \| secret reference | no | none | Outgoing proxy for the data calls and the token calls. See [Proxy and certificates](#proxy-and-certificates). |
+| `ca_bundle` | string | no | none | PEM file of the certificate authority to trust, for a proxy that inspects TLS. See [Proxy and certificates](#proxy-and-certificates). |
 | `single_instance` | boolean | no | `false` | Refuses a second run of the same source while one is going. See [One run at a time](#one-run-at-a-time). |
 | `lock_ttl_seconds` | number | no | `21600` (6 h) | How long the lock of a run that died lasts. Only with `single_instance`. |
 | `allow_literal_secrets` | boolean | no | `false` | Accepts a literal string where a secret is expected (`auth.token`, `auth.client_secret`, a credential header…). Refused by default — see [Secret references](#secret-references). For a throwaway local test only. |
@@ -1067,6 +1069,22 @@ One request every 0.5 s, the first one immediately. Every *attempt* counts, repl
 The wait counts against `max_run_seconds`: a request whose turn would come after the deadline fails the run at once (`RunTimeoutError`), rather than sleeping until then to fail anyway.
 
 When the response carries a `Retry-After` header (seconds or an HTTP date), that delay is used instead of the exponential backoff — APIs with strict governance ban clients that retry earlier than they were told to. The delay is capped at `max_retry_after_seconds`; beyond the cap the wait is truncated and the next attempt will most likely fail, which surfaces as a `failed` run in `log_runs` rather than a notebook hanging for an hour.
+
+## Proxy and certificates
+
+Behind a corporate proxy a run fails in two ways that look nothing alike: the proxy is not reached, or it is reached and re-issues every certificate with its own authority, which `requests` does not know (`SSLError: certificate verify failed`). Both are settled in the configuration:
+
+```json
+{
+  "proxy": {"env_var": "CORP_PROXY_URL"},
+  "ca_bundle": "/lakehouse/default/Files/certs/corp-ca.pem"
+}
+```
+
+- **`proxy`** is the URL of the proxy, `http://` or `https://`. It applies to the data calls and to the token calls of `oauth2_client_credentials` and `token_endpoint` — the IdP sits behind the same proxy as the API. A proxy that needs a login has its credentials **in the URL**, and a password does not belong in the configuration: a literal URL carrying `user:password@` is refused, and the whole URL is given as a secret reference instead (`{"env_var": "NAME"}` or Key Vault). The resolved URL is then masked in error messages like any other secret. Without the key, `requests` still honours `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` from the environment; when `proxy` is set it wins over them, which is deliberate — the library hands it to every request, because a proxy set on a `requests` session is overridden by the environment variable.
+- **`ca_bundle`** is the path of a PEM file holding the authority to trust, typically one uploaded to the lakehouse Files. It replaces the default bundle for the run, so it must contain the authority that signs the API's certificate as seen *through* the proxy. A path that is not a file fails the run before any request (`NetworkConfigError`).
+
+There is no option to turn certificate verification off, and none is planned: a trusted authority solves the actual problem, while disabling the check hands the API's credentials to anything that sits on the path. SOCKS proxies are not supported (they need an extra package, which is not in the offline batch).
 
 ## Column types in Delta
 

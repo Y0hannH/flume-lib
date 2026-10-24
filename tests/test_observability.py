@@ -128,7 +128,7 @@ class TestRunResultCounters:
         }
         monkeypatch.setattr(
             "flume_lib.auth._build_headers",
-            lambda cfg: ({"Authorization": "Bearer t"}, None),
+            lambda cfg, network=None: ({"Authorization": "Bearer t"}, None),
         )
         FakeSession.script = [(401, {}, {}), ok([{"id": 1}])]
 

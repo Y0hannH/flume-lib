@@ -330,6 +330,12 @@ _NOTES = {
         "caps one response body; a streamed read, so a huge or endless body is cut off",
     ("config", "max_run_seconds"):
         "wall-clock limit for the run; checked before each request and between chunks",
+    ("config", "proxy"):
+        "proxy URL, or a secret reference holding it (a login lives in the URL); "
+        "data and token calls; wins over `HTTPS_PROXY`",
+    ("config", "ca_bundle"):
+        "PEM file of the authority to trust (TLS-inspecting proxy); "
+        "verification cannot be disabled",
     ("config", "max_requests_per_second"):
         "at most this many requests start per second, retries included; per run",
     ("config", "single_instance"):

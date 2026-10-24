@@ -31,6 +31,7 @@ from flume_lib.auth import AuthProvider
 from flume_lib.incremental import compare, shift_days
 from flume_lib.locks import RunLock
 from flume_lib.logging_ import write_log_run
+from flume_lib.network import resolve_network
 from flume_lib.pagination import _MISSING, get_path, paginate
 from flume_lib.secrets_ import redact
 from flume_lib.templating import (
@@ -553,7 +554,8 @@ def _scope_auth_headers(session, header_names: set) -> None:
 def _build_fetch_page(
     config: dict, variables: dict | None = None, deadline: float | None = None
 ):
-    auth = AuthProvider(config.get("auth"))
+    network = resolve_network(config)
+    auth = AuthProvider(config.get("auth"), network)
     max_bytes = config.get("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES)
     run_limit = config.get("max_run_seconds")
     retry_config = config.get("retry", {})
@@ -617,7 +619,9 @@ def _build_fetch_page(
         # avant tout appel, retries compris : l'échéance du run n'est pas
         # rejouable. `stream` : le corps est lu par morceaux, sous plafond.
         _check_deadline(deadline, run_limit)
-        kwargs = {"timeout": timeout, "stream": True}
+        # `proxies` et `verify` par requête : ceux de la session cèdent devant
+        # HTTPS_PROXY / REQUESTS_CA_BUNDLE, ceux d'une requête non
+        kwargs = {"timeout": timeout, "stream": True, **network}
         if method == "GET" and not allow_body_on_get:
             kwargs["params"] = params
         elif params_in == "body":
