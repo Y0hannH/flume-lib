@@ -1,6 +1,6 @@
 from flume_lib._delta import resolve_lakehouse_tables_path
 from flume_lib.locks import RunLockedError
-from flume_lib.maintenance import compact_technical_tables, retype_columns
+from flume_lib.maintenance import compact_data_tables, compact_technical_tables, retype_columns
 from flume_lib.orchestration import RunSourcesError, SourcesResult, run_sources
 from flume_lib.source import RunResult, run_source
 from flume_lib.validation import ConfigError, validate_config
@@ -22,6 +22,7 @@ __all__ = [
     "reset_watermark",
     "resolve_lakehouse_tables_path",
     "compact_technical_tables",
+    "compact_data_tables",
     "retype_columns",
     "RunLockedError",
 ]

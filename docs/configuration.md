@@ -933,7 +933,16 @@ A merge rewrites the data files that hold matching keys, so it costs more than a
 
 `partition_by` sets the partition columns **when the table is created**. Delta fixes them at that point: passing them for an existing unpartitioned table fails with an explicit message, since changing them means rewriting the table whole, which this library does not do. Partition on a column a `replace_where` predicate filters on and the replacement only rewrites the matching partitions.
 
-The library performs no `OPTIMIZE` and no `VACUUM` on **your data tables** (its own technical tables have [`compact_technical_tables`](#keeping-the-technical-tables-small)). A table written batch after batch accumulates small files, and the replaced files stay on disk until vacuumed — schedule both out of band if a table grows enough to need them.
+The library never runs `OPTIMIZE` or `VACUUM` by itself — that would be long writes in the middle of a run. A table written batch after batch accumulates small files (at least one per batch), and `replace_where` and `overwrite` leave the files they replace on disk until they are vacuumed. `compact_data_tables` does both between two runs:
+
+```python
+from flume_lib import compact_data_tables
+
+compact_data_tables(["bronze.orders", "bronze.invoices"])                 # merge the small files
+compact_data_tables(["bronze.orders"], vacuum=True, retention_hours=336)  # and purge what is unused
+```
+
+It returns, per table, `files_removed` and `files_added` (and `files_vacuumed` with `vacuum=True`). `vacuum=True` deletes the files the table no longer uses and no recent read can claim, so the table can no longer be read as of a date older than `retention_hours` — which is at least 168 (7 days), Delta refusing a shorter purge. Row contents never change. A table that does not exist is a `ValueError` raised **before** any table is touched: on a data table that is nearly always a typo, unlike the technical tables, which may legitimately not exist yet. Run it while no run is writing the same table. The technical tables have their own, [`compact_technical_tables`](#keeping-the-technical-tables-small).
 
 ### A body on a GET
 

@@ -44,7 +44,7 @@ Facts that shape the code you write:
 from flume_lib import (
     run_source, run_sources, run_source_windows, validate_config,
     read_watermark, write_watermark, reset_watermark,
-    compact_technical_tables, retype_columns, resolve_lakehouse_tables_path,
+    compact_technical_tables, compact_data_tables, retype_columns, resolve_lakehouse_tables_path,
     RunResult, SourcesResult, ConfigError, WindowRunError, RunLockedError, RunSourcesError,
 )
 ```
@@ -59,6 +59,7 @@ from flume_lib import (
 | `write_watermark` | `(lakehouse_tables_path=…, source_name=None, last_value=None, schema="flume", storage_options=None)` | `None`. Appends a row. |
 | `reset_watermark` | `(source_name, schema="flume", storage_options=None, lakehouse_tables_path=…)` | `int`, rows deleted for that source only. |
 | `compact_technical_tables` | `(lakehouse_tables_path=…, schema="flume", storage_options=None, vacuum=False)` | `dict` per table: `rows_pruned`, `files_removed`, `files_added`. |
+| `compact_data_tables` | `(tables, lakehouse_tables_path=…, storage_options=None, vacuum=False, retention_hours=168)` | `dict` per `"schema.table"`: `files_removed`, `files_added`, and `files_vacuumed` with `vacuum=True`. `ValueError` before any work if a table is absent or `retention_hours` < 168. Between runs. |
 | `retype_columns` | `(target_schema, target_table, column_types, lakehouse_tables_path=…, storage_options=None)` | `int`, rows rewritten. Changes the type of existing columns (`double`, `string`, `decimal(p,s)`, `date`); every value is checked first, nothing is written if one does not fit. Raises `DeltaWriteError`. |
 | `resolve_lakehouse_tables_path` | `(path)` | `str`; in Fabric, the ABFSS URI of the default lakehouse. |
 
@@ -753,6 +754,7 @@ compact_technical_tables()                                    # weekly, between 
 
 - `source_name` must equal `config["name"]` exactly; a typo creates an unrelated entry. Do these between runs, not during one.
 - A **rerun appends** by default. To reload a window use `replace_where` or `merge`; otherwise de-duplicate on `_flume_run_id`. Rows of a failed run can be removed with `DELETE … WHERE _flume_run_id = '<run_id>'`.
+- `compact_data_tables(["bronze.orders"])` merges the small files of data tables (a run writes at least one file per batch) and, with `vacuum=True`, purges the files `replace_where` / `overwrite` replaced. The library never does either by itself.
 - `compact_technical_tables()` keeps the latest watermark per source, drops long-expired lock rows, merges the small files of `watermark`, `log_runs` and `run_locks`, and never deletes from `log_runs`.
 - `log_runs`, `watermark` and `run_locks` are ordinary Delta tables in `log_schema`.
 
