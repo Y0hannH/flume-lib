@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here. Versions follow [semantic versioning](https://semver.org/); until 1.0.0, minor versions may contain breaking changes — these are always listed first.
 
+## [Unreleased]
+
+### Changed — breaking
+
+- **The type a table already holds is a contract, and a batch that does not fit it fails the run.** delta-rs does not reject a batch whose type differs from the table's: it coerces it into the table's type, and what does not fit disappears without an error or a warning. Measured on deltalake 1.6.2: a `bigint` column receiving `[2.5, 3.7, -0.9]` stores `[2, 3, 0]`, a boolean becomes `1`, and the run is `success`. On a source loaded month by month, a month of round amounts froze the column as an integer, and the next month's `1234.56` was stored as `1234` with nothing to say so. The table's schema is now read once at the start of a run (every mode but `merge`, which already read it per batch) and each column of each batch is checked against it. Widening still passes — integers into a `double` column, any scalar into a `string` column (reported in `warnings`) — narrowing fails with a `DeltaWriteError` naming the column and the two types, never a value, and **before anything is written**. It also covers `overwrite` and `replace_where`, which keep the old column type too, and `merge`, where a float batch into an integer column used to be written with a warning that the commit "would probably refuse" it. A column the table holds as `decimal` or `date` must be declared in `write.column_types` or the run fails: it used to be coerced. **A source that has been silently truncating will now fail on its next run — that is the point; see `retype_columns` below.**
+- **A type declared in `write.column_types` that differs from the one the table holds fails the run** instead of being coerced by delta-rs.
+
+### Added
+
+- **`write.column_types` accepts `double`.** A first batch of round amounts (`100`, `250`) creates an integer column; declared `double`, the column is a double from the first run. Integers, floats and numeric texts are accepted; a boolean, `nan`, `inf`, an unreadable text, and an integer beyond 2^53 (which a double would round — an identifier is a `string`) fail the run.
+- **`retype_columns(target_schema, target_table, column_types, …)`**, exported from `flume_lib`: changes the type of columns of a table that already froze the wrong one (`double`, `string`, `decimal(p,s)`, `date`). Delta does not change a column's type by writing, so the table is rewritten in one atomic commit, with its lineage columns and partitioning kept; the previous version stays readable by time travel. Every value is checked in SQL **before** the rewrite and one that would not survive stops it with a count, never a value: unreadable text, a `decimal` that would be rounded, an integer beyond 2^53 going to `double`. A float is not converted to a `decimal` (its value is binary, so the conversion is a rounding) and a partition column cannot be retyped. To run between runs.
+
+### Documentation
+
+- `docs/configuration.md`: "The table's types are a contract", and a `double` row in "Typed columns". The paragraph that said a type change between runs was a `SchemaMismatchError` at commit is gone — it was wrong (measured: nothing is raised).
+
 ## [0.19.0] — 2026-10-24
 
 A hardening release. A code audit read the library the way an attacker, a tired operator and an AI agent would, and what it found is fixed here: configuration that was trusted too much, text from a remote API that reached a table everyone can read, runs that left no trace, limits that `requests` does not provide, and a supply chain that resolved its dependencies on release day. Each point was reproduced before it was fixed. The documentation was rewritten, and is now partly tested.

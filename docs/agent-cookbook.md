@@ -32,7 +32,7 @@ Facts that shape the code you write:
 
 - **JSON only.** One HTTP call returns one page of JSON. Bulk-export APIs (submit a job, poll, download a CSV/JSONL file), XML, SOAP and CSV responses are not supported.
 - **Schema-enabled lakehouse required.** `target_schema` is mandatory (`bronze`, …). Names (`target_schema`, `target_table`) accept letters, digits and underscore only, not starting with a digit.
-- **Typing:** each column is typed from all the values of a batch — integers → `bigint`, floats (or ints and floats) → `double`, booleans → `boolean`, anything else → `string`. Nested objects and lists are stored as **one JSON string column**; the library never flattens. Dates and timestamps stay strings unless `write.column_types` declares them. A column that cannot be typed is written as text and reported in `warnings`.
+- **Typing:** each column is typed from all the values of a batch — integers → `bigint`, floats (or ints and floats) → `double`, booleans → `boolean`, anything else → `string`. Nested objects and lists are stored as **one JSON string column**; the library never flattens. Dates and timestamps stay strings unless `write.column_types` declares them. Once a table exists, its column types win: a batch that does not fit fails the run rather than being coerced. A column that cannot be typed is written as text and reported in `warnings`.
 - **Every written row carries `_flume_run_id` and `_flume_ingested_at`** (lineage; do not name an API field like that).
 - **At-least-once.** Rows are committed by batches of `batch_size` (default 50 000). A run that fails midway leaves its earlier batches in the table. Data is committed **before** its watermark.
 - **Technical tables** are created in `log_schema` (default `flume`): `watermark` (`source_name`, `last_value`, `updated_ts`), `log_runs` (`run_id`, `source_name`, `start_ts`, `end_ts`, `status`, `rows_loaded`, `error_message` — it does **not** carry `warnings`), `run_locks` (only with `single_instance`).
@@ -44,7 +44,7 @@ Facts that shape the code you write:
 from flume_lib import (
     run_source, run_source_windows, validate_config,
     read_watermark, write_watermark, reset_watermark,
-    compact_technical_tables, resolve_lakehouse_tables_path,
+    compact_technical_tables, retype_columns, resolve_lakehouse_tables_path,
     RunResult, ConfigError, WindowRunError, RunLockedError,
 )
 ```
@@ -58,6 +58,7 @@ from flume_lib import (
 | `write_watermark` | `(lakehouse_tables_path=…, source_name=None, last_value=None, schema="flume", storage_options=None)` | `None`. Appends a row. |
 | `reset_watermark` | `(source_name, schema="flume", storage_options=None, lakehouse_tables_path=…)` | `int`, rows deleted for that source only. |
 | `compact_technical_tables` | `(lakehouse_tables_path=…, schema="flume", storage_options=None, vacuum=False)` | `dict` per table: `rows_pruned`, `files_removed`, `files_added`. |
+| `retype_columns` | `(target_schema, target_table, column_types, lakehouse_tables_path=…, storage_options=None)` | `int`, rows rewritten. Changes the type of existing columns (`double`, `string`, `decimal(p,s)`, `date`); every value is checked first, nothing is written if one does not fit. Raises `DeltaWriteError`. |
 | `resolve_lakehouse_tables_path` | `(path)` | `str`; in Fabric, the ABFSS URI of the default lakehouse. |
 
 `lakehouse_tables_path` defaults to the notebook's default lakehouse and is resolved to its OneLake ABFSS URI automatically; `storage_options` is only for other storage. Leave both alone in a Fabric notebook.
@@ -248,7 +249,9 @@ Constraints validation enforces:
 
 `"write": {"column_types": {"amount": "decimal(18,4)", "invoice_date": "date", "account_id": "string"}}`
 
-Only `decimal(precision,scale)` (precision ≤ 38), `date` and `string` exist; there is **no `timestamp`**. A value that does not fit **fails the run** (more decimals than the scale, too many integer digits, non-numeric text, invalid date) — it is never rounded or nulled. Declare types **before the first run**: Delta cannot change a column's type afterwards.
+Only `decimal(precision,scale)` (precision ≤ 38), `double`, `date` and `string` exist; there is **no `timestamp`**. A value that does not fit **fails the run** (more decimals than the scale, too many integer digits, non-numeric text, invalid date, an integer beyond 2^53 for a `double`) — it is never rounded or nulled. Declare types **before the first run**: Delta cannot change a column's type by writing. Declare `double` for any amount that may start with round values (`100`, `250`): otherwise the first batch creates an integer column, and a later `1234.56` fails the run instead of being stored as `1234`. Identifiers are `string`, never `double`.
+
+**The existing table's types are a contract.** A batch that does not fit them fails the run with `DeltaWriteError` before anything is written (floats into a `bigint` column, text into a number…); integers into a `double` column and anything into a `string` column are accepted. To fix a table that froze the wrong type, call `retype_columns("bronze", "table", {"amount": "double"})` between runs.
 
 ### 4.7 Limits and safety
 
@@ -713,7 +716,7 @@ Values of `body` and `headers` in `token_endpoint` are literals **or** reference
 | `APIError:` / `RetryableAPIError:` | an error inside a 200 matched your `errors` block | the API's message is quoted |
 | `IncrementalError:` | the watermark cannot be computed or advanced: mixed types, unsorted batch with `checkpoint`, bad `lookback` | `incremental.field`, sort order, `value_format` |
 | `TemplateError:` | a `{placeholder}` has no variable, or a value is forbidden or does not match `value_format` | placeholders, `template_paths`, `value_format` |
-| `DeltaWriteError:` | Delta refused the write: predicate not satisfied by the rows, missing column, partition mismatch, merge key missing from a record, a `column_types` value that does not fit | message names the cause |
+| `DeltaWriteError:` | Delta refused the write: predicate not satisfied by the rows, missing column, partition mismatch, merge key missing from a record, a `column_types` value that does not fit, a batch that does not fit the type the existing table holds for a column | message names the cause; for a type conflict, declare the column in `write.column_types` or call `retype_columns` |
 | `EmptyResultError:` | zero rows with `fail_on_empty` | expected if the source was empty |
 | `RunLockedError:` | another run of the source holds the lock (`single_instance`) | wait, or rerun; it expires after `lock_ttl_seconds` |
 | `ResponseTooLargeError:` | a body exceeded `max_response_bytes` | paginate, or raise the cap |
@@ -965,7 +968,7 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `partition_by` | — | — | Delta partition columns |
 | `merge_keys` | conditional | — | columns identifying a row; required with `merge`, which accepts `checkpoint` |
 | `when_matched` | — | — | only `update` for now, which is also the default |
-| `column_types` | — | — | imposed types: `decimal(p,s)`, `date`, `string`; a value that does not fit fails the run |
+| `column_types` | — | — | imposed types: `decimal(p,s)`, `double`, `date`, `string`; a value that does not fit fails the run |
 
 #### `retry`
 

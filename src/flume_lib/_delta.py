@@ -32,11 +32,13 @@ _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Types qu'une config peut imposer à une colonne (`write.column_types`).
 # Délibérément courts : ce sont ceux que l'inférence ne peut pas deviner —
 # un montant est un décimal, pas un flottant ; une date reste du texte dans le
-# JSON. `timestamp` en est absent : le cast d'arro3 vers un fuseau exige la base
+# JSON ; et `double` fixe dès la création d'une table une colonne dont le
+# premier lot ne contient que des valeurs rondes (inférée entière, donc entière
+# pour toujours). `timestamp` en est absent : le cast d'arro3 vers un fuseau exige la base
 # tz du système, absente de certains environnements.
 _ISO_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _DECIMAL_TYPE_RE = re.compile(r"^decimal\(\s*(\d{1,2})\s*,\s*(\d{1,2})\s*\)$")
-COLUMN_TYPE_HELP = "decimal(precision,scale), date or string"
+COLUMN_TYPE_HELP = "decimal(precision,scale), double, date or string"
 MAX_DECIMAL_PRECISION = 38
 
 
@@ -45,7 +47,7 @@ def parse_column_type(spec) -> tuple[str, int | None, int | None]:
     Lève ValueError si le texte n'en est pas un."""
     if isinstance(spec, str):
         text = spec.strip().lower()
-        if text in ("date", "string"):
+        if text in ("date", "string", "double"):
             return text, None, None
         match = _DECIMAL_TYPE_RE.match(text)
         if match:
@@ -246,6 +248,42 @@ def _declared_label(kind: str, precision, scale) -> str:
     return f"decimal({precision},{scale})" if kind == "decimal" else kind
 
 
+# Au-delà, un entier ne tient plus exactement dans un flottant 64 bits.
+MAX_EXACT_INT = 2**53
+
+
+def _declared_double(name: str, index: int, value) -> float:
+    """Valeur d'une colonne déclarée `double`. Un identifiant entier au-delà de
+    2^53 serait arrondi en silence : il est refusé, et se déclare `string`."""
+
+    def refuse(reason: str):
+        return DeltaWriteError(
+            f"column '{name}' is declared double but record {index} of the batch "
+            f"{reason} (received a {type(value).__name__})"
+        )
+
+    if isinstance(value, bool) or isinstance(value, (dict, list)):
+        raise refuse("holds a value that is not a number")
+    # repr() d'un flottant donne sa forme la plus courte : Decimal(0.1) brut
+    # exposerait l'expansion binaire
+    text = repr(value) if isinstance(value, float) else str(value).strip()
+    try:
+        number = Decimal(text)
+    except InvalidOperation:
+        raise refuse("is not a number") from None
+    if not number.is_finite():
+        raise refuse("is not a finite number")
+    # un flottant natif est déjà un double : seul ce qui n'en est pas un
+    # (entier, texte) peut être arrondi par la conversion
+    exact_form = not isinstance(value, float)
+    if exact_form and number == number.to_integral_value() and abs(number) > MAX_EXACT_INT:
+        raise refuse(
+            "is an integer beyond 2^53, which a double would round — "
+            "declare the column string (identifiers) or decimal"
+        )
+    return float(number)
+
+
 def _declared_array(name: str, values: list, spec: str) -> ac.Array:
     """Colonne au type imposé par la config. Un échec est une erreur, pas un
     repli sur du texte : le type a été demandé, et le dégrader en silence
@@ -254,6 +292,12 @@ def _declared_array(name: str, values: list, spec: str) -> ac.Array:
     if kind == "string":
         to_text = _normalizer(ac.DataType.string())
         return ac.Array([to_text(v) for v in values], type=ac.DataType.string())
+    if kind == "double":
+        return ac.Array(
+            [None if v is None else _declared_double(name, i, v)
+             for i, v in enumerate(values, start=1)],
+            type=ac.DataType.float64(),
+        )
     texts = [
         None if v is None else _declared_text(name, i, v, kind, precision, scale)
         for i, v in enumerate(values, start=1)
@@ -328,24 +372,113 @@ def _build_column(
         )
 
 
+_INT_TYPE_RE = re.compile(r"^U?Int(8|16|32|64)$")
+_FLOAT_TYPE_RE = re.compile(r"^Float(16|32|64)$")
+
+
+def _type_family(dtype) -> str:
+    """Famille d'un type Arrow : text, bool, int, float, ou other (décimal,
+    date, horodatage, imbriqué — ce que l'inférence ne produit pas)."""
+    name = _type_name(dtype)
+    if name in ("Utf8", "LargeUtf8", "Utf8View"):
+        return "text"
+    if name == "Boolean":
+        return "bool"
+    if _INT_TYPE_RE.match(name):
+        return "int"
+    if _FLOAT_TYPE_RE.match(name):
+        return "float"
+    return "other"
+
+
+_RETYPE_HINT = (
+    "Retype the column first with flume_lib.retype_columns(), or recreate the "
+    "table; declaring the column in write.column_types creates it with the "
+    "right type from the first run."
+)
+
+
+def _conform_to_table(name: str, values: list, expected, fallbacks: list[str]):
+    """Colonne d'un lot destinée à une colonne qui existe déjà dans la table.
+
+    Le type de la table fait loi. delta-rs, lui, ne refuse presque jamais un
+    lot au type différent : il le **coerce** vers celui de la table, et ce qui
+    ne rentre pas disparaît sans erreur (une colonne entière qui reçoit 2.5
+    stocke 2). La perte a lieu après le dernier point où la bibliothèque a la
+    main — c'est donc ici qu'elle se refuse. Seul le sens élargissant est
+    inoffensif (entiers dans une colonne flottante, tout dans une colonne
+    texte) et passe.
+
+    Retourne le tableau, ou None si la colonne doit être omise du lot : un lot
+    sans valeur pour une colonne de type non constructible l'écrit à NULL.
+    Aucune valeur n'est citée dans les messages : ils finissent dans log_runs."""
+    label = _type_name(expected)
+    if all(v is None for v in values):
+        try:
+            return ac.Array([None] * len(values), type=expected)
+        except NotImplementedError:
+            return None
+    inferred = _infer_type(values)
+    seen = _type_name(inferred)
+    family, kind = _type_family(expected), _type_family(inferred)
+
+    if family == "text":
+        if kind != "text":
+            fallbacks.append(
+                f"column '{name}': text in the table, but this batch holds {seen} "
+                "values — they are written as text"
+            )
+        to_text = _normalizer(ac.DataType.string())
+        return ac.Array([to_text(v) for v in values], type=ac.DataType.string())
+    if family == "other":
+        if label.startswith(("Decimal", "Date")):
+            raise DeltaWriteError(
+                f"column '{name}' is {label} in the table: declare it in "
+                "write.column_types so that the values are converted and "
+                "checked, instead of being coerced by delta-rs"
+            )
+        raise DeltaWriteError(
+            f"column '{name}' is {label} in the table, a type this library does "
+            "not write"
+        )
+    accepted = {"int": ("int",), "float": ("int", "float"), "bool": ("bool",)}[family]
+    if kind in accepted:
+        try:
+            normalize = _normalizer(expected)
+            return ac.Array([normalize(v) for v in values], type=expected)
+        except (TypeError, OverflowError):
+            pass  # une valeur qui ne tient pas dans ce type : refus ci-dessous
+    raise DeltaWriteError(
+        f"column '{name}' is {label} in the table but this batch holds {seen} "
+        f"values. delta-rs would coerce them into {label} without an error and "
+        f"drop what does not fit. {_RETYPE_HINT}"
+    )
+
+
 def records_to_table(
     records: list[dict],
     known_types: dict | None = None,
     column_types: dict | None = None,
+    table_types: dict | None = None,
 ) -> tuple[ac.Table, list[str]]:
     """Convertit une liste de dicts JSON en table Arrow. Types scalaires
     inférés par colonne ; les structures imbriquées sont sérialisées en JSON.
 
     `known_types` fixe le type de colonnes déjà écrites par un lot précédent.
-    `column_types` impose le type de colonnes nommées (`decimal(p,s)`, `date`,
-    `string`) : il prime sur l'inférence et sur `known_types`, et une valeur
-    qui n'y rentre pas fait échouer l'écriture.
+    `column_types` impose le type de colonnes nommées (`decimal(p,s)`,
+    `double`, `date`, `string`) : il prime sur l'inférence et sur `known_types`,
+    et une valeur qui n'y rentre pas fait échouer l'écriture.
+    `table_types` donne les types de la table cible telle qu'elle existe : une
+    colonne du lot qui ne rentre pas dans le type de la table fait échouer
+    l'écriture (voir `_conform_to_table`), et un type déclaré qui diffère de
+    celui de la table aussi.
 
     Retourne la table et la liste des dégradations subies — une colonne
     repliée sur du texte n'est plus silencieuse.
     """
     known_types = known_types or {}
     column_types = column_types or {}
+    table_types = table_types or {}
     fallbacks: list[str] = []
     columns: dict[str, Any] = {}
     # `seen` à côté de `keys` : le `key not in keys` d'origine balayait la
@@ -362,7 +495,19 @@ def records_to_table(
     for key in keys:
         values = [r.get(key) for r in records]
         if key in column_types:
-            columns[key] = _declared_array(key, values, column_types[key])
+            array = _declared_array(key, values, column_types[key])
+            expected = table_types.get(key)
+            if expected is not None and array.type != expected:
+                raise DeltaWriteError(
+                    f"column '{key}' is declared "
+                    f"{_declared_label(*parse_column_type(column_types[key]))} but is "
+                    f"{_type_name(expected)} in the table. {_RETYPE_HINT}"
+                )
+            columns[key] = array
+        elif key in table_types:
+            conformed = _conform_to_table(key, values, table_types[key], fallbacks)
+            if conformed is not None:
+                columns[key] = conformed
         else:
             columns[key] = _build_column(key, values, known_types, fallbacks)
     return ac.Table.from_pydict(columns), fallbacks
@@ -417,6 +562,16 @@ def _explain_write_error(exc: Exception, mode: str, predicate: str | None,
     return f"Delta write refused (mode={mode}): {detail}"
 
 
+def read_table_types(uri: str, storage_options: dict | None = None) -> dict | None:
+    """Type Arrow de chaque colonne de la table cible, ou None si elle n'existe
+    pas encore. Une lecture du journal Delta : à faire une fois par run."""
+    try:
+        dt = DeltaTable(uri, storage_options=storage_options_for(uri, storage_options))
+    except TableNotFoundError:
+        return None
+    return _schema_types(dt.schema().to_arrow())
+
+
 def write_records(
     uri: str,
     records: list[dict],
@@ -427,6 +582,7 @@ def write_records(
     storage_options: dict | None = None,
     known_types: dict | None = None,
     column_types: dict | None = None,
+    table_types: dict | None = None,
 ) -> tuple[dict, list[str]]:
     """Écrit des enregistrements dans une table Delta.
 
@@ -436,6 +592,11 @@ def write_records(
     supprimer — un backfill d'une fenêtre neuve et le rejeu d'une fenêtre déjà
     chargée empruntent donc le même chemin.
 
+    `table_types` (voir `read_table_types`) donne les types de la table telle
+    qu'elle existe : un lot qui n'y rentre pas est refusé au lieu d'être coercé
+    par delta-rs. À fournir au premier lot d'un run ; les suivants s'appuient
+    sur `known_types`, qui en est issu.
+
     Retourne les types Arrow retenus par colonne — à repasser en `known_types`
     pour le lot suivant du même run — et les dégradations de type subies.
     """
@@ -443,7 +604,7 @@ def write_records(
         raise ValueError(
             f"predicate only makes sense with mode='overwrite', not '{mode}'"
         )
-    table, fallbacks = records_to_table(records, known_types, column_types)
+    table, fallbacks = records_to_table(records, known_types, column_types, table_types)
     try:
         # `mode` et `predicate` sont des chaînes ici ; le couple valide est
         # contrôlé plus haut, les surcharges typées de deltalake ne le savent pas
@@ -498,7 +659,7 @@ def dedupe_on_keys(records: list[dict], merge_keys: list[str]) -> list[dict]:
 
 def _quote_column(name: str) -> str:
     if "`" in name:
-        raise ValueError(f"invalid merge key {name!r}: a backtick cannot be quoted")
+        raise ValueError(f"invalid column name {name!r}: a backtick cannot be quoted")
     return f"`{name}`"
 
 
@@ -530,8 +691,9 @@ def merge_records(
     Les doublons de clé *dans* le lot sont résolus avant l'envoi (le dernier
     gagne). La table est créée par une écriture ordinaire si elle n'existe pas
     encore — même chemin, mêmes types, mêmes dégradations signalées. Les
-    colonnes existantes gardent le type de la table, ce qui évite à un lot
-    d'entiers de se heurter à une colonne de flottants.
+    colonnes existantes gardent le type de la table : un lot d'entiers dans une
+    colonne de flottants passe, un lot de flottants dans une colonne d'entiers
+    est refusé plutôt que tronqué (voir `_conform_to_table`).
 
     Retourne les types Arrow retenus, les dégradations de type, et les nombres
     de lignes insérées et mises à jour rapportés par delta-rs."""
@@ -553,9 +715,11 @@ def merge_records(
         )
         return types, fallbacks, len(records), 0
 
-    target_types = _schema_types(dt.schema().to_arrow())
     table, fallbacks = records_to_table(
-        records, {**(known_types or {}), **target_types}, column_types
+        records,
+        known_types,
+        column_types,
+        table_types=_schema_types(dt.schema().to_arrow()),
     )
     try:
         metrics = (
@@ -636,3 +800,161 @@ def vacuum_table(
 
 def sql_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
+
+
+# Types SQL (DataFusion) d'un type déclaré
+_SQL_TYPE = {"double": "double", "string": "varchar", "date": "date"}
+
+
+def _sql_type(kind: str, precision, scale) -> str:
+    if kind == "decimal":
+        return f"decimal({precision},{scale})"
+    return _SQL_TYPE[kind]
+
+
+# Quelles familles de colonnes peuvent devenir quel type déclaré. Les flottants
+# ne deviennent pas des décimaux : leur valeur est binaire, la convertir en
+# décimal est un arrondi qu'aucun contrôle ne distingue d'une valeur exacte.
+_RETYPE_FROM = {
+    "double": ("int", "float", "text"),
+    "string": ("int", "float", "bool", "text", "other"),
+    "decimal": ("int", "text"),
+    "date": ("text",),
+}
+
+
+def _count(uri: str, condition: str, storage_options) -> int:
+    row = query_table(
+        uri,
+        # `condition` est assemblée par `_retype_problem` : noms de colonnes
+        # cités par `_quote_column`, types issus de `_sql_type`, constantes
+        f"select count(*) as n from t where {condition}",  # nosec B608
+        alias="t",
+        storage_options=storage_options,
+    )
+    return int(row[0]["n"])
+
+
+def _retype_problem(uri, column, kind, precision, scale, family, storage_options) -> str | None:
+    """Ce qui empêcherait de convertir la colonne sans rien perdre, ou None.
+    Les cas sont comptés en SQL, sur la table entière, avant toute réécriture —
+    un `cast` seul n'est pas un contrôle : il arrondit un décimal sans le dire."""
+    if kind == "string":
+        return None
+    name = _quote_column(column)
+    target = _sql_type(kind, precision, scale)
+    present = f"{name} is not null"
+    unreadable = _count(
+        uri, f"{present} and try_cast({name} as {target}) is null", storage_options
+    )
+    if unreadable:
+        return f"{unreadable} value(s) cannot be read as {_declared_label(kind, precision, scale)}"
+    if kind == "decimal":
+        rounded = _count(
+            uri,
+            f"{present} and cast(try_cast({name} as {target}) as double) "
+            f"<> try_cast({name} as double)",
+            storage_options,
+        )
+        if rounded:
+            return f"{rounded} value(s) have more decimals than the scale and would be rounded"
+    if kind == "double" and family in ("int", "text"):
+        beyond = _count(
+            uri,
+            f"{present} and abs(try_cast({name} as decimal(38,0))) > {MAX_EXACT_INT}",
+            storage_options,
+        )
+        if beyond:
+            return (
+                f"{beyond} integer value(s) exceed 2^53, which a double would round — "
+                "an identifier is a string, not a number"
+            )
+    return None
+
+
+def retype_table_columns(
+    uri: str, column_types: dict, storage_options: dict | None = None
+) -> int:
+    """Convertit des colonnes d'une table Delta existante vers un type déclaré
+    (`double`, `string`, `decimal(p,s)`, `date`) en réécrivant la table, et
+    retourne le nombre de lignes réécrites.
+
+    C'est la seule sortie d'une table dont un premier lot a figé le mauvais type :
+    delta-rs ne change pas le type d'une colonne en écrivant (`schema_mode`
+    `merge` garde l'ancien et coerce), il faut réécrire la table avec
+    `schema_mode="overwrite"`. Tout est contrôlé **avant** : si une valeur ne
+    tient pas dans le type visé, rien n'est touché. Le commit final est
+    atomique, et l'ancienne version reste accessible par voyage dans le temps
+    tant que rien n'est purgé."""
+    if not isinstance(column_types, dict) or not column_types:
+        raise ValueError("retype: column_types must be a non-empty {column: type} object")
+    try:
+        dt = DeltaTable(uri, storage_options=storage_options_for(uri, storage_options))
+    except TableNotFoundError:
+        raise DeltaWriteError("retype: the table does not exist") from None
+
+    current = _schema_types(dt.schema().to_arrow())
+    partitions = list(dt.metadata().partition_columns)
+    missing = [c for c in column_types if c not in current]
+    if missing:
+        raise DeltaWriteError(
+            f"retype: column(s) {missing!r} are not in the table "
+            f"(columns: {sorted(current)!r})"
+        )
+    plan = {}
+    for column, spec in column_types.items():
+        kind, precision, scale = parse_column_type(spec)
+        if column in partitions:
+            raise DeltaWriteError(
+                f"retype: '{column}' is a partition column — its type is frozen "
+                "at creation"
+            )
+        family = _type_family(current[column])
+        label = _declared_label(kind, precision, scale)
+        if kind == "string" and family == "text":
+            continue  # déjà du texte
+        if kind == "double" and _type_name(current[column]) == "Float64":
+            continue
+        if family not in _RETYPE_FROM[kind]:
+            raise DeltaWriteError(
+                f"retype: column '{column}' is {_type_name(current[column])}; it "
+                f"cannot be converted to {label} without a loss — convert it "
+                "to string first, then declare the type you want"
+            )
+        problem = _retype_problem(uri, column, kind, precision, scale, family, storage_options)
+        if problem:
+            raise DeltaWriteError(
+                f"retype: column '{column}' cannot become {label}: {problem}. "
+                "Nothing was changed."
+            )
+        plan[column] = _sql_type(kind, precision, scale)
+
+    rows = _count(uri, "true", storage_options)
+    if not plan:
+        return 0
+    select = ", ".join(
+        f"cast({_quote_column(c)} as {plan[c]}) as {_quote_column(c)}"
+        if c in plan
+        else _quote_column(c)
+        for c in current
+    )
+    qb = QueryBuilder()
+    qb.register("t", dt)
+    # noms cités par `_quote_column`, types issus de `_sql_type`
+    # Matérialisée avant d'écrire : passer le lecteur en flux à `write_deltalake`
+    # fait avorter le processus avec deltalake 1.3.2 (le plancher déclaré). Le
+    # coût est la table en mémoire, qui est de toute façon réécrite en entier.
+    data = ac.Table.from_arrow(qb.execute(f"select {select} from t"))  # nosec B608
+    try:
+        write_deltalake(
+            uri,
+            data,
+            mode="overwrite",
+            schema_mode="overwrite",
+            partition_by=partitions or None,
+            storage_options=storage_options_for(uri, storage_options),
+        )
+    except Exception as exc:  # noqa: BLE001 — retraduit, puis relevé
+        detail = str(exc)[:MAX_DELTA_ERROR_CHARS]
+        raise DeltaWriteError(f"retype: Delta write refused: {detail}") from exc
+    return rows

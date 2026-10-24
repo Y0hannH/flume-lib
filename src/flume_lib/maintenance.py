@@ -1,4 +1,5 @@
-"""Entretien des tables techniques `watermark`, `log_runs` et `run_locks`.
+"""Entretien : tables techniques `watermark`, `log_runs` et `run_locks`, et
+retypage des colonnes d'une table de données.
 
 Chacune reçoit une ligne par run, écrite en ajout : un fichier Parquet de
 quelques octets et un commit de plus à chaque fois. Au bout de quelques milliers
@@ -21,6 +22,7 @@ from flume_lib._delta import (
     delete_rows,
     query_table,
     resolve_lakehouse_tables_path,
+    retype_table_columns,
     sql_quote,
     table_uri,
     vacuum_table,
@@ -96,3 +98,29 @@ def compact_technical_tables(
         if vacuum:
             report[name]["files_vacuumed"] = vacuum_table(uri, storage_options)
     return report
+
+
+def retype_columns(
+    target_schema: str,
+    target_table: str,
+    column_types: dict[str, str],
+    lakehouse_tables_path: str = DEFAULT_LAKEHOUSE_TABLES_PATH,
+    storage_options: dict | None = None,
+) -> int:
+    """Change le type de colonnes d'une table de données déjà écrite, et
+    retourne le nombre de lignes réécrites.
+
+    Pour sortir d'une table dont un premier lot a figé le mauvais type — une
+    colonne de montants créée entière parce que le premier mois n'avait que des
+    valeurs rondes. `column_types` est de la même forme que `write.column_types`
+    (`double`, `string`, `decimal(p,s)`, `date`). Une valeur qui ne tient pas
+    dans le type visé arrête tout **avant** d'écrire : un décimal qui serait
+    arrondi, un entier au-delà de 2^53 vers un `double`, un texte illisible.
+
+    La table est réécrite en un commit atomique ; l'ancienne version reste
+    lisible par voyage dans le temps tant que rien n'est purgé. Réécrire coûte
+    la taille de la table. À lancer entre deux runs, pas pendant : un run qui
+    écrit en même temps verrait son commit entrer en conflit."""
+    resolved = resolve_lakehouse_tables_path(lakehouse_tables_path)
+    uri = table_uri(resolved, target_schema, target_table)
+    return retype_table_columns(uri, column_types, storage_options)
