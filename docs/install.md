@@ -34,7 +34,7 @@ No code is fetched from GitHub or PyPI when the notebook runs: it installs exact
 3. **In the notebook:**
 
    ```python
-   %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.18.0
+   %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.19.0
    ```
 
 `--no-index` guarantees pip resolves only from that folder.
