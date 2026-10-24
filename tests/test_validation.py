@@ -108,7 +108,7 @@ class TestAuthSection:
                     "token_url": "https://x/token",
                     "client_auth": "header",
                     "client_id": "c",
-                    "client_secret": "s",
+                    "client_secret": {"env_var": "S"},
                 })
             )
 

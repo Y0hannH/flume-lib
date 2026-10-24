@@ -41,6 +41,8 @@ Looking something up rather than reading through? [cookbook.md](cookbook.md) map
 | `target_table` | string | **yes** | — | Destination table, written with `schema_mode=merge`. Letters/digits/underscore only. |
 | `write` | object | no | append | How the target table is written: append, full overwrite, replacement of one window, or merge on a key. See [Write mode](#write-mode). |
 | `fail_on_empty` | boolean | no | `false` | Fails the run when it loads no row — before the watermark moves. See [Incremental](#incremental-watermark). |
+| `allow_literal_secrets` | boolean | no | `false` | Accepts a literal string where a secret is expected (`auth.token`, `auth.client_secret`, a credential header…). Refused by default — see [Secret references](#secret-references). For a throwaway local test only. |
+| `allow_insecure_http` | boolean | no | `false` | Accepts a `base_url` or `token_url` in plain `http://`. Refused by default except towards `localhost`. For a trusted internal network only. |
 | `batch_size` | integer | no | `50000` | Rows buffered before each Delta write. Bounds the memory of a run. See [Batched writes](#batched-writes). |
 | `retry` | object | no | see [Retry](#retry) | HTTP retry policy. |
 | `timeout_seconds` | number | no | `60` | Timeout of each data HTTP request. |
@@ -48,7 +50,7 @@ Looking something up rather than reading through? [cookbook.md](cookbook.md) map
 | `body` | object | no | `{}` | Request body sent on every data call. Requires a non-`GET` `method`, unless `allow_body_on_get` says otherwise. |
 | `allow_body_on_get` | boolean | no | `false` | Lets a `GET` carry a body. See [A body on a GET](#a-body-on-a-get). |
 | `body_format` | string | no | `json` | `json` or `form` encoding of `body`. |
-| `headers` | object | no | `{}` | Fixed HTTP headers added to every data call (literal strings only). Auth headers always win over these. For a credential, use `auth` — never put a secret here. |
+| `headers` | object | no | `{}` | Fixed HTTP headers added to every data call (literal strings only). Auth headers always win over these. For a credential, use `auth`: a header whose name looks like a credential (`Authorization`, `X-API-Key`, anything containing `token`, `secret`, `password`…) holding a literal is refused. |
 | `errors` | object | no | disabled | Application-error envelope of APIs that report failures inside a successful HTTP response. See [Application errors in a 200](#application-errors-in-a-200). |
 | `template_paths` | array | no | whole body | Restricts `{placeholder}` substitution to these dotted paths of `body`. See [Body templating](#body-templating). |
 
@@ -340,11 +342,34 @@ Wherever a value is marked *secret ref*, three forms are accepted:
 |---|---|---|
 | Environment variable | `{"env_var": "MY_TOKEN"}` | Value injected before the call (os.environ). |
 | Azure Key Vault | `{"keyvault_url": "https://mykv.vault.azure.net", "secret_name": "my-secret"}` | Resolved via `notebookutils.credentials.getSecret` in Fabric (notebook identity — *Get* permission on secrets required), or `azure-identity`/`DefaultAzureCredential` outside Fabric (`pip install flume-lib[azure]`). |
-| Literal | `"value"` | **Non-sensitive values only** (public username, `grant_type`, scope…). Never a password or token. |
+| Literal | `"value"` | **Non-sensitive values only** (public username, `grant_type`, scope…). **Refused for a secret field** — see below. |
 
 Resolved values are automatically stripped of leading/trailing whitespace and newlines (a classic source of opaque 401s).
 
 Legacy form still supported: `token_env_var`, `key_env_var`, `username_env_var`, `password_env_var` (equivalent to `{"env_var": ...}` on the matching key).
+
+### Literal secrets are refused
+
+Validation rejects a literal string in a field that holds a secret, because a configuration file is read, copied and committed far more freely than a vault:
+
+| Auth type | Fields that must be references |
+|---|---|
+| `bearer_token` | `token` |
+| `api_key_header` | `key` |
+| `basic` | `password` |
+| `oauth2_client_credentials` | `client_secret` |
+| `oauth1` | `consumer_secret`, `token`, `token_secret` |
+| `token_endpoint` | any `body` or `headers` entry whose name contains `secret`, `passw`, `token`, `api-key`, `credential`, `authorization` or `signature` |
+
+Public identifiers (`client_id`, `username`, `consumer_key`, a `grant_type`) may stay literal. The error names the field and never repeats the value. `"allow_literal_secrets": true` (top level) lifts the check — for a throwaway test against a local mock, not for a source that runs on a schedule.
+
+### Which URLs are accepted
+
+`base_url` and `auth.token_url` must be absolute `http(s)` URLs **without credentials**: `https://user:password@host/…` is refused, because a password in a URL ends up in logs and error messages — declare it under `auth`. Plain `http://` is refused as well, since the token and the data would cross the network in clear text; `localhost`, `127.0.0.1`, `[::1]` and `*.localhost` are exempt, and `"allow_insecure_http": true` accepts a trusted internal network.
+
+### What the library does with a secret it has resolved
+
+Every value resolved from an environment variable or Key Vault, and every token obtained from an IdP, is remembered for the duration of the process. Before a message leaves the library — `RunResult.error_message`, `RunResult.warnings`, and the row written to `log_runs` — those values are replaced by `<redacted>`, in their raw and percent-encoded forms. This catches what no rule on the shape of a message can: an API that echoes a credential back in an error body, or a secret sitting in a URL path. Values shorter than 6 characters are not masked (they would mangle ordinary words). The message is then capped at 2 000 characters. See [docs/security.md](security.md#secrets).
 
 ## Auth
 
@@ -410,7 +435,7 @@ Sends `grant_type=client_credentials` (+ `scope` if provided) **form-encoded** t
 
 | Key | Required | Default | Description |
 |---|---|---|---|
-| `token_url` | yes, unless `tenant_id` | — | IdP token endpoint URL. |
+| `token_url` | yes, unless `tenant_id` | — | IdP token endpoint URL. `https://`, no embedded credentials — see [Which URLs are accepted](#which-urls-are-accepted). |
 | `tenant_id` | yes, unless `token_url` | — | Entra ID shortcut: derives `token_url = https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token`. |
 | `client_id` | **yes** | — | Secret ref (or literal — an Entra app id is not a secret). |
 | `client_secret` | **yes** | — | Secret ref. |
@@ -662,8 +687,11 @@ The watermark and the key can share one body — the watermark bounds the window
 | Key | Default | Description |
 |---|---|---|
 | `next_field` | `next` | Response field containing the full next-page URL (e.g. `@odata.nextLink` for Microsoft APIs). |
+| `allowed_hosts` | none | Bare host names (no scheme, port or path) the next-page URL may point to besides the host of `base_url` — a CDN, a regional host. |
 
 The `params`/`incremental` query params are sent on the first call only — the next-page URL already carries its own. Stops when the field is absent or `null`.
+
+**The next-page URL must stay on the origin of `base_url`** (same scheme, host and port). It is chosen by the API, and the request that follows carries the session's credentials: without this check a compromised endpoint could name any host and receive them. A URL pointing elsewhere fails the run before any request is sent, and the message says which host. A host listed in `allowed_hosts` is followed, but never from `https` down to `http`.
 
 ```json
 {"type": "next_link", "next_field": "@odata.nextLink", "items_field": "value"}

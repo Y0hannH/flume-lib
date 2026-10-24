@@ -22,9 +22,16 @@ REDACTED = "<redacted>"
 
 
 def safe_url(url: str) -> str:
-    """URL sans query string, pour les messages d'erreur."""
+    """URL sans query string ni identifiants, pour les messages d'erreur.
+
+    L'userinfo (`https://user:motdepasse@hôte/…`) fait partie du `netloc` : le
+    garder recopiait le mot de passe dans `log_runs` aussi sûrement qu'une
+    query string. La validation refuse déjà ces URL en configuration, mais
+    `safe_url` reçoit aussi celles que l'API renvoie (`next_link`).
+    """
     parts = urlsplit(url)
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    host = parts.netloc.rpartition("@")[2]
+    return urlunsplit((parts.scheme, host, parts.path, "", ""))
 
 
 def scrub_query(message: str, *urls: str | None) -> str:

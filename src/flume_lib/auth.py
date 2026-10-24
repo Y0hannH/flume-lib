@@ -8,7 +8,7 @@ import time
 import requests
 
 from flume_lib.oauth1 import OAuth1Signer
-from flume_lib.secrets_ import SecretResolutionError, resolve_secret
+from flume_lib.secrets_ import SecretResolutionError, register_secret, resolve_secret
 from flume_lib.urls_ import safe_url, sanitized_request_error
 
 DEFAULT_TOKEN_TIMEOUT_SECONDS = 30
@@ -66,7 +66,9 @@ def _error_detail(response) -> str:
     text = getattr(response, "text", None)
     if not isinstance(text, str) or not text.strip():
         return ""
-    truncated = text.strip()[:ERROR_BODY_MAX_CHARS]
+    # blancs écrasés : un corps indenté ne dépense pas sa troncature en
+    # retours à la ligne, et le message tient sur une ligne de log_runs
+    truncated = " ".join(text.split())[:ERROR_BODY_MAX_CHARS]
     return f" — {truncated}"
 
 
@@ -133,6 +135,7 @@ def _fetch_oauth2_client_credentials(auth_config: dict) -> tuple[str, float | No
     if client_auth == "basic":
         encoded = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
         headers["Authorization"] = f"Basic {encoded}"
+        register_secret(encoded)
     else:
         data["client_id"] = client_id
         data["client_secret"] = client_secret
@@ -159,6 +162,8 @@ def _fetch_oauth2_client_credentials(auth_config: dict) -> tuple[str, float | No
         raise AuthError(
             "oauth2_client_credentials: 'access_token' missing from the response"
         )
+    # le token est un credential comme un autre : masqué s'il est recopié
+    register_secret(token)
     return token, _expires_in(payload, "expires_in")
 
 
@@ -213,6 +218,7 @@ def _fetch_token_endpoint(auth_config: dict) -> tuple[str, float | None]:
     token = _extract_json_path(payload, auth_config.get("token_json_path", "access_token"))
     if not token:
         raise AuthError("token_endpoint: empty token in the response")
+    register_secret(token)
     return token, _expires_in(payload, auth_config.get("expires_in_json_path"))
 
 
@@ -336,6 +342,7 @@ def _build_headers(auth_config: dict | None) -> tuple[dict[str, str], float | No
         username = _resolve(auth_config, "username")
         password = _resolve(auth_config, "password")
         encoded = base64.b64encode(f"{username}:{password}".encode()).decode()
+        register_secret(encoded)
         return {"Authorization": f"Basic {encoded}"}, None
 
     if auth_type == "oauth2_client_credentials":
