@@ -203,13 +203,14 @@ It exercises the credential, the pagination and the response shape, and touches 
 | `DeltaWriteError:` | Delta refused the write | the message names the cause (predicate, column, merge key, `column_types`, a column type that conflicts with the table's) |
 | `TemplateError:` | a `{placeholder}` has no variable, or a value is forbidden | placeholders, `template_paths`, `value_format` |
 | `RunLockedError:` | another run of the source holds the `single_instance` lock | wait, or rerun |
-| `ResponseTooLargeError:` / `RunTimeoutError:` | `max_response_bytes` / `max_run_seconds` exceeded | the cap, or the source |
+| `ResponseTooLargeError:` / `RunTimeoutError:` | `max_response_bytes` / `max_run_seconds` exceeded (or `max_requests_per_second` too slow to fit in it) | the cap, or the source |
+| `NetworkConfigError:` | `proxy` unresolvable or not a proxy URL, `ca_bundle` is not a file | the key it names |
 
 The complete catalogue, with the actions, is in [agent-cookbook.md](agent-cookbook.md#62-error_message-prefixes).
 
 Query strings are stripped from these messages before they reach `log_runs`: the table is readable by the whole lakehouse, and a config that put a token in a URL would otherwise republish it there.
 
-A `success` is worth reading too — `RunResult.warnings` carries the empty-source case above, and column-type degradations.
+A `success` is worth reading too — `RunResult.warnings` carries the empty-source case above, and column-type degradations. They are also stored in `flume.log_runs.warnings`, next to the pages, retries and duration of every run, so `WHERE warnings IS NOT NULL` finds them afterwards.
 
 ---
 
@@ -245,6 +246,21 @@ All three default to the table `run_source` uses: the same `lakehouse_tables_pat
 A wrong delete is recoverable: Delta keeps the history. For the table itself, `DeltaTable(uri).history(5)` lists the versions and `.restore(<version>)` puts it back as it was.
 
 `write_watermark` appends rather than upserting so that two sources can commit at the same time without a conflict; the table therefore grows by one row per advance. It stays tiny, but each advance is one more file and one more commit: `compact_technical_tables()` keeps the latest row of each source and merges the small files, and `reset_watermark` on a source you are retiring removes its rows.
+
+### 4.1b Several sources, and what the runs leave behind
+
+```python
+from flume_lib import compact_data_tables, compact_technical_tables, run_sources
+
+outcome = run_sources(sources, max_workers=3)   # failures isolated, results in input order
+print(outcome)                                  # a total, then one line per source
+outcome.raise_for_failures()                    # last line of the notebook: the pipeline sees it
+
+compact_technical_tables()                      # weekly, between runs
+compact_data_tables(["bronze.orders"])          # merges the small files of a data table
+```
+
+`max_workers > 1` runs sources at the same time; two sources writing the same table are refused, and a commit that loses to another writer is replayed rather than failed. If a table froze the wrong column type — a month of round amounts made an integer column and the next month has cents — `retype_columns("bronze", "orders", {"amount": "double"})` rewrites it once. See [configuration.md](configuration.md#running-several-sources) and [The table's types are a contract](configuration.md#the-tables-types-are-a-contract).
 
 ### 4.2 The watermark only moves forward
 

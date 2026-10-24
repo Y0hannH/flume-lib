@@ -9,7 +9,11 @@
 #              lakehouse_tables_path=...,   which lakehouse
 #              storage_options=...,         how to authenticate to storage
 #              log_schema=...,              where the technical tables live
-#              dry_run=...)                 write nothing, call everything
+#              dry_run=...,                 write nothing, call everything
+#              on_progress=...)             a sign of life while it runs
+#
+# and, beside `run_source`, the functions that run several sources and look
+# after what the runs leave behind (sections 8 and 9).
 #
 # None of them is required. The defaults target the notebook's own default
 # lakehouse, which is what a Fabric notebook wants nine times out of ten.
@@ -19,7 +23,18 @@
 import os
 from datetime import date, timedelta
 
-from flume_lib import ConfigError, run_source, validate_config
+from flume_lib import (
+    ConfigError,
+    compact_data_tables,
+    compact_technical_tables,
+    read_watermark,
+    reset_watermark,
+    resolve_lakehouse_tables_path,
+    run_source,
+    run_sources,
+    validate_config,
+    write_watermark,
+)
 
 KEYVAULT = "https://mykv.vault.azure.net"
 
@@ -186,9 +201,22 @@ def run_with_isolated_history():
 #
 #   DELETE FROM bronze.invoices WHERE _flume_run_id = '<the failed run_id>'
 #
-# What `log_runs` does **not** carry is `RunResult.warnings` — a degraded
-# column, or a window left unreplaced because the source was empty, is visible
-# in the notebook and nowhere else. Print them, or act on them, at run time.
+# Besides the original seven columns (run_id, source_name, start_ts, end_ts,
+# status, rows_loaded, error_message) a row carries the detail of the run:
+# `warnings` (NULL when there are none), `pages`, `retries`, `token_renewals`,
+# `rows_inserted`, `rows_updated`, `duration_seconds`, `watermark_before`,
+# `watermark_after`, `window_end`, `target_table`, `write_mode` and
+# `lib_version`.
+#
+#   SELECT source_name, start_ts, duration_seconds, pages, retries, warnings
+#     FROM flume.log_runs
+#    WHERE warnings IS NOT NULL OR retries > 2
+#    ORDER BY start_ts DESC
+#
+# A degraded column, or a window left unreplaced because the source was empty,
+# is therefore findable afterwards — not only on the screen of the notebook that
+# ran it. A table created by an earlier version gains these columns at its next
+# write; its older rows have them NULL.
 # ---------------------------------------------------------------------------
 
 
@@ -256,6 +284,75 @@ OPAQUE_INCREMENTAL = {
 
 
 # ---------------------------------------------------------------------------
+# 8. on_progress, and several sources at once
+#
+# A run of an hour used to give no sign of life until its last line.
+# `on_progress(pages, rows)` is called after every page with the pages received
+# and the rows read so far. `rows` counts what the source has given, not what is
+# in the table yet (rows wait in a buffer until `batch_size`). It cannot fail
+# the run: if it raises, it is dropped for the rest of the run and `warnings`
+# says so once.
+#
+# `run_sources` is the loop around `run_source`, written once:
+#
+#   max_workers=1        one after the other, in the order given (default)
+#   max_workers=4        four at a time, in threads — a run mostly waits for the
+#                        network. Two sources writing the same table are refused.
+#   stop_on_failure      no source starts after the first failure (those running
+#                        finish); the ones never started are in `skipped`
+#   on_progress          here (source_name, pages, rows)
+#
+# A failing source never stops another unless you ask. `raise_for_failures()`
+# is what makes the *notebook* fail, which is what a Fabric pipeline sees.
+# ---------------------------------------------------------------------------
+
+
+def show_progress(pages: int, rows: int):
+    if pages % 20 == 0:
+        print(f"  ... {pages} pages, {rows} rows")
+
+
+def show_progress_of(source_name: str, pages: int, rows: int):
+    if pages % 20 == 0:
+        print(f"  {source_name}: {pages} pages, {rows} rows")
+
+
+# ---------------------------------------------------------------------------
+# 9. Looking after what the runs leave behind
+#
+# Three small tables in `log_schema` grow with every run: `watermark` (one row
+# per advance, only the latest per source counts), `run_locks` and `log_runs`.
+# `compact_technical_tables` keeps the latest watermark of each source, drops
+# lock rows expired for over a day, and merges the small files. It never deletes
+# from `log_runs`. `compact_data_tables` does the file part for your own tables.
+# Both belong between two runs, not during one.
+#
+# The watermark has public helpers of its own, for the day one has to be read,
+# set by hand, or forgotten. They reach the table the runs write to.
+# ---------------------------------------------------------------------------
+
+
+def weekly_upkeep():
+    print(compact_technical_tables())
+    print(compact_data_tables(["bronze.invoices"]))
+
+
+def inspect_a_watermark(source_name: str = "invoices"):
+    print(read_watermark(source_name=source_name))             # str, or None
+    # write_watermark(source_name=source_name, last_value="2026-01-01T00:00:00Z")
+    # reset_watermark(source_name)  # rows deleted; the next run restarts from initial_value
+    print(resolve_lakehouse_tables_path("/lakehouse/default/Tables"))
+
+
+def move_a_watermark_by_hand(source_name: str, value: str):
+    write_watermark(source_name=source_name, last_value=value)
+
+
+def forget_a_watermark(source_name: str):
+    return reset_watermark(source_name)
+
+
+# ---------------------------------------------------------------------------
 # Putting it together: validate, dry run, then run for real.
 # ---------------------------------------------------------------------------
 
@@ -263,8 +360,22 @@ SOURCES = [SOURCE, DAILY_INCREMENTAL, OPAQUE_INCREMENTAL]
 
 
 def nightly():
-    for config in validate_all(SOURCES):
-        run_and_report(config, log_schema="flume_prod")
+    validate_all(SOURCES)
+    outcome = run_sources(
+        SOURCES,
+        log_schema="flume_prod",
+        max_workers=3,
+        on_progress=show_progress_of,
+    )
+    print(outcome)
+    for result in outcome.results:
+        for warning in result.warnings:
+            print(f"  ! {result.source_name}: {warning}")
+    outcome.raise_for_failures()
+
+
+def one_with_a_pulse():
+    return run_source(SOURCE, on_progress=show_progress)
 
 
 # validate_all(SOURCES)

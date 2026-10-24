@@ -7,19 +7,11 @@
 
 import json
 
-from flume_lib import run_source
+from flume_lib import run_sources
 
 with open("/lakehouse/default/Files/conf/sources.json") as f:
     sources = json.load(f)
 
-results = []
-for source_config in sources:
-    result = run_source(source_config)
-    results.append(result)
-    print(f"{source_config['name']}: {result.status} ({result.rows_loaded} rows)")
-
-failed = [r for r in results if r.status == "failed"]
-if failed:
-    print(f"\n{len(failed)} source(s) failed:")
-    for r in failed:
-        print(f"  - {r.source_name}: {r.error_message}")
+outcome = run_sources(sources)   # one after the other; a failing source stops no other
+print(outcome)                   # a total, then one line per source
+outcome.raise_for_failures()     # fails the notebook, which is what a pipeline sees

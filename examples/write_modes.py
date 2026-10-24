@@ -19,7 +19,13 @@
 
 from datetime import date, timedelta
 
-from flume_lib import ConfigError, run_source, validate_config
+from flume_lib import (
+    ConfigError,
+    compact_data_tables,
+    retype_columns,
+    run_source,
+    validate_config,
+)
 
 KEYVAULT = "https://mykv.vault.azure.net"
 
@@ -198,10 +204,10 @@ def id_range_slice(first_id: int, last_id: int) -> dict:
 # country — never on an id or a timestamp, or the table ends up with one
 # directory per row.
 #
-# The library performs no OPTIMIZE and no VACUUM. A table written batch after
-# batch accumulates small files, and the files a replacement supersedes stay on
-# disk until vacuumed. Schedule both out of band if a table grows enough to
-# need them.
+# The library never runs OPTIMIZE or VACUUM by itself. A table written batch
+# after batch accumulates small files, and the files a replacement supersedes
+# stay on disk until vacuumed. `compact_data_tables` does both, between two
+# runs — see section 10.
 # ---------------------------------------------------------------------------
 
 PARTITIONED = {
@@ -227,9 +233,12 @@ PARTITIONED = {
 #
 # Because the natural expectation is the opposite, the run says so:
 # `RunResult.warnings` carries an explicit message and the run is still
-# `success`. A success with a warning is worth reading — this is the one case
-# where ignoring `warnings` loses information you cannot recover elsewhere,
-# since the warning does not reach the `log_runs` table.
+# `success`. A success with a warning is worth reading. It is also written to
+# `flume.log_runs.warnings`, so a backfill of 36 months that replaced nothing
+# can be found afterwards:
+#
+#   SELECT start_ts, source_name, warnings FROM flume.log_runs
+#    WHERE warnings IS NOT NULL ORDER BY start_ts DESC
 #
 # If a window that comes back empty *should* be emptied in Delta, do it
 # explicitly — the library will not guess:
@@ -355,6 +364,45 @@ def rolling_window(days: int = 7) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 10. The table's types are a contract — and how to get out of a wrong one
+#
+# A column's type is decided by the first batch that creates it. A month of
+# round amounts (100, 250) makes an integer column; the next month's 1234.56
+# cannot be stored in it. delta-rs does not refuse that batch: it coerces it,
+# and 1234.56 becomes 1234, with no error. The library therefore reads the
+# table's types at the start of a run and refuses a batch that does not fit
+# *before writing anything*:
+#
+#   column 'amount' is Int64 in the table but this batch holds Float64 values
+#
+# Widening is fine (integers into a double column, anything into a text column).
+# Prevent the problem by declaring the type the first time — `double` for an
+# approximate number, `decimal(p,s)` for money, `string` for identifiers:
+#
+#   "write": {"column_types": {"amount": "decimal(18,2)", "ratio": "double"}}
+#
+# A table that already froze the wrong type is rewritten once, between runs.
+# Every value is checked before anything is written; one that would not survive
+# (a decimal that would be rounded, an identifier above 2^53 going to double)
+# stops the call with a count.
+# ---------------------------------------------------------------------------
+
+
+def fix_a_frozen_column():
+    rows = retype_columns("bronze", "orders", {"amount": "double"})
+    print(f"{rows} rows rewritten")
+
+
+# Small files accumulate and replaced files stay on disk until vacuumed.
+# `retention_hours` is at least 168 (7 days): Delta refuses a shorter purge, and
+# afterwards the table cannot be read as of a date older than it.
+def tidy_up():
+    report = compact_data_tables(["bronze.orders", "bronze.orders_by_month"])
+    print(report)  # {"bronze.orders": {"files_removed": 41, "files_added": 1}, ...}
+    compact_data_tables(["bronze.orders"], vacuum=True, retention_hours=336)
+
+
+# ---------------------------------------------------------------------------
 # Validate the whole set before running anything — a typo in `write` is caught
 # here rather than after the first HTTP call.
 # ---------------------------------------------------------------------------
@@ -381,5 +429,7 @@ def validate_all():
 
 # validate_all()
 # show_refusal()
+# fix_a_frozen_column()
+# tidy_up()
 # backfill_by_month(2020, 2026)
 # run_source(REFERENCE_TABLE)

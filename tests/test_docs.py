@@ -252,3 +252,43 @@ class TestReadmeStaysHighLevel:
         for name in ("agent-cookbook", "cookbook", "configuration", "install", "security",
                      "development"):
             assert f"docs/{name}.md" in text, name
+
+
+# ---------------------------------------------------------------------------
+# Ce que la bibliothèque expose est documenté
+# ---------------------------------------------------------------------------
+
+CONFIGURATION = (ROOT / "docs" / "configuration.md").read_text(encoding="utf-8")
+AGENT_TEXT = AGENT_COOKBOOK.read_text(encoding="utf-8")
+
+
+class TestEverythingExposedIsDocumented:
+    def test_every_exported_name_is_in_the_agent_cookbook(self):
+        missing = [name for name in flume_lib.__all__ if name not in AGENT_TEXT]
+        assert missing == [], f"exported but not in agent-cookbook.md: {missing}"
+
+    def test_every_run_result_field_is_in_the_agent_cookbook(self):
+        import dataclasses
+
+        missing = [f.name for f in dataclasses.fields(RunResult) if f.name not in AGENT_TEXT]
+        assert missing == [], f"RunResult fields missing from agent-cookbook.md: {missing}"
+
+    def test_every_log_runs_column_is_in_the_configuration_reference(self):
+        from flume_lib.logging_ import LOG_RUNS_DETAIL_TYPES
+
+        missing = [c for c in LOG_RUNS_DETAIL_TYPES if f"`{c}`" not in CONFIGURATION]
+        assert missing == [], f"log_runs columns missing from configuration.md: {missing}"
+
+    def test_every_run_source_parameter_is_in_the_configuration_reference(self):
+        signature = inspect.signature(flume_lib.run_source)
+        parameters = [p for p in signature.parameters if p != "config"]
+        missing = [p for p in parameters if f"`{p}`" not in CONFIGURATION]
+        assert missing == [], f"run_source parameters missing from configuration.md: {missing}"
+
+    def test_every_sources_result_member_is_in_the_agent_cookbook(self):
+        members = [
+            name for name, value in vars(flume_lib.SourcesResult).items()
+            if not name.startswith("_") and (callable(value) or isinstance(value, property))
+        ]
+        missing = [m for m in members if m not in AGENT_TEXT]
+        assert missing == [], f"SourcesResult members missing from agent-cookbook.md: {missing}"
