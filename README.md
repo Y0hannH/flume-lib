@@ -63,7 +63,7 @@ The first run loads everything; the next ones load only what changed. Every row 
 A Microsoft Fabric **Python notebook** (non-Spark, Python 3.10–3.12) with a **schema-enabled lakehouse** as its default. The library is installed from wheels you upload to the lakehouse — nothing is downloaded when the notebook runs:
 
 ```text
-%pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.19.0
+%pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.20.0
 ```
 
 Details, the GitHub alternative and how to verify the upload: [docs/install.md](docs/install.md).
