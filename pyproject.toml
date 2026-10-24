@@ -9,14 +9,18 @@ description = "Accélérateur d'ingestion API générique pour notebooks Fabric 
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+# Chaque borne basse est une version que la CI installe réellement (job
+# `minimum-versions`) ; chaque borne haute est la prochaine version majeure, que
+# personne n'a testée. Les versions exactes livrées sont dans
+# requirements/runtime.txt.
 dependencies = [
-    "requests>=2.31",
-    "tenacity>=8.2",
-    "deltalake>=1.0",
+    "requests>=2.31,<3",
+    "tenacity>=8.2,<10",
+    "deltalake>=1.3.2,<2",
     # Importé directement par _delta.py. deltalake le tire déjà, mais une
     # dépendance qu'on importe se déclare : le jour où deltalake change de
     # backend Arrow, l'install passerait et l'import casserait.
-    "arro3-core>=0.5",
+    "arro3-core>=0.8,<1",
 ]
 
 [project.optional-dependencies]

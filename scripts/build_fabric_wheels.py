@@ -2,6 +2,16 @@
 le wheel de flume-lib + toutes ses dépendances résolues pour le kernel Fabric
 (Linux x86_64), les empreintes SHA256 et un zip prêt à transférer.
 
+Les dépendances viennent de `requirements/runtime.txt`, un lockfile à hashes
+(`pip download --require-hashes`) : une dépendance dont le fichier diffère de
+celui qu'on a relu à la mise à jour du lockfile fait échouer la construction,
+au lieu d'entrer dans le lot. Avant, `pip download` résolvait les versions le jour
+de la release — ce que PyPI servait à cet instant devenait ce que le client
+installait. Pour mettre le lockfile à jour :
+
+    uv pip compile pyproject.toml --universal --python-version 3.10 \\
+        --generate-hashes --no-header -o requirements/runtime.txt     (--upgrade pour avancer)
+
 Le lot doit être construit **par l'interpréteur de la version visée**.
 `pip download --python-version` ne pilote que les tags de wheel et
 `Requires-Python` ; les marqueurs d'environnement (`typing-extensions ;
@@ -21,6 +31,7 @@ Install côté notebook (après upload des .whl dans le dossier de wheels) :
 
 import argparse
 import hashlib
+import platform
 import shutil
 import subprocess
 import sys
@@ -28,6 +39,7 @@ import zipfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+LOCKFILE = REPO_ROOT / "requirements" / "runtime.txt"
 
 # Tags de plateforme des kernels Fabric (Linux x86_64) ; plusieurs tags car
 # chaque projet publie sous une variante manylinux différente
@@ -53,17 +65,41 @@ def build_lib_wheel() -> Path:
     return wheels[0]
 
 
-def download_dependencies(lib_wheel: Path, out_dir: Path, python_version: str) -> None:
+def download_dependencies(out_dir: Path, python_version: str) -> None:
+    """Télécharge les dépendances figées du lockfile, hashes exigés.
+
+    `--no-deps` : le lockfile est la fermeture complète, rien ne doit être
+    résolu en plus. Le wheel de flume-lib n'y figure pas — il vient d'être
+    construit, et `main` l'a déjà copié dans le dossier."""
+    if not LOCKFILE.exists():
+        raise SystemExit(f"Lockfile absent : {LOCKFILE}")
     cmd = [
-        sys.executable, "-m", "pip", "download", str(lib_wheel),
+        sys.executable, "-m", "pip", "download",
+        "-r", str(LOCKFILE), "--require-hashes", "--no-deps",
         "-d", str(out_dir),
         "--only-binary=:all:",
         "--python-version", python_version,
         "--implementation", "cp",
     ]
-    for platform in MANYLINUX_PLATFORMS:
-        cmd += ["--platform", platform]
+    for tag in MANYLINUX_PLATFORMS:
+        cmd += ["--platform", tag]
     run(cmd)
+
+
+def check_closure(lib_wheel: Path, out_dir: Path) -> None:
+    """Prouve que le dossier suffit : installe flume-lib depuis lui seul, sans
+    index, à blanc. Une dépendance déclarée dans pyproject.toml mais absente du
+    lockfile ne se verrait sinon que chez le client, à l'installation.
+
+    Réservé à Linux x86_64 : les wheels sont ceux du kernel Fabric, et pip
+    refuserait ceux d'une autre plateforme."""
+    if not (sys.platform == "linux" and platform.machine() == "x86_64"):
+        print("Fermeture non vérifiée : ce poste n'est pas un Linux x86_64.")
+        return
+    run([
+        sys.executable, "-m", "pip", "install", "--dry-run", "--no-index",
+        "--find-links", str(out_dir), "--ignore-installed", str(lib_wheel),
+    ])
 
 
 def write_checksums(out_dir: Path) -> Path:
@@ -131,7 +167,9 @@ def main() -> None:
     lib_wheel = build_lib_wheel()
     version = lib_wheel.name.split("-")[1]
     shutil.copy2(lib_wheel, out_dir)
-    download_dependencies(lib_wheel, out_dir, args.python_version)
+    download_dependencies(out_dir, args.python_version)
+    if target == running:
+        check_closure(lib_wheel, out_dir)
     write_checksums(out_dir)
     zip_path = make_zip(out_dir, version, args.python_version)
 

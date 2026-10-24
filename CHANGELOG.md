@@ -4,6 +4,17 @@ All notable changes to this project are documented here. Versions follow [semant
 
 ## [Unreleased]
 
+### Changed (supply chain)
+
+- **The offline bundle is built from a lockfile with hashes.** `requirements/runtime.txt` (one universal file, produced by `uv pip compile --universal --generate-hashes`) holds the full closure — one version and every published digest per package. `build_fabric_wheels.py` downloads with `--require-hashes --no-deps`, so a file that is not the one reviewed stops the build; on Linux it then installs the library from the bundle alone, offline and dry, to prove the closure is complete. The versions used to be resolved on release day. The CI job `lockfile` fails when `pyproject.toml` and the lockfile disagree.
+- **GitHub Actions are pinned to commit SHAs**, with the version in a trailing comment, and `.github/dependabot.yml` keeps them, the `pyproject.toml` bounds and the lockfile current.
+- **Releases are signed.** The `publish` job attests the wheel and the bundles (build provenance, Sigstore): `gh attestation verify <file> --repo Y0hannH/flume-lib`. Untested until the next tag, since a release is the only thing that runs it.
+- **Dependency bounds were wrong, and are now measured.** `arro3-core>=0.5` and `deltalake>=1.0` were never installed by CI, which always took the latest. Installing the declared floors showed `arro3-core` 0.5 panics reading a table back (so reading a watermark fails), 0.6 fails 11 to 18 tests, 0.8 passes; `deltalake` before 1.3.2 fails at least one test (a refused `replace_where` is no longer translated into its explanation; 1.2 fails two more, not investigated). The bounds are now `arro3-core>=0.8,<1`, `deltalake>=1.3.2,<2`, `requests>=2.31,<3`, `tenacity>=8.2,<10`, and the job `minimum-versions` installs each lower bound on Python 3.10 and runs the suite. **A `pip install` with an older `arro3-core` or `deltalake` now resolves to a newer one** (or fails if something else pins it). An environment that pinned `arro3-core` below 0.8 could not read its watermark anyway.
+
+### Added (CI)
+
+- **A Windows job** (`test-windows`, Python 3.12) runs the suite — the development machine, where CRLF and backslash paths have already caused trouble. It is a job of its own so the `test (3.x)` check names stay as they were.
+
 ### Changed (code quality — no behavior change)
 
 - **`validate_config` is split by section.** One function of 86 branches and about 390 lines became a short sequence of `_validate_headers`, `_validate_auth`, `_validate_pagination`, `_validate_incremental`, `_validate_write`… each small enough to read. The logic was moved, not rewritten, and the order of the checks — hence the first error a bad config reports — is unchanged: verified against the previous version on 20 000 randomly mutated configs (4 567 valid, 15 316 refused, 117 crashing on a malformed value), with no difference in outcome or message.
