@@ -42,10 +42,10 @@ Facts that shape the code you write:
 
 ```python
 from flume_lib import (
-    run_source, run_source_windows, validate_config,
+    run_source, run_sources, run_source_windows, validate_config,
     read_watermark, write_watermark, reset_watermark,
     compact_technical_tables, retype_columns, resolve_lakehouse_tables_path,
-    RunResult, ConfigError, WindowRunError, RunLockedError,
+    RunResult, SourcesResult, ConfigError, WindowRunError, RunLockedError, RunSourcesError,
 )
 ```
 
@@ -53,6 +53,7 @@ from flume_lib import (
 |---|---|---|
 | `run_source` | `(config, lakehouse_tables_path="/lakehouse/default/Tables", storage_options=None, log_schema="flume", dry_run=False, on_progress=None)` | `RunResult`. Never raises on a source problem. `on_progress(pages, rows)` is called after each page; if it raises it is dropped and `warnings` says so. |
 | `validate_config` | `(config)` | `None`. Raises only `ConfigError`. |
+| `run_sources` | `(configs, lakehouse_tables_path=…, storage_options=None, log_schema="flume", dry_run=False, max_workers=1, stop_on_failure=False, on_progress=None)` | `SourcesResult`: `.results` (input order), `.succeeded`, `.failed`, `.skipped`, `.rows_loaded`, `.ok`, `.summary()`, `.raise_for_failures()` (raises `RunSourcesError`). `ValueError` before any run on a bad list, a missing or duplicate `name`, or two sources on one table with `max_workers > 1`. A failing source is a failed `RunResult`, never an exception. `on_progress(source_name, pages, rows)`. |
 | `run_source_windows` | `(config_factory, until, max_span_days, max_iterations=1000, lakehouse_tables_path=…, storage_options=None, log_schema="flume", on_progress=None)` | `list[RunResult]`. Raises `WindowRunError` (`.results` holds the runs so far) or `ValueError` on bad arguments. |
 | `read_watermark` | `(lakehouse_tables_path=…, source_name=None, schema="flume", storage_options=None)` | `str \| None`. `source_name` is required: **call by keyword**. |
 | `write_watermark` | `(lakehouse_tables_path=…, source_name=None, last_value=None, schema="flume", storage_options=None)` | `None`. Appends a row. |
@@ -86,7 +87,7 @@ from flume_lib import (
 Cell 1 — install (see above). Then:
 
 ```python
-from flume_lib import ConfigError, run_source, validate_config
+from flume_lib import ConfigError, run_source, run_sources, validate_config
 
 KEYVAULT = "https://<vault-name>.vault.azure.net"
 
@@ -123,18 +124,16 @@ for source in SOURCES:
 
 ```python
 # Cell 4 — the real run, then fail loudly.
-results = [run_source(source) for source in SOURCES]
-for result in results:
-    print(result.source_name, result.status, result.rows_loaded, result.error_message)
+outcome = run_sources(SOURCES)
+print(outcome)                   # a total, then one line per source
+for result in outcome.results:
     for warning in result.warnings:
-        print("  warning:", warning)
+        print(result.source_name, "warning:", warning)
 
-failed = [result for result in results if result.status == "failed"]
-if failed:
-    raise RuntimeError(
-        "; ".join(f"{result.source_name}: {result.error_message}" for result in failed)
-    )
+outcome.raise_for_failures()     # raises RunSourcesError if a source failed or was skipped
 ```
+
+`run_sources` is the loop around `run_source`, written once: results in the order given, a failing source never stops the others (unless `stop_on_failure=True`), `max_workers` runs sources in parallel, and `raise_for_failures()` fails the notebook — which is what a pipeline sees. Duplicate or missing `name`s are refused before anything runs; with `max_workers > 1` so are two sources writing the same table. For one source, call `run_source` directly.
 
 A dry run walks the **whole** pagination: while testing a large source, add `"max_pages": 2` to `pagination` (reaching it fails the run, which is acceptable for a probe) or test against a narrow filter.
 

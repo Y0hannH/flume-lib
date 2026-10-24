@@ -47,6 +47,7 @@ The first run loads everything; the next ones load only what changed. Every row 
 - **Pagination**: offset, page number, next link, cursor, keyset. A run that cannot tell it has reached the end **fails** instead of quietly loading part of the data.
 - **Incremental loading**: a stored watermark that only moves forward, resumable runs, and date-window APIs.
 - **Refresh strategy**: append, full overwrite, replace one window, or merge on a key — chosen per source.
+- **Many sources**: `run_sources` runs a list of them, one after the other or in parallel, isolates their failures, prints a summary and can fail the notebook so a pipeline sees it.
 - **Reliability**: bounded retries that honour `Retry-After`, limits on response size and run time, and an optional guard against two runs of the same source overlapping.
 - **Typing**: column types inferred from the data, with exact `decimal` and `date` on request.
 

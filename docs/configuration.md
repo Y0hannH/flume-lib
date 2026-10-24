@@ -1116,6 +1116,41 @@ retype_columns("bronze", "ledger", {"amount": "double"})   # rows rewritten
 
 `retype_columns(target_schema, target_table, column_types, lakehouse_tables_path=…, storage_options=None)` takes the same types as `write.column_types`. Every value is checked **before** anything is written, and one that does not fit stops the call with a count (never the values): text that is not a number, a `decimal` that would be rounded, an integer beyond 2^53 going to `double`. A float is not converted to a `decimal` (its value is binary: the conversion is a rounding), and a partition column cannot be retyped. The table is rewritten in one atomic commit, so its cost follows the size of the table, and the previous version stays readable by time travel until it is vacuumed. Run it between runs, not during one.
 
+## Running several sources
+
+`run_source` runs one. The loop around it — `for source in sources: run_source(source)` — was rewritten in every notebook, with or without a `try`, a summary, or anything that made the notebook *fail* when a source had: and it is the notebook's failure that a Fabric pipeline sees. `run_sources` is that loop, written once:
+
+```python
+from flume_lib import run_sources
+
+outcome = run_sources(sources)       # a list of source configs
+print(outcome)                       # a total, then one line per source
+outcome.raise_for_failures()         # last line of the notebook
+```
+
+```text
+3 source(s): 2 succeeded, 1 failed, 0 skipped — 12345 row(s) in 41.2 s
+  ok       orders  12000 row(s), 24 page(s), 30.1 s
+  ok       invoices  345 row(s), 3 page(s), 11.1 s, 1 warning(s)
+  FAILED   customers  0 row(s), 1 page(s), 0.4 s  HTTPError: HTTP 404 on https://…
+```
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `configs` | — | A list of source configurations. Every source needs a unique `name`. |
+| `lakehouse_tables_path`, `storage_options`, `log_schema`, `dry_run` | as `run_source` | Passed to every run. |
+| `max_workers` | `1` | Sources run at the same time, in threads (a run mostly waits for the network). `1` runs them one after the other, in the order given. |
+| `stop_on_failure` | `False` | After the first failed source, none starts. Those already running finish; the ones that never started are listed in `outcome.skipped`. |
+| `on_progress` | `None` | `on_progress(source_name, pages, rows)`, after each page of each source. With `max_workers > 1` it is called from several threads at once. |
+
+A failing source never stops another by default: each goes through `run_source`, which never raises. `SourcesResult` holds `results` (in the order given, whatever finished first), `succeeded`, `failed`, `skipped`, `rows_loaded`, `ok`, and `summary()`. `raise_for_failures()` raises `RunSourcesError` — carrying the whole outcome — if a source failed **or was skipped**; call it last, so the pipeline sees the failure once everything that could run has run.
+
+The arguments are checked before the first request, and refused with a `ValueError`: a configuration that is not an object, a missing or duplicate `name` (two sources would share one watermark and one lock), a bad `max_workers`. A *source* that is invalid is not a `ValueError`: it is a failed run like any other, and the others go on. With `max_workers > 1`, two sources that write the same `target_schema.target_table` are refused too — their commits to one table would conflict; run them one after the other.
+
+### Concurrent writers
+
+Sources running together all write to the same three technical tables (`log_runs`, `watermark`, `run_locks`). That is safe — they only ever receive appends — but on a lakehouse where these tables do not exist yet, the first commits race to create them, and Delta refuses the losers. Measured: with eight writers creating one table at once, six commits were refused. A commit that loses is now **replayed**: it wrote nothing, so replaying is safe, and it starts again from a fresh view of the table after a short random pause (up to 6 attempts). The same applies to your data tables and to `merge`, and to two notebooks running at the same time, not only to `run_sources`. A write that loses six times in a row fails with an error saying that another writer kept committing.
+
 ## Technical tables
 
 Created automatically on first run in `<log_schema>` (default `flume`):

@@ -2,14 +2,16 @@
 sans pyspark ni pyarrow)."""
 
 import json
+import random
 import re
+import time
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import arro3.core as ac
 from deltalake import DeltaTable, QueryBuilder, write_deltalake
-from deltalake.exceptions import TableNotFoundError
+from deltalake.exceptions import CommitFailedError, TableNotFoundError
 
 ONELAKE_HOST = "onelake.dfs.fabric.microsoft.com"
 
@@ -524,6 +526,34 @@ class DeltaWriteError(Exception):
     ce qu'il signifie pour la config qui l'a provoqué."""
 
 
+# Un commit Delta perdu face à un autre écrivain n'a rien écrit : le rejouer
+# est sûr, et c'est la réponse prévue au protocole (concurrence optimiste).
+# Sans cela, le premier run d'un lakehouse neuf échoue pour la plupart des
+# sources lancées ensemble — mesuré : 6 écritures sur 8 refusées quand huit
+# écrivains créent la même table en même temps. Les tables techniques que
+# toutes les sources partagent (`log_runs`, `watermark`, `run_locks`) sont
+# exposées dès qu'on lance deux notebooks à la fois, pas seulement avec
+# `run_sources`.
+COMMIT_ATTEMPTS = 6
+COMMIT_BACKOFF_SECONDS = 0.2
+
+
+def commit_with_retry(operation):
+    """Exécute `operation()` ; si le commit perd face à un autre écrivain
+    (`CommitFailedError`), recommence depuis un état frais de la table, après
+    une pause aléatoire croissante. La dernière erreur est relevée telle
+    quelle."""
+    for attempt in range(1, COMMIT_ATTEMPTS + 1):
+        try:
+            return operation()
+        except CommitFailedError:
+            if attempt == COMMIT_ATTEMPTS:
+                raise
+            # jitter pour désynchroniser les écrivains, pas de la cryptographie
+            pause = random.uniform(0, COMMIT_BACKOFF_SECONDS * 2 ** (attempt - 1))  # nosec B311
+            time.sleep(pause)
+
+
 # Bornes du message d'origine recopié dans l'explication : il finit dans
 # log_runs, et delta-rs joint volontiers un aperçu tabulaire des lignes fautives.
 MAX_DELTA_ERROR_CHARS = 300
@@ -558,6 +588,11 @@ def _explain_write_error(exc: Exception, mode: str, predicate: str | None,
             "the existing table. Partition columns are frozen at creation: "
             "changing them requires rewriting the whole table, which the "
             f"library does not do. Detail: {detail}"
+        )
+    if "Failed to commit transaction" in raw:
+        return (
+            f"Delta write refused (mode={mode}): another writer kept committing to "
+            f"this table and {COMMIT_ATTEMPTS} attempts were not enough. Detail: {detail}"
         )
     return f"Delta write refused (mode={mode}): {detail}"
 
@@ -608,14 +643,16 @@ def write_records(
     try:
         # `mode` et `predicate` sont des chaînes ici ; le couple valide est
         # contrôlé plus haut, les surcharges typées de deltalake ne le savent pas
-        write_deltalake(  # type: ignore[call-overload]
-            uri,
-            table,
-            mode=mode,
-            predicate=predicate,
-            partition_by=partition_by,
-            schema_mode=schema_mode,
-            storage_options=storage_options_for(uri, storage_options),
+        commit_with_retry(
+            lambda: write_deltalake(  # type: ignore[call-overload]
+                uri,
+                table,
+                mode=mode,
+                predicate=predicate,
+                partition_by=partition_by,
+                schema_mode=schema_mode,
+                storage_options=storage_options_for(uri, storage_options),
+            )
         )
     except Exception as exc:  # noqa: BLE001 — retraduit, puis relevé
         raise DeltaWriteError(
@@ -684,6 +721,25 @@ def merge_records(
     known_types: dict | None = None,
     column_types: dict | None = None,
 ) -> tuple[dict, list[str], int, int]:
+    """Fusionne des enregistrements dans une table Delta (voir `_merge_once`).
+    Un commit perdu face à un autre écrivain est rejoué depuis un état frais
+    de la table : la fusion est idempotente, et ses types sont relus."""
+    return commit_with_retry(
+        lambda: _merge_once(
+            uri, records, merge_keys, partition_by, storage_options, known_types, column_types
+        )
+    )
+
+
+def _merge_once(
+    uri: str,
+    records: list[dict],
+    merge_keys: list[str],
+    partition_by: list | None = None,
+    storage_options: dict | None = None,
+    known_types: dict | None = None,
+    column_types: dict | None = None,
+) -> tuple[dict, list[str], int, int]:
     """Fusionne des enregistrements dans une table Delta : une ligne dont la
     clé existe est mise à jour (toutes ses colonnes, lignage compris), les
     autres sont insérées. Rejouer le même lot ne change donc rien.
@@ -734,6 +790,8 @@ def merge_records(
             .when_not_matched_insert_all()
             .execute()
         )
+    except CommitFailedError:
+        raise  # `merge_records` le rejoue
     except Exception as exc:  # noqa: BLE001 — retraduit, puis relevé
         raise DeltaWriteError(_explain_merge_error(exc, merge_keys)) from exc
     return (
