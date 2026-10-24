@@ -7,6 +7,7 @@ données seraient perdues sans aucun signal."""
 
 import difflib
 import re
+from typing import NamedTuple
 from urllib.parse import urlsplit
 
 from flume_lib._delta import parse_column_type
@@ -340,9 +341,18 @@ def _validate_incremental_options(config: dict, incremental: dict) -> None:
         )
 
 
-def validate_config(config: dict) -> None:
-    """Valide la configuration d'une source. Lève ConfigError au premier
-    problème rencontré, avec un message actionnable."""
+class _Flags(NamedTuple):
+    """Ce que le premier niveau apprend à la config, et dont les sections
+    suivantes ont besoin."""
+
+    method: str
+    allow_body_on_get: bool
+    allow_http: bool
+    allow_literals: bool
+
+
+def _validate_top_level(config: dict) -> _Flags:
+    """Clés racine, méthode HTTP, drapeaux booléens et `base_url`."""
     if not isinstance(config, dict):
         raise ConfigError("A source configuration must be an object")
 
@@ -375,394 +385,483 @@ def validate_config(config: dict) -> None:
 
     _check_number("config", config, "batch_size")
     _check_number("config", config, "timeout_seconds", integer=False)
+    return _Flags(method, allow_body_on_get, allow_http, allow_literals)
 
+
+def _validate_headers(config: dict, allow_literals: bool) -> None:
+    """En-têtes fixes : littéraux, et sans secret."""
     headers = config.get("headers")
-    if headers is not None:
-        if not isinstance(headers, dict):
-            raise ConfigError("headers: must be an object")
-        for key, value in headers.items():
-            if not isinstance(key, str) or not isinstance(value, str):
-                raise ConfigError(
-                    f"headers: '{key}' must be a literal string — for a "
-                    "credential, use 'auth' (api_key_header, bearer_token…)"
-                )
-            if _SENSITIVE_NAME_RE.search(key):
-                _check_literal_secret("headers", key, value, allow_literals)
+    if headers is None:
+        return
+    if not isinstance(headers, dict):
+        raise ConfigError("headers: must be an object")
+    for key, value in headers.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise ConfigError(
+                f"headers: '{key}' must be a literal string — for a "
+                "credential, use 'auth' (api_key_header, bearer_token…)"
+            )
+        if _SENSITIVE_NAME_RE.search(key):
+            _check_literal_secret("headers", key, value, allow_literals)
 
+
+def _validate_errors(config: dict) -> None:
+    """Enveloppe d'erreur applicative d'une réponse 200."""
     errors_config = config.get("errors")
-    if errors_config is not None:
-        if not isinstance(errors_config, dict):
-            raise ConfigError("errors: must be an object")
-        _check_unknown("errors", errors_config, _ERRORS_KEYS)
-        for key in ("path", "code_field", "message_field"):
-            if key in errors_config and not (
-                isinstance(errors_config[key], str) and errors_config[key]
-            ):
-                raise ConfigError(f"errors: '{key}' must be a non-empty string")
-        codes = errors_config.get("retryable_codes")
-        if codes is not None and not isinstance(codes, (list, tuple)):
-            raise ConfigError("errors: 'retryable_codes' must be a list")
+    if errors_config is None:
+        return
+    if not isinstance(errors_config, dict):
+        raise ConfigError("errors: must be an object")
+    _check_unknown("errors", errors_config, _ERRORS_KEYS)
+    for key in ("path", "code_field", "message_field"):
+        if key in errors_config and not (
+            isinstance(errors_config[key], str) and errors_config[key]
+        ):
+            raise ConfigError(f"errors: '{key}' must be a non-empty string")
+    codes = errors_config.get("retryable_codes")
+    if codes is not None and not isinstance(codes, (list, tuple)):
+        raise ConfigError("errors: 'retryable_codes' must be a list")
 
+
+def _validate_template_paths(config: dict) -> None:
+    """Branches du corps où le templating s'applique."""
     template_paths = config.get("template_paths")
-    if template_paths is not None:
-        if not isinstance(template_paths, (list, tuple)) or not all(
-            isinstance(path, str) and path for path in template_paths
-        ):
-            raise ConfigError(
-                "template_paths: must be a list of non-empty paths"
-            )
-        if not isinstance(config.get("body"), dict):
-            raise ConfigError(
-                "template_paths: only restricts templating of 'body', which is "
-                "absent from the config"
-            )
-        for path in template_paths:
-            _resolve_body_path("template_paths", config["body"], path, required=True)
+    if template_paths is None:
+        return
+    if not isinstance(template_paths, (list, tuple)) or not all(
+        isinstance(path, str) and path for path in template_paths
+    ):
+        raise ConfigError(
+            "template_paths: must be a list of non-empty paths"
+        )
+    if not isinstance(config.get("body"), dict):
+        raise ConfigError(
+            "template_paths: only restricts templating of 'body', which is "
+            "absent from the config"
+        )
+    for path in template_paths:
+        _resolve_body_path("template_paths", config["body"], path, required=True)
 
+
+def _validate_auth_secrets(
+    auth: dict, auth_type: str, allow_http: bool, allow_literals: bool
+) -> None:
+    """Pas de secret littéral, et une URL de token acceptable."""
+    for secret_field in _AUTH_SECRET_FIELDS.get(auth_type, ()):
+        if secret_field in auth:
+            _check_literal_secret(
+                "auth", secret_field, auth[secret_field], allow_literals
+            )
+    if "token_url" in auth:
+        _check_url("auth: 'token_url'", auth["token_url"], allow_http)
+    if auth_type == "token_endpoint":
+        for section in ("body", "headers"):
+            for key, ref in (auth.get(section) or {}).items():
+                if _SENSITIVE_NAME_RE.search(str(key)):
+                    _check_literal_secret(
+                        f"auth.{section}", key, ref, allow_literals
+                    )
+
+
+def _validate_oauth1(auth: dict) -> None:
+    signature_method = auth.get("signature_method", "HMAC-SHA256")
+    if signature_method not in SIGNATURE_METHODS:
+        known = ", ".join(sorted(SIGNATURE_METHODS))
+        raise ConfigError(
+            f"auth: unknown 'signature_method' '{signature_method}' — "
+            f"expected one of: {known}"
+        )
+    has_token = "token" in auth or "token_env_var" in auth
+    has_secret = "token_secret" in auth or "token_secret_env_var" in auth
+    if has_token != has_secret:
+        raise ConfigError(
+            "auth: 'token' and 'token_secret' go together — "
+            "omitting both yields two-legged OAuth 1.0a"
+        )
+
+
+def _validate_oauth2(auth: dict) -> None:
+    client_auth = auth.get("client_auth", "body")
+    if client_auth not in CLIENT_AUTH_MODES:
+        known = ", ".join(CLIENT_AUTH_MODES)
+        raise ConfigError(
+            f"auth: unknown 'client_auth' '{client_auth}' — "
+            f"expected one of: {known}"
+        )
+    if "urlencode_credentials" in auth:
+        if not isinstance(auth["urlencode_credentials"], bool):
+            raise ConfigError("auth: 'urlencode_credentials' must be a boolean")
+        if client_auth != "basic":
+            raise ConfigError(
+                "auth: 'urlencode_credentials' encodes the Basic header and "
+                'only makes sense with "client_auth": "basic"'
+            )
+
+
+def _validate_token_endpoint_method(auth: dict) -> None:
+    token_method = str(auth.get("method", "POST")).upper()
+    if token_method == "GET" and any(
+        isinstance(v, dict) for v in auth.get("body", {}).values()
+    ):
+        raise ConfigError(
+            "auth: secret references are not allowed in 'body' on GET — "
+            "the parameters travel in the URL (server logs, proxies)"
+        )
+
+
+def _validate_auth(config: dict, allow_http: bool, allow_literals: bool) -> None:
+    """Bloc `auth` : type, clés, secrets, URL du token."""
     auth = config.get("auth")
-    if auth is not None:
-        auth_type = _check_type("auth", auth, _AUTH_KEYS, "none")
-        _check_unknown("auth", auth, ("type",) + _AUTH_KEYS[auth_type])
-        _check_required_groups("auth", auth, _AUTH_REQUIRED.get(auth_type, ()))
-        _check_number("auth", auth, "timeout_seconds", integer=False)
-        for secret_field in _AUTH_SECRET_FIELDS.get(auth_type, ()):
-            if secret_field in auth:
-                _check_literal_secret(
-                    "auth", secret_field, auth[secret_field], allow_literals
-                )
-        if "token_url" in auth:
-            _check_url("auth: 'token_url'", auth["token_url"], allow_http)
-        if auth_type == "token_endpoint":
-            for section in ("body", "headers"):
-                for key, ref in (auth.get(section) or {}).items():
-                    if _SENSITIVE_NAME_RE.search(str(key)):
-                        _check_literal_secret(
-                            f"auth.{section}", key, ref, allow_literals
-                        )
-        if auth_type == "oauth1":
-            signature_method = auth.get("signature_method", "HMAC-SHA256")
-            if signature_method not in SIGNATURE_METHODS:
-                known = ", ".join(sorted(SIGNATURE_METHODS))
-                raise ConfigError(
-                    f"auth: unknown 'signature_method' '{signature_method}' — "
-                    f"expected one of: {known}"
-                )
-            has_token = "token" in auth or "token_env_var" in auth
-            has_secret = "token_secret" in auth or "token_secret_env_var" in auth
-            if has_token != has_secret:
-                raise ConfigError(
-                    "auth: 'token' and 'token_secret' go together — "
-                    "omitting both yields two-legged OAuth 1.0a"
-                )
-        if auth_type == "oauth2_client_credentials":
-            client_auth = auth.get("client_auth", "body")
-            if client_auth not in CLIENT_AUTH_MODES:
-                known = ", ".join(CLIENT_AUTH_MODES)
-                raise ConfigError(
-                    f"auth: unknown 'client_auth' '{client_auth}' — "
-                    f"expected one of: {known}"
-                )
-            if "urlencode_credentials" in auth:
-                if not isinstance(auth["urlencode_credentials"], bool):
-                    raise ConfigError("auth: 'urlencode_credentials' must be a boolean")
-                if client_auth != "basic":
-                    raise ConfigError(
-                        "auth: 'urlencode_credentials' encodes the Basic header and "
-                        'only makes sense with "client_auth": "basic"'
-                    )
-        if auth_type == "token_endpoint":
-            token_method = str(auth.get("method", "POST")).upper()
-            if token_method == "GET" and any(
-                isinstance(v, dict) for v in auth.get("body", {}).values()
-            ):
-                raise ConfigError(
-                    "auth: secret references are not allowed in 'body' on GET — "
-                    "the parameters travel in the URL (server logs, proxies)"
-                )
+    if auth is None:
+        return
+    auth_type = _check_type("auth", auth, _AUTH_KEYS, "none")
+    _check_unknown("auth", auth, ("type",) + _AUTH_KEYS[auth_type])
+    _check_required_groups("auth", auth, _AUTH_REQUIRED.get(auth_type, ()))
+    _check_number("auth", auth, "timeout_seconds", integer=False)
+    _validate_auth_secrets(auth, auth_type, allow_http, allow_literals)
+    if auth_type == "oauth1":
+        _validate_oauth1(auth)
+    if auth_type == "oauth2_client_credentials":
+        _validate_oauth2(auth)
+    if auth_type == "token_endpoint":
+        _validate_token_endpoint_method(auth)
 
+
+def _validate_params_in(
+    config: dict, pagination: dict, method: str, allow_body_on_get: bool
+) -> str:
+    """Où vont les paramètres de pagination ; rend `params_in`."""
+    params_in = pagination.get("params_in", "query")
+    if params_in not in _PARAMS_IN:
+        known = ", ".join(f"'{v}'" for v in _PARAMS_IN)
+        raise ConfigError(
+            f"pagination: 'params_in' must be one of {known}, "
+            f"not '{params_in}'"
+        )
+    if (
+        params_in in ("body", "body_template")
+        and method == "GET"
+        and not allow_body_on_get
+    ):
+        raise ConfigError(
+            f'pagination: "params_in": "{params_in}" requires a POST method'
+        )
+    if params_in == "body_template":
+        if not isinstance(config.get("body"), dict) or not config["body"]:
+            raise ConfigError(
+                'pagination: "params_in": "body_template" substitutes the '
+                "parameters into 'body', which is absent from the config"
+            )
+    return params_in
+
+
+def _validate_params_path(config: dict, pagination: dict, params_in: str) -> None:
+    params_path = pagination.get("params_path")
+    if params_path is None:
+        return
+    if not isinstance(params_path, str) or not params_path:
+        raise ConfigError(
+            "pagination: 'params_path' must be a non-empty path"
+        )
+    if params_in != "body":
+        raise ConfigError(
+            "pagination: 'params_path' nests the parameters inside the "
+            "body and therefore requires \"params_in\": \"body\""
+        )
+    target = _resolve_body_path(
+        "pagination", config.get("body") or {}, params_path, required=False
+    )
+    if target is not None and not isinstance(target, dict):
+        raise ConfigError(
+            f"pagination: 'params_path' points at '{params_path}', which "
+            "is not an object inside 'body'"
+        )
+
+
+def _validate_page_totals(pagination: dict) -> None:
+    if pagination.get("total_pages_header") and pagination.get(
+        "total_pages_field"
+    ):
+        raise ConfigError(
+            "pagination: 'total_pages_header' and 'total_pages_field' "
+            "are mutually exclusive — the total page count is read "
+            "either from the headers or from the body, and declaring "
+            "both leaves it unsaid which one decides"
+        )
+    for key in ("total_pages_header", "total_pages_field"):
+        value = pagination.get(key)
+        if value is not None and (not isinstance(value, str) or not value):
+            raise ConfigError(
+                f"pagination: '{key}' must be a non-empty string"
+            )
+
+
+def _validate_allowed_hosts(hosts) -> None:
+    if (
+        not isinstance(hosts, (list, tuple))
+        or not hosts
+        or not all(
+            isinstance(h, str) and h and not re.search(r"[/@:\s]", h)
+            for h in hosts
+        )
+    ):
+        raise ConfigError(
+            "pagination: 'allowed_hosts' must be a non-empty list of "
+            "bare host names (no scheme, port or path), e.g. "
+            '["cdn.example.com"]'
+        )
+
+
+def _validate_keyset(config: dict, pagination: dict, params_in: str) -> None:
+    for key in ("key_field", "key_param"):
+        if not pagination.get(key):
+            raise ConfigError(
+                f"pagination: '{key}' required with \"type\": \"keyset\""
+            )
+    value_format = pagination.get("value_format", "any")
+    if value_format not in VALUE_FORMATS:
+        known = ", ".join(VALUE_FORMATS)
+        raise ConfigError(
+            f"pagination: unknown 'value_format' '{value_format}' — "
+            f"expected one of: {known}"
+        )
+    if params_in != "body_template":
+        return
+    key_param = pagination["key_param"]
+    available = templated_placeholders(
+        config.get("body") or {}, config.get("template_paths")
+    )
+    if key_param not in available:
+        known = ", ".join(sorted(available)) or "none"
+        raise ConfigError(
+            f"pagination: placeholder '{{{key_param}}}' is missing "
+            "from 'body' — the pagination key would have nowhere to "
+            f"be substituted (placeholders found: {known})"
+        )
+    if value_format == "any":
+        known = ", ".join(f for f in VALUE_FORMATS if f != "any")
+        raise ConfigError(
+            "pagination: an explicit 'value_format' is required when the "
+            "key is interpolated into the body — expected one of: "
+            f"{known}. The key comes from the API response; character "
+            "filtering only protects a quoted placeholder, a bare "
+            "placeholder (WHERE id > {last_key}) would accept "
+            "'0 OR 1=1'"
+        )
+
+
+def _validate_pagination(config: dict, method: str, allow_body_on_get: bool) -> None:
+    """Bloc `pagination` : stratégie, bornes, clés propres à chaque type."""
     pagination = config.get("pagination")
-    if pagination is not None:
-        pagination_type = _check_type(
-            "pagination", pagination, _PAGINATION_KEYS, "none"
+    if pagination is None:
+        return
+    pagination_type = _check_type(
+        "pagination", pagination, _PAGINATION_KEYS, "none"
+    )
+    _check_unknown(
+        "pagination",
+        pagination,
+        ("type",) + _PAGINATION_COMMON + _PAGINATION_KEYS[pagination_type],
+    )
+    params_in = _validate_params_in(config, pagination, method, allow_body_on_get)
+
+    for key in ("max_pages", "max_rows", "limit", "page_size"):
+        _check_number("pagination", pagination, key)
+    # une API indexée à partir de 0 est légitime
+    _check_number("pagination", pagination, "start_page", allow_zero=True)
+
+    _validate_params_path(config, pagination, params_in)
+
+    if pagination_type == "page":
+        _validate_page_totals(pagination)
+    if pagination_type == "next_link" and "allowed_hosts" in pagination:
+        _validate_allowed_hosts(pagination["allowed_hosts"])
+    if pagination_type == "cursor":
+        for key in ("cursor_param", "cursor_field"):
+            if not pagination.get(key):
+                raise ConfigError(
+                    f"pagination: '{key}' required with \"type\": \"cursor\""
+                )
+    if pagination_type == "keyset":
+        _validate_keyset(config, pagination, params_in)
+
+
+def _validate_incremental(config: dict) -> None:
+    """Bloc `incremental` : watermark, injection, fenêtre."""
+    incremental = config.get("incremental")
+    if incremental is None:
+        return
+    if not isinstance(incremental, dict):
+        raise ConfigError("incremental: must be an object")
+    _check_unknown("incremental", incremental, _INCREMENTAL_KEYS)
+    inject = incremental.get("inject", "query_param")
+    if inject not in _INCREMENTAL_INJECTS:
+        known = ", ".join(_INCREMENTAL_INJECTS)
+        raise ConfigError(
+            f"incremental: unknown 'inject' '{inject}' — expected one of: {known}"
         )
-        _check_unknown(
-            "pagination",
-            pagination,
-            ("type",) + _PAGINATION_COMMON + _PAGINATION_KEYS[pagination_type],
+    value_format = incremental.get("value_format", "any")
+    if value_format not in VALUE_FORMATS:
+        known = ", ".join(VALUE_FORMATS)
+        raise ConfigError(
+            f"incremental: unknown 'value_format' '{value_format}' — "
+            f"expected one of: {known}"
         )
-        params_in = pagination.get("params_in", "query")
-        if params_in not in _PARAMS_IN:
-            known = ", ".join(f"'{v}'" for v in _PARAMS_IN)
+    normalize = incremental.get("normalize", "none")
+    if normalize not in NORMALIZERS:
+        known = ", ".join(NORMALIZERS)
+        raise ConfigError(
+            f"incremental: unknown 'normalize' '{normalize}' — "
+            f"expected one of: {known}"
+        )
+    if incremental.get("checkpoint") and not incremental.get("enabled"):
+        raise ConfigError(
+            "incremental: 'checkpoint' commits the watermark batch by batch "
+            "and only makes sense with \"enabled\": true"
+        )
+    _validate_incremental_options(config, incremental)
+    if incremental.get("enabled"):
+        if not incremental.get("field"):
             raise ConfigError(
-                f"pagination: 'params_in' must be one of {known}, "
-                f"not '{params_in}'"
+                "incremental: 'field' required when 'enabled' is true"
             )
-        if (
-            params_in in ("body", "body_template")
-            and method == "GET"
-            and not allow_body_on_get
-        ):
-            raise ConfigError(
-                f'pagination: "params_in": "{params_in}" requires a POST method'
-            )
-        if params_in == "body_template":
-            if not isinstance(config.get("body"), dict) or not config["body"]:
+        if inject == "body_template":
+            if not config.get("body"):
                 raise ConfigError(
-                    'pagination: "params_in": "body_template" substitutes the '
-                    "parameters into 'body', which is absent from the config"
+                    "incremental: \"inject\": \"body_template\" requires a "
+                    "'body' containing the placeholder to substitute"
                 )
-
-        for key in ("max_pages", "max_rows", "limit", "page_size"):
-            _check_number("pagination", pagination, key)
-        # une API indexée à partir de 0 est légitime
-        _check_number("pagination", pagination, "start_page", allow_zero=True)
-
-        params_path = pagination.get("params_path")
-        if params_path is not None:
-            if not isinstance(params_path, str) or not params_path:
-                raise ConfigError(
-                    "pagination: 'params_path' must be a non-empty path"
-                )
-            if params_in != "body":
-                raise ConfigError(
-                    "pagination: 'params_path' nests the parameters inside the "
-                    "body and therefore requires \"params_in\": \"body\""
-                )
-            target = _resolve_body_path(
-                "pagination", config.get("body") or {}, params_path, required=False
-            )
-            if target is not None and not isinstance(target, dict):
-                raise ConfigError(
-                    f"pagination: 'params_path' points at '{params_path}', which "
-                    "is not an object inside 'body'"
-                )
-
-        if pagination_type == "page":
-            if pagination.get("total_pages_header") and pagination.get(
-                "total_pages_field"
-            ):
-                raise ConfigError(
-                    "pagination: 'total_pages_header' and 'total_pages_field' "
-                    "are mutually exclusive — the total page count is read "
-                    "either from the headers or from the body, and declaring "
-                    "both leaves it unsaid which one decides"
-                )
-            for key in ("total_pages_header", "total_pages_field"):
-                value = pagination.get(key)
-                if value is not None and (not isinstance(value, str) or not value):
-                    raise ConfigError(
-                        f"pagination: '{key}' must be a non-empty string"
-                    )
-
-        if pagination_type == "next_link" and "allowed_hosts" in pagination:
-            hosts = pagination["allowed_hosts"]
-            if (
-                not isinstance(hosts, (list, tuple))
-                or not hosts
-                or not all(
-                    isinstance(h, str) and h and not re.search(r"[/@:\s]", h)
-                    for h in hosts
-                )
-            ):
-                raise ConfigError(
-                    "pagination: 'allowed_hosts' must be a non-empty list of "
-                    "bare host names (no scheme, port or path), e.g. "
-                    '["cdn.example.com"]'
-                )
-
-        if pagination_type == "cursor":
-            for key in ("cursor_param", "cursor_field"):
-                if not pagination.get(key):
-                    raise ConfigError(
-                        f"pagination: '{key}' required with \"type\": \"cursor\""
-                    )
-
-        if pagination_type == "keyset":
-            for key in ("key_field", "key_param"):
-                if not pagination.get(key):
-                    raise ConfigError(
-                        f"pagination: '{key}' required with \"type\": \"keyset\""
-                    )
-            value_format = pagination.get("value_format", "any")
-            if value_format not in VALUE_FORMATS:
-                known = ", ".join(VALUE_FORMATS)
-                raise ConfigError(
-                    f"pagination: unknown 'value_format' '{value_format}' — "
-                    f"expected one of: {known}"
-                )
-            if params_in == "body_template":
-                key_param = pagination["key_param"]
-                available = templated_placeholders(
-                    config.get("body") or {}, config.get("template_paths")
-                )
-                if key_param not in available:
-                    known = ", ".join(sorted(available)) or "none"
-                    raise ConfigError(
-                        f"pagination: placeholder '{{{key_param}}}' is missing "
-                        "from 'body' — the pagination key would have nowhere to "
-                        f"be substituted (placeholders found: {known})"
-                    )
-            if params_in == "body_template" and value_format == "any":
+            if value_format == "any":
                 known = ", ".join(f for f in VALUE_FORMATS if f != "any")
                 raise ConfigError(
-                    "pagination: an explicit 'value_format' is required when the "
-                    "key is interpolated into the body — expected one of: "
-                    f"{known}. The key comes from the API response; character "
-                    "filtering only protects a quoted placeholder, a bare "
-                    "placeholder (WHERE id > {last_key}) would accept "
-                    "'0 OR 1=1'"
+                    "incremental: an explicit 'value_format' is required "
+                    "with \"inject\": \"body_template\" — expected one of: "
+                    f"{known}. Character filtering only protects a quoted "
+                    "placeholder; a bare placeholder "
+                    "(WHERE id > {last_id}) would accept '0 OR 1=1'"
                 )
-
-    incremental = config.get("incremental")
-    if incremental is not None:
-        if not isinstance(incremental, dict):
-            raise ConfigError("incremental: must be an object")
-        _check_unknown("incremental", incremental, _INCREMENTAL_KEYS)
-        inject = incremental.get("inject", "query_param")
-        if inject not in _INCREMENTAL_INJECTS:
-            known = ", ".join(_INCREMENTAL_INJECTS)
+        elif not incremental.get("param_name"):
             raise ConfigError(
-                f"incremental: unknown 'inject' '{inject}' — expected one of: {known}"
+                "incremental: 'param_name' required when 'enabled' is true "
+                "(or \"inject\": \"body_template\" to inject into the body)"
             )
-        value_format = incremental.get("value_format", "any")
-        if value_format not in VALUE_FORMATS:
-            known = ", ".join(VALUE_FORMATS)
+
+
+def _validate_replace_where(write: dict, mode: str) -> None:
+    predicate = write.get("replace_where")
+    if mode == "replace_where" and not predicate:
+        raise ConfigError(
+            "write: 'replace_where' required with \"mode\": \"replace_where\" — "
+            "without a predicate the replacement would cover the whole table, "
+            'which is requested explicitly with "mode": "overwrite"'
+        )
+    if predicate is not None:
+        if not isinstance(predicate, str) or not predicate.strip():
             raise ConfigError(
-                f"incremental: unknown 'value_format' '{value_format}' — "
+                "write: 'replace_where' must be a non-empty SQL predicate"
+            )
+        if mode != "replace_where":
+            raise ConfigError(
+                f"write: 'replace_where' is ignored with \"mode\": \"{mode}\" — "
+                "set \"mode\": \"replace_where\" for it to be applied"
+            )
+        if "{" in predicate or "}" in predicate:
+            raise ConfigError(
+                "write: 'replace_where' is not templated — placeholders "
+                "would stay literal and the predicate would match no row. "
+                "Build the string on the caller side, one window per run"
+            )
+
+
+def _validate_merge(write: dict, mode: str) -> None:
+    merge_keys = write.get("merge_keys")
+    if mode == "merge":
+        if (
+            not isinstance(merge_keys, (list, tuple))
+            or not merge_keys
+            or not all(isinstance(key, str) and key for key in merge_keys)
+        ):
+            raise ConfigError(
+                "write: 'merge_keys' required with \"mode\": \"merge\" — a "
+                "non-empty list of column names identifying a row. Without "
+                "them nothing says which target row an incoming one replaces"
+            )
+        if any("`" in key for key in merge_keys):
+            raise ConfigError(
+                "write: 'merge_keys' must not contain a backtick — column "
+                "names are quoted with it in the merge predicate"
+            )
+        if len(set(merge_keys)) != len(merge_keys):
+            raise ConfigError("write: 'merge_keys' lists a column twice")
+        when_matched = write.get("when_matched", "update")
+        if when_matched not in _WRITE_WHEN_MATCHED:
+            known = ", ".join(f"'{m}'" for m in _WRITE_WHEN_MATCHED)
+            raise ConfigError(
+                f"write: unknown 'when_matched' '{when_matched}' — "
                 f"expected one of: {known}"
             )
-        normalize = incremental.get("normalize", "none")
-        if normalize not in NORMALIZERS:
-            known = ", ".join(NORMALIZERS)
-            raise ConfigError(
-                f"incremental: unknown 'normalize' '{normalize}' — "
-                f"expected one of: {known}"
-            )
-        if incremental.get("checkpoint") and not incremental.get("enabled"):
-            raise ConfigError(
-                "incremental: 'checkpoint' commits the watermark batch by batch "
-                "and only makes sense with \"enabled\": true"
-            )
-        _validate_incremental_options(config, incremental)
-        if incremental.get("enabled"):
-            if not incremental.get("field"):
+    else:
+        for key in ("merge_keys", "when_matched"):
+            if key in write:
                 raise ConfigError(
-                    "incremental: 'field' required when 'enabled' is true"
-                )
-            if inject == "body_template":
-                if not config.get("body"):
-                    raise ConfigError(
-                        "incremental: \"inject\": \"body_template\" requires a "
-                        "'body' containing the placeholder to substitute"
-                    )
-                if value_format == "any":
-                    known = ", ".join(f for f in VALUE_FORMATS if f != "any")
-                    raise ConfigError(
-                        "incremental: an explicit 'value_format' is required "
-                        "with \"inject\": \"body_template\" — expected one of: "
-                        f"{known}. Character filtering only protects a quoted "
-                        "placeholder; a bare placeholder "
-                        "(WHERE id > {last_id}) would accept '0 OR 1=1'"
-                    )
-            elif not incremental.get("param_name"):
-                raise ConfigError(
-                    "incremental: 'param_name' required when 'enabled' is true "
-                    "(or \"inject\": \"body_template\" to inject into the body)"
+                    f"write: '{key}' is ignored with \"mode\": \"{mode}\" — "
+                    "set \"mode\": \"merge\" for it to be applied"
                 )
 
+
+def _validate_column_types(write: dict) -> None:
+    column_types = write.get("column_types")
+    if column_types is not None:
+        if not isinstance(column_types, dict) or not column_types:
+            raise ConfigError(
+                "write: 'column_types' must be a non-empty object mapping a "
+                'column name to a type, e.g. {"amount": "decimal(18,4)"}'
+            )
+        for column, spec in column_types.items():
+            if not isinstance(column, str) or not column:
+                raise ConfigError("write: 'column_types' keys must be column names")
+            try:
+                parse_column_type(spec)
+            except ValueError as exc:
+                raise ConfigError(f"write: column_types['{column}']: {exc}") from None
+
+
+def _validate_partition_by(write: dict) -> None:
+    partition_by = write.get("partition_by")
+    if partition_by is not None:
+        if not isinstance(partition_by, (list, tuple)) or not partition_by:
+            raise ConfigError(
+                "write: 'partition_by' must be a non-empty list of columns"
+            )
+        if not all(isinstance(col, str) and col for col in partition_by):
+            raise ConfigError(
+                "write: 'partition_by' must contain only non-empty column "
+                "names"
+            )
+
+
+def _validate_write(config: dict) -> None:
+    """Bloc `write` : mode d'écriture, clés de fusion, partition, types."""
     write = config.get("write")
-    if write is not None:
-        if not isinstance(write, dict):
-            raise ConfigError("write: must be an object")
-        _check_unknown("write", write, _WRITE_KEYS)
-        mode = write.get("mode", "append")
-        if mode not in _WRITE_MODES:
-            known = ", ".join(f"'{m}'" for m in _WRITE_MODES)
-            raise ConfigError(
-                f"write: unknown 'mode' '{mode}' — expected one of: {known}"
-            )
-        predicate = write.get("replace_where")
-        if mode == "replace_where" and not predicate:
-            raise ConfigError(
-                "write: 'replace_where' required with \"mode\": \"replace_where\" — "
-                "without a predicate the replacement would cover the whole table, "
-                'which is requested explicitly with "mode": "overwrite"'
-            )
-        if predicate is not None:
-            if not isinstance(predicate, str) or not predicate.strip():
-                raise ConfigError(
-                    "write: 'replace_where' must be a non-empty SQL predicate"
-                )
-            if mode != "replace_where":
-                raise ConfigError(
-                    f"write: 'replace_where' is ignored with \"mode\": \"{mode}\" — "
-                    "set \"mode\": \"replace_where\" for it to be applied"
-                )
-            if "{" in predicate or "}" in predicate:
-                raise ConfigError(
-                    "write: 'replace_where' is not templated — placeholders "
-                    "would stay literal and the predicate would match no row. "
-                    "Build the string on the caller side, one window per run"
-                )
-        merge_keys = write.get("merge_keys")
-        if mode == "merge":
-            if (
-                not isinstance(merge_keys, (list, tuple))
-                or not merge_keys
-                or not all(isinstance(key, str) and key for key in merge_keys)
-            ):
-                raise ConfigError(
-                    "write: 'merge_keys' required with \"mode\": \"merge\" — a "
-                    "non-empty list of column names identifying a row. Without "
-                    "them nothing says which target row an incoming one replaces"
-                )
-            if any("`" in key for key in merge_keys):
-                raise ConfigError(
-                    "write: 'merge_keys' must not contain a backtick — column "
-                    "names are quoted with it in the merge predicate"
-                )
-            if len(set(merge_keys)) != len(merge_keys):
-                raise ConfigError("write: 'merge_keys' lists a column twice")
-            when_matched = write.get("when_matched", "update")
-            if when_matched not in _WRITE_WHEN_MATCHED:
-                known = ", ".join(f"'{m}'" for m in _WRITE_WHEN_MATCHED)
-                raise ConfigError(
-                    f"write: unknown 'when_matched' '{when_matched}' — "
-                    f"expected one of: {known}"
-                )
-        else:
-            for key in ("merge_keys", "when_matched"):
-                if key in write:
-                    raise ConfigError(
-                        f"write: '{key}' is ignored with \"mode\": \"{mode}\" — "
-                        "set \"mode\": \"merge\" for it to be applied"
-                    )
-        column_types = write.get("column_types")
-        if column_types is not None:
-            if not isinstance(column_types, dict) or not column_types:
-                raise ConfigError(
-                    "write: 'column_types' must be a non-empty object mapping a "
-                    'column name to a type, e.g. {"amount": "decimal(18,4)"}'
-                )
-            for column, spec in column_types.items():
-                if not isinstance(column, str) or not column:
-                    raise ConfigError("write: 'column_types' keys must be column names")
-                try:
-                    parse_column_type(spec)
-                except ValueError as exc:
-                    raise ConfigError(f"write: column_types['{column}']: {exc}") from None
-        partition_by = write.get("partition_by")
-        if partition_by is not None:
-            if not isinstance(partition_by, (list, tuple)) or not partition_by:
-                raise ConfigError(
-                    "write: 'partition_by' must be a non-empty list of columns"
-                )
-            if not all(isinstance(col, str) and col for col in partition_by):
-                raise ConfigError(
-                    "write: 'partition_by' must contain only non-empty column "
-                    "names"
-                )
+    if write is None:
+        return
+    if not isinstance(write, dict):
+        raise ConfigError("write: must be an object")
+    _check_unknown("write", write, _WRITE_KEYS)
+    mode = write.get("mode", "append")
+    if mode not in _WRITE_MODES:
+        known = ", ".join(f"'{m}'" for m in _WRITE_MODES)
+        raise ConfigError(
+            f"write: unknown 'mode' '{mode}' — expected one of: {known}"
+        )
+    _validate_replace_where(write, mode)
+    _validate_merge(write, mode)
+    _validate_column_types(write)
+    _validate_partition_by(write)
 
+
+def _validate_checkpoint_mode(config: dict) -> None:
+    """`checkpoint` et un mode qui remplace ne vont pas ensemble."""
     # `merge` est idempotent — rejouer un lot met à jour les mêmes lignes — donc
     # la reprise de `checkpoint` ne l'abîme pas, contrairement à un
     # remplacement qui effacerait ce que le run interrompu avait déjà écrit.
@@ -780,15 +879,34 @@ def validate_config(config: dict) -> None:
             )
         )
 
+
+def _validate_retry(config: dict) -> None:
+    """Bloc `retry` : valeurs numériques."""
     retry = config.get("retry")
-    if retry is not None:
-        if not isinstance(retry, dict):
-            raise ConfigError("retry: must be an object")
-        _check_unknown("retry", retry, _RETRY_KEYS)
-        _check_number("retry", retry, "max_attempts")
-        _check_number("retry", retry, "backoff_multiplier", integer=False)
-        # 0 est valide : il désactive l'attente dictée par le serveur
-        _check_number(
-            "retry", retry, "max_retry_after_seconds",
-            integer=False, allow_zero=True,
-        )
+    if retry is None:
+        return
+    if not isinstance(retry, dict):
+        raise ConfigError("retry: must be an object")
+    _check_unknown("retry", retry, _RETRY_KEYS)
+    _check_number("retry", retry, "max_attempts")
+    _check_number("retry", retry, "backoff_multiplier", integer=False)
+    # 0 est valide : il désactive l'attente dictée par le serveur
+    _check_number(
+        "retry", retry, "max_retry_after_seconds",
+        integer=False, allow_zero=True,
+    )
+
+
+def validate_config(config: dict) -> None:
+    """Valide la configuration d'une source. Lève ConfigError au premier
+    problème rencontré, avec un message actionnable."""
+    flags = _validate_top_level(config)
+    _validate_headers(config, flags.allow_literals)
+    _validate_errors(config)
+    _validate_template_paths(config)
+    _validate_auth(config, flags.allow_http, flags.allow_literals)
+    _validate_pagination(config, flags.method, flags.allow_body_on_get)
+    _validate_incremental(config)
+    _validate_write(config)
+    _validate_checkpoint_mode(config)
+    _validate_retry(config)

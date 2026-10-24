@@ -517,7 +517,8 @@ def _build_fetch_page(config: dict, variables: dict | None = None):
     # La session porte le pool de connexions : `run_source` la ferme en
     # sortant, plutôt que d'attendre le ramasse-miettes. Un notebook qui
     # enchaîne les sources en laissait un par run.
-    fetch_page.session = session
+    # attribut ajouté à la fonction : `run_source` ferme la session par là
+    fetch_page.session = session  # type: ignore[attr-defined]
     return fetch_page
 
 
@@ -607,13 +608,14 @@ class _BatchWriter:
         self._write_mode = write.get("mode", WRITE_APPEND)
         self._replace_where = write.get("replace_where")
         self._partition_by = write.get("partition_by")
-        self._merge_keys = write.get("merge_keys")
+        self._merge_keys: list[str] = write.get("merge_keys") or []
         self._column_types = write.get("column_types")
         # Consommé par le premier lot : voir _delta_write_args.
         self._replacement_pending = self._write_mode in _REPLACING_MODES
 
         self._enabled = bool(incremental.get("enabled"))
-        self._field = incremental.get("field")
+        # requis par la validation quand `incremental.enabled` ; vide sinon
+        self._field: str = incremental.get("field") or ""
         self._checkpoint = bool(incremental.get("checkpoint"))
         self._allow_regression = bool(incremental.get("allow_regression", False))
         self._advance = incremental.get("advance", ADVANCE_FIELD_MAX)
@@ -733,8 +735,8 @@ class _BatchWriter:
                 known_types=self._types,
                 column_types=self._column_types,
             )
-            self.rows_inserted += inserted
-            self.rows_updated += updated
+            self.rows_inserted = (self.rows_inserted or 0) + inserted
+            self.rows_updated = (self.rows_updated or 0) + updated
         else:
             types, fallbacks = write_records(
                 self._uri,
@@ -843,6 +845,188 @@ def _apply_lookback(watermark, days: int) -> str:
         raise IncrementalError(f"incremental.lookback: {exc}") from exc
 
 
+@dataclass
+class _Progress:
+    """Ce qu'un run a réellement accompli, tenu à jour au fil de l'eau.
+
+    Un run qui casse à la page 900 doit rendre ce qu'il a fait des 899
+    premières, pas des zéros : chaque étape écrit ici avant de risquer
+    d'échouer, et `run_source` lit le résultat même quand une exception est
+    passée par là."""
+
+    rows_loaded: int = 0
+    sample: list | None = None
+    warnings: list = field(default_factory=list)
+    stored_watermark: object = None
+    watermark_before: str | None = None
+    watermark_after: str | None = None
+    window_end: str | None = None
+    rows_inserted: int | None = None
+    rows_updated: int | None = None
+
+
+def _lakehouse_path_warning(path) -> str | None:
+    """Avertissement si le chemin du lakehouse n'a pas été résolu vers une URI
+    ABFSS : le montage local ne peut pas porter le commit Delta."""
+    if isinstance(path, str) and path.startswith(LOCAL_LAKEHOUSE_PREFIX):
+        return (
+            f"lakehouse path '{path}' was not resolved to an "
+            "ABFSS URI (outside Fabric, or the notebook context does not expose "
+            "the default lakehouse). The local mount does not support the Delta "
+            "commit: writes will probably fail with 'os error 1'. Pass "
+            "lakehouse_tables_path explicitly (abfss://…)."
+        )
+    return None
+
+
+def _prepare_incremental(
+    incremental: dict,
+    params: dict,
+    variables: dict,
+    progress: _Progress,
+    lakehouse_tables_path: str,
+    source_name: str,
+    log_schema: str,
+    storage_options: dict | None,
+) -> None:
+    """Relit le watermark et le place dans la requête : en query string
+    (`params`) ou dans les placeholders du corps (`variables`). Renseigne
+    `progress` à mesure — la borne haute est connue avant que le point de
+    départ puisse faire échouer le run, et le résultat d'un run échoué la
+    porte."""
+    if not incremental.get("enabled"):
+        return
+    stored_watermark = read_watermark(
+        lakehouse_tables_path,
+        source_name,
+        schema=log_schema,
+        storage_options=storage_options,
+    )
+    progress.stored_watermark = stored_watermark
+    last_value = stored_watermark
+    if last_value is None:
+        # Premier run : sans plancher, un placeholder resterait non
+        # substitué et partirait tel quel dans la requête.
+        last_value = incremental.get("initial_value")
+    window = incremental.get("window")
+    if window:
+        progress.window_end = str(window["upper_value"])
+        _check_window_ahead(window["upper_value"], last_value)
+    if last_value is None:
+        return
+    # la position de départ, avant tout décalage ou reformatage :
+    # c'est celle que le watermark doit dépasser pour avoir avancé
+    progress.watermark_before = progress.watermark_after = str(last_value)
+    lookback = incremental.get("lookback")
+    if lookback and stored_watermark is not None:
+        # Seule la valeur *envoyée* recule : le watermark stocké
+        # reste celui du dernier run. `initial_value` est exclu —
+        # c'est un plancher que l'utilisateur a fixé, pas un
+        # watermark à recouvrir.
+        last_value = _apply_lookback(stored_watermark, lookback)
+    # Avant toute injection, et donc aussi bien pour la valeur
+    # relue que pour 'initial_value' : les deux doivent partir
+    # sous la même forme, sans quoi le premier run essaierait un
+    # format et les suivants un autre.
+    last_value = normalize_value(
+        last_value,
+        incremental.get("normalize", "none"),
+        label="incremental: watermark",
+    )
+    if incremental.get("inject", "query_param") == "body_template":
+        placeholder = incremental.get("placeholder", "watermark")
+        variables[placeholder] = check_value(
+            last_value,
+            incremental.get("value_format", "any"),
+            label=f"incremental: watermark '{placeholder}'",
+        )
+    else:
+        params[incremental["param_name"]] = last_value
+
+
+def _run_dry(pages, progress: _Progress) -> None:
+    """Dry run : lit tout, compte, garde les premiers enregistrements."""
+    progress.sample = []
+    for page in pages:
+        if len(progress.sample) < DRY_RUN_SAMPLE_SIZE:
+            progress.sample.extend(page[: DRY_RUN_SAMPLE_SIZE - len(progress.sample)])
+        progress.rows_loaded += len(page)
+
+
+def _run_write(
+    pages,
+    config: dict,
+    incremental: dict,
+    progress: _Progress,
+    run_id: str,
+    source_name: str,
+    lakehouse_tables_path: str,
+    log_schema: str,
+    storage_options: dict | None,
+) -> None:
+    """Écrit les pages par lots, puis solde le watermark."""
+    writer = _BatchWriter(
+        uri=table_uri(
+            lakehouse_tables_path,
+            config["target_schema"],
+            config["target_table"],
+        ),
+        run_id=run_id,
+        source_name=source_name,
+        batch_size=config.get("batch_size", DEFAULT_BATCH_SIZE),
+        incremental=incremental,
+        lakehouse_tables_path=lakehouse_tables_path,
+        log_schema=log_schema,
+        storage_options=storage_options,
+        write=config.get("write"),
+        stored_watermark=progress.stored_watermark,
+        fail_on_empty=bool(config.get("fail_on_empty", False)),
+    )
+    try:
+        for page in pages:
+            writer.add(page)
+        writer.close()
+    finally:
+        # Ce que l'appelant voit doit être ce qui est réellement dans
+        # la table, y compris quand le run casse en cours de route.
+        progress.rows_loaded = writer.rows_written
+        progress.rows_inserted = writer.rows_inserted
+        progress.rows_updated = writer.rows_updated
+        if writer.watermark is not None:
+            progress.watermark_after = str(writer.watermark)
+        # extend, pas une affectation : celles de la pagination sont
+        # déjà dans la liste
+        progress.warnings.extend(writer.warnings)
+
+
+def _persist_run(
+    result: RunResult,
+    lakehouse_tables_path: str,
+    log_schema: str,
+    storage_options: dict | None,
+) -> None:
+    """Écrit la ligne de `log_runs`. Un échec n'est pas levé : il s'ajoute au
+    message du résultat, qui reste la source de vérité de l'appelant."""
+    try:
+        write_log_run(
+            lakehouse_tables_path,
+            run_id=result.run_id,
+            source_name=result.source_name,
+            start_ts=result.start_ts,
+            end_ts=result.end_ts,
+            status=result.status,
+            rows_loaded=result.rows_loaded,
+            error_message=result.error_message,
+            schema=log_schema,
+            storage_options=storage_options,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log_error = f"écriture log_runs impossible — {type(exc).__name__}: {exc}"
+        result.error_message = _publishable(
+            f"{result.error_message} | {log_error}" if result.error_message else log_error
+        )
+
+
 def run_source(
     config: dict,
     lakehouse_tables_path: str = DEFAULT_LAKEHOUSE_TABLES_PATH,
@@ -909,16 +1093,9 @@ def run_source(
     run_id = str(uuid.uuid4())
     start_ts = _utc_now()
     status = "failed"
-    rows_loaded = 0
     error_message = None
-    sample = None
-    warnings: list[str] = []
     fetch_page = None
-    watermark_before = None
-    watermark_after = None
-    window_end = None
-    rows_inserted = None
-    rows_updated = None
+    progress = _Progress()
     # Annulation (KeyboardInterrupt de Fabric, SystemExit…) : le run est
     # consigné comme échoué, puis l'interruption est relancée à l'appelant.
     interrupted: BaseException | None = None
@@ -927,18 +1104,9 @@ def run_source(
         lakehouse_tables_path = resolve_lakehouse_tables_path(lakehouse_tables_path)
     except Exception:  # noqa: BLE001
         pass
-    if (
-        not dry_run
-        and isinstance(lakehouse_tables_path, str)
-        and lakehouse_tables_path.startswith(LOCAL_LAKEHOUSE_PREFIX)
-    ):
-        warnings.append(
-            f"lakehouse path '{lakehouse_tables_path}' was not resolved to an "
-            "ABFSS URI (outside Fabric, or the notebook context does not expose "
-            "the default lakehouse). The local mount does not support the Delta "
-            "commit: writes will probably fail with 'os error 1'. Pass "
-            "lakehouse_tables_path explicitly (abfss://…)."
-        )
+    path_warning = None if dry_run else _lakehouse_path_warning(lakehouse_tables_path)
+    if path_warning:
+        progress.warnings.append(path_warning)
 
     try:
         validate_config(config)
@@ -948,58 +1116,14 @@ def run_source(
         # Variables offertes au templating de 'body' et 'params'. Alimentées
         # par le watermark quand il doit atterrir ailleurs qu'en query string.
         variables: dict[str, str] = {}
-
-        stored_watermark = None
-        if incremental.get("enabled"):
-            stored_watermark = read_watermark(
-                lakehouse_tables_path,
-                source_name,
-                schema=log_schema,
-                storage_options=storage_options,
-            )
-            last_value = stored_watermark
-            if last_value is None:
-                # Premier run : sans plancher, un placeholder resterait non
-                # substitué et partirait tel quel dans la requête.
-                last_value = incremental.get("initial_value")
-            window = incremental.get("window")
-            if window:
-                window_end = str(window["upper_value"])
-                _check_window_ahead(window["upper_value"], last_value)
-            if last_value is not None:
-                # la position de départ, avant tout décalage ou reformatage :
-                # c'est celle que le watermark doit dépasser pour avoir avancé
-                watermark_before = watermark_after = str(last_value)
-                lookback = incremental.get("lookback")
-                if lookback and stored_watermark is not None:
-                    # Seule la valeur *envoyée* recule : le watermark stocké
-                    # reste celui du dernier run. `initial_value` est exclu —
-                    # c'est un plancher que l'utilisateur a fixé, pas un
-                    # watermark à recouvrir.
-                    last_value = _apply_lookback(stored_watermark, lookback)
-                # Avant toute injection, et donc aussi bien pour la valeur
-                # relue que pour 'initial_value' : les deux doivent partir
-                # sous la même forme, sans quoi le premier run essaierait un
-                # format et les suivants un autre.
-                last_value = normalize_value(
-                    last_value,
-                    incremental.get("normalize", "none"),
-                    label="incremental: watermark",
-                )
-                if incremental.get("inject", "query_param") == "body_template":
-                    placeholder = incremental.get("placeholder", "watermark")
-                    variables[placeholder] = check_value(
-                        last_value,
-                        incremental.get("value_format", "any"),
-                        label=f"incremental: watermark '{placeholder}'",
-                    )
-                else:
-                    params[incremental["param_name"]] = last_value
-
+        _prepare_incremental(
+            incremental, params, variables, progress,
+            lakehouse_tables_path, source_name, log_schema, storage_options,
+        )
         params = render(params, variables)
 
-        # `warnings` est alimentée par la pagination, puis complétée par le
-        # writer : les deux signalent des dégradations qui ne font pas
+        # `progress.warnings` est alimentée par la pagination, puis complétée
+        # par le writer : les deux signalent des dégradations qui ne font pas
         # échouer le run.
         fetch_page = _build_fetch_page(config, variables)
         pages = paginate(
@@ -1007,47 +1131,16 @@ def run_source(
             config["base_url"],
             params,
             config.get("pagination"),
-            warnings,
+            progress.warnings,
         )
 
         if dry_run:
-            sample = []
-            for page in pages:
-                if len(sample) < DRY_RUN_SAMPLE_SIZE:
-                    sample.extend(page[: DRY_RUN_SAMPLE_SIZE - len(sample)])
-                rows_loaded += len(page)
+            _run_dry(pages, progress)
         else:
-            writer = _BatchWriter(
-                uri=table_uri(
-                    lakehouse_tables_path,
-                    config["target_schema"],
-                    config["target_table"],
-                ),
-                run_id=run_id,
-                source_name=source_name,
-                batch_size=config.get("batch_size", DEFAULT_BATCH_SIZE),
-                incremental=incremental,
-                lakehouse_tables_path=lakehouse_tables_path,
-                log_schema=log_schema,
-                storage_options=storage_options,
-                write=config.get("write"),
-                stored_watermark=stored_watermark,
-                fail_on_empty=bool(config.get("fail_on_empty", False)),
+            _run_write(
+                pages, config, incremental, progress, run_id, source_name,
+                lakehouse_tables_path, log_schema, storage_options,
             )
-            try:
-                for page in pages:
-                    writer.add(page)
-                writer.close()
-            finally:
-                # Ce que l'appelant voit doit être ce qui est réellement dans
-                # la table, y compris quand le run casse en cours de route.
-                rows_loaded = writer.rows_written
-                rows_inserted, rows_updated = writer.rows_inserted, writer.rows_updated
-                if writer.watermark is not None:
-                    watermark_after = str(writer.watermark)
-                # extend, pas une affectation : celles de la pagination sont
-                # déjà dans la liste
-                warnings.extend(writer.warnings)
 
         status = "success"
     except Exception as exc:  # noqa: BLE001 — contrat : ne jamais lever
@@ -1066,50 +1159,26 @@ def run_source(
     # Une seule porte de sortie pour ce qui est persisté ou rendu à l'appelant
     if error_message is not None:
         error_message = _publishable(error_message)
-    warnings = [_publishable(w) for w in warnings]
 
-    end_ts = _utc_now()
     result = RunResult(
         source_name=source_name,
         status=status,
-        rows_loaded=rows_loaded,
+        rows_loaded=progress.rows_loaded,
         error_message=error_message,
         start_ts=start_ts,
-        end_ts=end_ts,
+        end_ts=_utc_now(),
         run_id=run_id,
-        sample=sample,
-        warnings=warnings,
-        watermark_before=watermark_before,
-        watermark_after=watermark_after,
-        window_end=window_end,
-        rows_inserted=rows_inserted,
-        rows_updated=rows_updated,
+        sample=progress.sample,
+        warnings=[_publishable(w) for w in progress.warnings],
+        watermark_before=progress.watermark_before,
+        watermark_after=progress.watermark_after,
+        window_end=progress.window_end,
+        rows_inserted=progress.rows_inserted,
+        rows_updated=progress.rows_updated,
     )
 
-    if dry_run:
-        if interrupted is not None:
-            raise interrupted
-        return result
-
-    try:
-        write_log_run(
-            lakehouse_tables_path,
-            run_id=run_id,
-            source_name=source_name,
-            start_ts=start_ts,
-            end_ts=end_ts,
-            status=status,
-            rows_loaded=rows_loaded,
-            error_message=error_message,
-            schema=log_schema,
-            storage_options=storage_options,
-        )
-    except Exception as exc:  # noqa: BLE001
-        log_error = f"écriture log_runs impossible — {type(exc).__name__}: {exc}"
-        result.error_message = _publishable(
-            f"{error_message} | {log_error}" if error_message else log_error
-        )
-
+    if not dry_run:
+        _persist_run(result, lakehouse_tables_path, log_schema, storage_options)
     if interrupted is not None:
         raise interrupted
     return result

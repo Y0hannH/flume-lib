@@ -5,6 +5,7 @@ import json
 import re
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from typing import Any
 
 import arro3.core as ac
 from deltalake import DeltaTable, QueryBuilder, write_deltalake
@@ -346,7 +347,7 @@ def records_to_table(
     known_types = known_types or {}
     column_types = column_types or {}
     fallbacks: list[str] = []
-    columns: dict[str, ac.Array] = {}
+    columns: dict[str, Any] = {}
     # `seen` à côté de `keys` : le `key not in keys` d'origine balayait la
     # liste pour chaque clé de chaque enregistrement, soit O(n·k²). Sur un lot
     # de 50 000 lignes, cette seule boucle coûtait 3 s à 120 colonnes, avant
@@ -365,6 +366,12 @@ def records_to_table(
         else:
             columns[key] = _build_column(key, values, known_types, fallbacks)
     return ac.Table.from_pydict(columns), fallbacks
+
+
+def _schema_types(schema) -> dict:
+    """Type Arrow de chaque colonne d'un schéma. Les stubs d'arro3 ne déclarent
+    pas l'itération d'un `Schema`, que l'exécution supporte."""
+    return {field.name: field.type for field in schema}
 
 
 class DeltaWriteError(Exception):
@@ -438,7 +445,9 @@ def write_records(
         )
     table, fallbacks = records_to_table(records, known_types, column_types)
     try:
-        write_deltalake(
+        # `mode` et `predicate` sont des chaînes ici ; le couple valide est
+        # contrôlé plus haut, les surcharges typées de deltalake ne le savent pas
+        write_deltalake(  # type: ignore[call-overload]
             uri,
             table,
             mode=mode,
@@ -451,8 +460,7 @@ def write_records(
         raise DeltaWriteError(
             _explain_write_error(exc, mode, predicate, partition_by)
         ) from exc
-    types = {field.name: field.type for field in table.schema}
-    return types, fallbacks
+    return _schema_types(table.schema), fallbacks
 
 
 def _merge_key(record: dict, merge_keys: list[str]) -> tuple:
@@ -545,7 +553,7 @@ def merge_records(
         )
         return types, fallbacks, len(records), 0
 
-    target_types = {field.name: field.type for field in dt.schema().to_arrow()}
+    target_types = _schema_types(dt.schema().to_arrow())
     table, fallbacks = records_to_table(
         records, {**(known_types or {}), **target_types}, column_types
     )
@@ -564,9 +572,8 @@ def merge_records(
         )
     except Exception as exc:  # noqa: BLE001 — retraduit, puis relevé
         raise DeltaWriteError(_explain_merge_error(exc, merge_keys)) from exc
-    types = {field.name: field.type for field in table.schema}
     return (
-        types,
+        _schema_types(table.schema),
         fallbacks,
         int(metrics.get("num_target_rows_inserted", 0)),
         int(metrics.get("num_target_rows_updated", 0)),
