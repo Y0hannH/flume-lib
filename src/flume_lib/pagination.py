@@ -235,7 +235,7 @@ def paginate_next_link(
     record_field = pagination_config.get("record_field")
     allowed_hosts = pagination_config.get("allowed_hosts")
 
-    url = base_url
+    url: str | None = base_url
     page_params = params
     while url:
         payload, _ = fetch_page(url, page_params)
@@ -244,9 +244,8 @@ def paginate_next_link(
             yield records
         if not isinstance(payload, dict):
             return
-        url = payload.get(next_field)
-        if url:
-            url = check_next_url(url, base_url, allowed_hosts)
+        next_url = payload.get(next_field)
+        url = check_next_url(next_url, base_url, allowed_hosts) if next_url else None
         # l'URL suivante embarque déjà ses query params
         page_params = {}
 
@@ -299,7 +298,13 @@ def paginate_page(
     items_field = pagination_config.get("items_field")
     record_field = pagination_config.get("record_field")
 
-    rule = _PartialPageRule(page_size, size_param or "page_size", warnings)
+    # sans taille de page déclarée, rien ne dit qu'une page partielle est la
+    # dernière : la règle n'existe pas
+    rule = (
+        _PartialPageRule(page_size, size_param or "page_size", warnings)
+        if page_size
+        else None
+    )
     total_pages = None
     page = start_page
     while True:
@@ -322,7 +327,7 @@ def paginate_page(
                 return
         elif not records:
             return
-        elif page_size and rule.stop_after(len(records)):
+        elif rule is not None and rule.stop_after(len(records)):
             return
         page += 1
 

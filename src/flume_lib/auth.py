@@ -4,6 +4,7 @@ jamais lus depuis la config en clair."""
 
 import base64
 import time
+from typing import Any
 from urllib.parse import quote_plus
 
 import requests
@@ -95,7 +96,7 @@ def _expires_in(payload: dict, path: str | None) -> float | None:
     à un 401, jamais par anticipation."""
     if not path:
         return None
-    value = payload
+    value: Any = payload
     for part in path.split("."):
         if not isinstance(value, dict) or part not in value:
             return None
@@ -297,26 +298,26 @@ class AuthProvider:
         """Headers courants. Les régénère si le token est expiré ou sur le
         point de l'être."""
         if self._headers is None or self._is_expiring():
-            self._fetch()
+            return self._fetch()
         return self._headers
 
     def refresh(self) -> dict[str, str]:
         """Force la régénération, quelle que soit l'expiration annoncée."""
-        self._fetch()
-        return self._headers
+        return self._fetch()
 
     def _is_expiring(self) -> bool:
         if self._expires_at is None:
             return False
         return time.monotonic() >= self._expires_at
 
-    def _fetch(self) -> None:
+    def _fetch(self) -> dict[str, str]:
         if self.signer is not None:
             self._headers, self._expires_at = {}, None
-            return
+            return self._headers
         headers, expires_in = _build_headers(self._config)
         self._headers = headers
         self._expires_at = _renewal_instant(expires_in)
+        return headers
 
 
 def build_auth(auth_config: dict | None) -> tuple[dict[str, str], object | None]:

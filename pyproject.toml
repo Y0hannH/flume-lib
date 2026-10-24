@@ -20,7 +20,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "build>=1.0", "ruff>=0.6"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "build>=1.0",
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "types-requests",
+    "bandit>=1.7",
+]
 # Accès Key Vault hors Fabric (dans Fabric, notebookutils est préinstallé)
 azure = ["azure-identity>=1.15", "azure-keyvault-secrets>=4.8"]
 
@@ -37,4 +45,32 @@ target-version = "py310"
 extend-exclude = ["fabric-wheels", "dist"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B"]
+# C90 : la complexité cyclomatique. `validate_config` avait atteint 86 avant
+# d'être découpée par section ; le plafond empêche d'y retourner.
+select = ["E", "F", "W", "I", "UP", "B", "C90"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.mypy]
+files = ["src"]
+python_version = "3.10"
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+# Fournis par le runtime Fabric ou par l'extra [azure] : absents de l'environnement
+# de développement, et sans stubs publiés.
+[[tool.mypy.overrides]]
+module = ["notebookutils", "azure.*"]
+ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["flume_lib"]
+branch = true
+
+[tool.coverage.report]
+# 96 % mesurés ; le seuil laisse de la marge mais interdit de laisser filer un
+# module entier non testé
+fail_under = 95
+show_missing = true
+skip_covered = true

@@ -43,5 +43,19 @@ jobs:
       - name: Lint
         run: ruff check .
 
+      # `py.typed` est publié : les annotations sont une promesse faite aux
+      # utilisateurs de la lib, pas un décor.
+      - name: Types
+        run: mypy
+
+      # Sévérité moyenne et au-delà. Les constats de niveau « low » (un
+      # `except: pass` assumé, une constante prise pour un mot de passe) sont du
+      # bruit ici ; un constat plus grave doit s'expliquer ou se corriger.
+      - name: Security lint
+        run: bandit -r src -ll -q
+
+      # Le seuil est dans pyproject.toml. `pytest` nu, pas `python -m pytest` :
+      # ce dernier met le répertoire courant sur sys.path et masque les erreurs
+      # d'import que la CI doit attraper.
       - name: Test
-        run: pytest
+        run: pytest --cov

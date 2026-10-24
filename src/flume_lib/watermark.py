@@ -32,7 +32,7 @@ def _watermark_uri(lakehouse_tables_path: str, schema: str) -> str:
     return table_uri(resolved, schema, WATERMARK_TABLE)
 
 
-def _require(name: str, value):
+def _require(name: str, value: str | None) -> str:
     if value is None:
         raise TypeError(f"{name} is required")
     return value
@@ -45,11 +45,12 @@ def read_watermark(
     storage_options: dict | None = None,
 ) -> str | None:
     """Watermark courant d'une source, ou None s'il n'y en a pas."""
-    _require("source_name", source_name)
+    source_name = _require("source_name", source_name)
     uri = _watermark_uri(lakehouse_tables_path, schema)
     rows = query_table(
         uri,
-        "select last_value from wm "
+        # la valeur est citée par `sql_quote` ; le reste est une constante
+        "select last_value from wm "  # nosec B608
         f"where source_name = {sql_quote(source_name)} "
         "order by updated_ts desc limit 1",
         alias="wm",

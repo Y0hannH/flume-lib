@@ -89,6 +89,8 @@ _SCOPES = {
     ("source.py", "_check_response_errors"): "errors",
     ("source.py", "_build_fetch_page"): "config",
     ("source.py", "run_source"): "config",
+    ("source.py", "_run_write"): "config",
+    ("source.py", "_prepare_incremental"): "incremental",
 }
 
 # (module, nom du dict porteur) -> bloc, quand le porteur désigne un autre bloc

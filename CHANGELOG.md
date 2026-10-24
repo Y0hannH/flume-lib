@@ -4,6 +4,17 @@ All notable changes to this project are documented here. Versions follow [semant
 
 ## [Unreleased]
 
+### Changed (code quality — no behavior change)
+
+- **`validate_config` is split by section.** One function of 86 branches and about 390 lines became a short sequence of `_validate_headers`, `_validate_auth`, `_validate_pagination`, `_validate_incremental`, `_validate_write`… each small enough to read. The logic was moved, not rewritten, and the order of the checks — hence the first error a bad config reports — is unchanged: verified against the previous version on 20 000 randomly mutated configs (4 567 valid, 15 316 refused, 117 crashing on a malformed value), with no difference in outcome or message.
+- **`run_source` is shorter.** Reading the watermark into the request, the dry run, the batch write and the `log_runs` row are separate functions. What a run has accomplished is kept in one `_Progress` record updated as it goes, so a run that breaks halfway still reports the rows and the watermark it really reached.
+- **The 17 `mypy` errors are fixed** and `mypy` now runs in CI. The `AuthProvider` methods could return `None`, `watermark._require` did not narrow its argument, `paginate_page` built a partial-page rule without a page size, and deltalake's typed overloads cannot express a mode chosen at run time (two narrow, commented `type: ignore`s).
+- **CI** gains `mypy`, `bandit` (medium severity and above), a 95 % coverage floor, and a cyclomatic-complexity cap of 15 in `ruff`. Coverage is 98 % (it was 96 %): Key Vault access, the failure paths of the token calls, cross-type watermark comparison and the `run_source_windows` guards now have tests.
+
+### Known issue, not fixed
+
+- `validate_config` raises a plain `TypeError` or `AttributeError`, not a `ConfigError`, for a few malformed values it does not check (a list or an object as `auth.type` or `pagination.type`, a number as `params`, `incremental: null`, a list as `pagination.key_param`). `run_source` still reports them as a failed run, but a direct caller catching `ConfigError` would miss them.
+
 ### Added (robustness)
 
 - **`write.column_types`** — `decimal(p,s)`, `date`, `string` imposed on named columns, in every write mode. Amounts were inferred as `double`, dates stayed text. A value that does not fit **fails the run**: Arrow's cast does not — it returns a null for an unreadable text, an exponent form or an overflow, with no error, which for an amount is a silent loss (verified before writing the conversion). Values are therefore validated in Python first; more decimals than the scale are refused rather than rounded; the error names the column and the record position, never the value. `timestamp` is not offered (arro3's cast needs the system tz database).

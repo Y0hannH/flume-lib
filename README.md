@@ -279,12 +279,14 @@ git clone https://github.com/Y0hannH/flume-lib.git
 cd flume-lib
 pip install -e ".[dev]"
 ruff check .
-pytest
+mypy
+bandit -r src -ll -q
+pytest --cov
 ```
 
-Unit tests are fully mocked — no network calls. Python ≥ 3.10 required locally.
+Unit tests are fully mocked — no network calls. Python ≥ 3.10 required locally. `ruff` also caps cyclomatic complexity at 15 per function, `mypy` checks the annotations the wheel publishes (`py.typed`), and `pytest --cov` fails under 95 % coverage (the threshold is in `pyproject.toml`).
 
-[CI](.github/workflows/ci.yml) runs the lint and the suite on 3.10, 3.11 and 3.12 — the three Fabric kernel versions — on every push and pull request, then builds the wheel and checks it carries every module and the `py.typed` marker. A wheel installed offline from the lakehouse only reveals a missing module when a notebook imports it.
+[CI](.github/workflows/ci.yml) runs the lint, the type check, the security lint and the suite on 3.10, 3.11 and 3.12 — the three Fabric kernel versions — on every push and pull request, then builds the wheel and checks it carries every module and the `py.typed` marker. A wheel installed offline from the lakehouse only reveals a missing module when a notebook imports it.
 
 An `audit` job queries [OSV.dev](https://osv.dev) for known vulnerabilities in the runtime dependencies, on every push **and every Monday**. The weekly run is the point: an offline install freezes its versions, so a CVE published after a release would surface nowhere otherwise. See [Verifying a batch](docs/security.md#verifying-a-batch) for the two scripts and what they do — and do not — prove.
 
@@ -292,7 +294,7 @@ An `audit` job queries [OSV.dev](https://osv.dev) for known vulnerabilities in t
 
 1. Bump the version in `pyproject.toml` and `src/flume_lib/__init__.py`, **and the pinned version of the `%pip install` lines** in this README and in `examples/` (`grep -rn "flume-lib==" README.md examples/`). These belong to the release commit, not after the tag: otherwise the tagged tree — and every artifact built from it — tells readers to install the previous version.
 2. Add the version's section to [CHANGELOG.md](CHANGELOG.md), breaking changes first. The release workflow uses it as the release notes and refuses to publish without it.
-3. `ruff check . && pytest`
+3. `ruff check . && mypy && pytest --cov`
 4. Commit the release, then tag that commit: `git tag -a vX.Y.Z`
 5. Add the tagged SHA to the table above (`git rev-list -n1 vX.Y.Z`) in a **separate** commit — a commit cannot contain its own SHA, so this one always lands after the tag. `python scripts/check_readme_shas.py` prints the line to add, and CI fails on the next push if it is missing: v0.10.1 and v0.10.2 were both forgotten here before the check existed
 6. Push branch and tag. Tags are protected against update and deletion: review the tag before pushing, it cannot be moved afterwards
