@@ -260,6 +260,7 @@ Only `decimal(precision,scale)` (precision ≤ 38), `double`, `date` and `string
 | `retry.max_attempts` | 3 | network errors, 429, 5xx, and `errors.retryable_codes`; other 4xx fail at once. A `Retry-After` header wins over backoff (capped by `retry.max_retry_after_seconds`, 300) |
 | `max_response_bytes` | 104 857 600 | cuts one response body off; the run fails |
 | `max_run_seconds` | none | wall-clock limit, checked before each request and between chunks |
+| `max_requests_per_second` | none | at most that many requests start per second (replays included); set it from the API's documented quota, below it, to avoid the 429 rather than handle it. `retry.jitter` (default true) disperses the backoff |
 | `batch_size` | 50 000 | rows per Delta commit; lower it if memory runs out |
 | `single_instance` | false | refuses a second run of the same source while one is going (advisory lock in `run_locks`); `lock_ttl_seconds` (default 21 600) must exceed `max_run_seconds` |
 | `allow_insecure_http`, `allow_literal_secrets` | false | escape hatches for a trusted network / a throwaway test. **Do not set them** unless the human asks. |
@@ -720,7 +721,7 @@ Values of `body` and `headers` in `token_endpoint` are literals **or** reference
 | `EmptyResultError:` | zero rows with `fail_on_empty` | expected if the source was empty |
 | `RunLockedError:` | another run of the source holds the lock (`single_instance`) | wait, or rerun; it expires after `lock_ttl_seconds` |
 | `ResponseTooLargeError:` | a body exceeded `max_response_bytes` | paginate, or raise the cap |
-| `RunTimeoutError:` | `max_run_seconds` exceeded | raise it or narrow the source; written batches stay |
+| `RunTimeoutError:` | `max_run_seconds` exceeded, or `max_requests_per_second` too slow to reach the end of the run within it | raise it or narrow the source; written batches stay |
 | `KeyboardInterrupt:` / `SystemExit:` … `run interrupted before completion` | the notebook was cancelled; the exception is re-raised | none |
 
 Plus, appended after ` | `: `écriture log_runs impossible — …` when the `log_runs` row itself could not be written.
@@ -804,6 +805,7 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `max_run_seconds` | — | — | wall-clock limit for the run; checked before each request and between chunks |
 | `single_instance` | — | — | refuses a second run of the same source while one is going (advisory lock) |
 | `lock_ttl_seconds` | — | — | how long a run's lock lives if the run dies; must exceed `max_run_seconds` |
+| `max_requests_per_second` | — | — | at most this many requests start per second, retries included; per run |
 
 #### `pagination` — common to every strategy
 
@@ -977,6 +979,7 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `max_attempts` | — | `3` |  |
 | `backoff_multiplier` | — | `1` |  |
 | `max_retry_after_seconds` | — | `300` | ceiling on a `Retry-After` the server asks for |
+| `jitter` | — | `true` | spreads the backoff between half and all of the delay; never a `Retry-After` |
 
 #### `errors`
 

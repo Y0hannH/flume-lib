@@ -2,6 +2,8 @@
 d'exception vers l'appelant."""
 
 import json
+import random
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -299,11 +301,25 @@ def _parse_retry_after(raw: str | None) -> float | None:
 def _build_wait(retry_config: dict):
     """Attente entre deux tentatives : le Retry-After annoncé par le serveur
     s'il y en a un, sinon le backoff exponentiel. Respecter l'indication du
-    serveur évite le bannissement sur les APIs à gouvernance stricte."""
-    fallback = wait_exponential(multiplier=retry_config.get("backoff_multiplier", 1))
+    serveur évite le bannissement sur les APIs à gouvernance stricte.
+
+    Le backoff est dispersé (`retry.jitter`, vrai par défaut) : entre la moitié
+    du délai et le délai plein. Des sources lancées ensemble — `run_sources` —
+    qui reçoivent un 429 au même instant se représenteraient sinon toutes au
+    même instant, et retomberaient ensemble sur le même 429. La moitié fixe
+    garde un délai réel : un tirage dans [0, délai] pouvait rejouer aussitôt."""
+    exponential = wait_exponential(multiplier=retry_config.get("backoff_multiplier", 1))
+    jitter = retry_config.get("jitter", True)
     cap = retry_config.get(
         "max_retry_after_seconds", DEFAULT_MAX_RETRY_AFTER_SECONDS
     )
+
+    def fallback(retry_state):
+        delay = exponential(retry_state)
+        if jitter:
+            # dispersion des clients, pas de la cryptographie
+            return delay / 2 + random.uniform(0, delay / 2)  # nosec B311
+        return delay
 
     def wait(retry_state):
         outcome = retry_state.outcome
@@ -313,6 +329,39 @@ def _build_wait(retry_config: dict):
         return fallback(retry_state)
 
     return wait
+
+
+class _Throttle:
+    """Espace les requêtes d'un run : au plus `per_second` départs par seconde.
+
+    Le 429 réactif arrive après le dépassement, et sur une API à gouvernance
+    stricte c'est le dépassement qui est sanctionné. Chaque *tentative* passe
+    par ici, rejeux compris. Une requête dont le départ tomberait au-delà de
+    l'échéance du run échoue tout de suite, sans dormir jusque-là pour rien.
+    Un compteur par run — des sources parallèles ont chacune le leur : un quota
+    partagé entre elles se règle avec `max_workers`."""
+
+    def __init__(self, per_second: float | None):
+        # None : pas de limite, `wait` ne fait rien
+        self._interval = 1.0 / per_second if per_second else None
+        self._next = 0.0
+        self._lock = threading.Lock()
+
+    def wait(self, deadline: float | None = None, limit: float | None = None) -> None:
+        if self._interval is None:
+            return
+        with self._lock:
+            now = time.monotonic()
+            start = max(now, self._next)
+            self._next = start + self._interval
+        if deadline is not None and start >= deadline:
+            raise RunTimeoutError(
+                f"max_requests_per_second would delay the next request past "
+                f"max_run_seconds ({limit:g} s) — stopped before reaching the "
+                "end of the source. Rows already written stay in the table."
+            )
+        if start > now:
+            time.sleep(start - now)
 
 
 _RETRYABLE_EXCEPTIONS = (
@@ -526,6 +575,7 @@ def _build_fetch_page(
     errors_config = config.get("errors")
     # ce que le run a coûté en appels : pages reçues, requêtes rejouées
     stats = {"pages": 0, "retries": 0}
+    throttle = _Throttle(config.get("max_requests_per_second"))
 
     def _count_retry(retry_state) -> None:
         stats["retries"] += 1
@@ -562,6 +612,8 @@ def _build_fetch_page(
             renewed = auth.headers()
             session.headers.update(renewed)
             auth_header_names.update(renewed)
+        # la cadence d'abord : l'attente qu'elle impose compte dans l'échéance
+        throttle.wait(deadline, run_limit)
         # avant tout appel, retries compris : l'échéance du run n'est pas
         # rejouable. `stream` : le corps est lu par morceaux, sous plafond.
         _check_deadline(deadline, run_limit)

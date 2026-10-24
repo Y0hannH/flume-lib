@@ -43,6 +43,7 @@ Looking something up rather than reading through? [cookbook.md](cookbook.md) map
 | `fail_on_empty` | boolean | no | `false` | Fails the run when it loads no row — before the watermark moves. See [Incremental](#incremental-watermark). |
 | `max_response_bytes` | integer | no | `104857600` (100 MiB) | Largest accepted body for one data response. See [Limits on a run](#limits-on-a-run). |
 | `max_run_seconds` | number | no | none | Wall-clock limit for the whole run. See [Limits on a run](#limits-on-a-run). |
+| `max_requests_per_second` | number | no | none | Spaces the requests of a run: at most that many start per second. See [Request rate](#request-rate). |
 | `single_instance` | boolean | no | `false` | Refuses a second run of the same source while one is going. See [One run at a time](#one-run-at-a-time). |
 | `lock_ttl_seconds` | number | no | `21600` (6 h) | How long the lock of a run that died lasts. Only with `single_instance`. |
 | `allow_literal_secrets` | boolean | no | `false` | Accepts a literal string where a secret is expected (`auth.token`, `auth.client_secret`, a credential header…). Refused by default — see [Secret references](#secret-references). For a throwaway local test only. |
@@ -367,6 +368,7 @@ They make it possible to trace a row back to the run that produced it, de-duplic
 Two bounds, because `requests`' `timeout` is neither.
 
 - **`max_response_bytes`** (default 100 MiB) caps the body of **one data response**. The body is read as a stream: a `Content-Length` above the cap is refused before a byte is read, and a body without one is cut off as soon as it passes the cap — the library no longer loads whatever the server decides to send. The decompressed size counts, so a compressed bomb is stopped too. A page is a few megabytes, so the default only ever trips on an API that does not paginate; lower it to what your largest page needs. The body of a `4xx` is read the same way: only its first 16 KiB, of which the message keeps 500 characters.
+- **`max_requests_per_second`** (default: none) is a ceiling on the rate of a run, see [Request rate](#request-rate).
 - **`max_run_seconds`** (default: none) is a wall-clock limit for the run. `timeout_seconds` bounds the silence **between two bytes**, not the total: a server that sends one byte every 50 seconds keeps a request open for as long as it likes. The deadline is checked before every request (retries included) and after every chunk read, so it also stops such a drip. It does not interrupt a request in flight beyond that: a run can overrun by one chunk read or one backoff wait. The failure is an ordinary failed run — batches already written stay, and with `checkpoint` the next run resumes.
 
 Both apply to **data calls**. The token calls keep their own `timeout_seconds` and read their (small) body whole.
@@ -1044,10 +1046,25 @@ Runnable incremental sources: query param in [examples/rest_api_paginated.py](..
 | `max_attempts` | `3` | Total attempts per request. |
 | `backoff_multiplier` | `1` | Exponential backoff multiplier (tenacity `wait_exponential`). |
 | `max_retry_after_seconds` | `300` | Ceiling on a server-provided `Retry-After` delay. |
+| `jitter` | `true` | Spreads the exponential backoff between half the delay and the full delay. `false` for the exact delay. |
 
 Retried: network errors (connection, timeout), HTTP 429 and 5xx, and application errors whose code appears in [`errors.retryable_codes`](#application-errors-in-a-200). **Not retried**: other 4xx (401, 403, 404…) and any other application error — they fail immediately. Applies to data calls; the token call (`oauth2_client_credentials`/`token_endpoint`) is not retried.
 
 `max_attempts` bounds every one of those causes alike, so an API answering "transient" forever costs at most `max_attempts` calls per page, not an unbounded loop.
+
+The backoff is **dispersed** by default: each wait is drawn between half of the exponential delay and all of it. Sources started together — `run_sources` — that all receive a 429 at the same instant would otherwise come back at the same instant, and meet the same 429 again. The half that is fixed keeps a real delay: a draw from zero could replay at once. A server's `Retry-After` is never dispersed — it is an instruction, not a guess.
+
+### Request rate
+
+The 429 is handled after the limit has been crossed, and on an API with strict governance it is the crossing that is punished. `max_requests_per_second` spaces the requests instead:
+
+```json
+"max_requests_per_second": 2
+```
+
+One request every 0.5 s, the first one immediately. Every *attempt* counts, replays included, so a retried page does not burst. Idle time is not banked: after a pause the next requests do not leave in a burst. The counter belongs to a run — sources running in parallel under `run_sources` each have their own, so a quota shared between them is settled with `max_workers`. The token calls of `oauth2_client_credentials` and `token_endpoint` are not throttled.
+
+The wait counts against `max_run_seconds`: a request whose turn would come after the deadline fails the run at once (`RunTimeoutError`), rather than sleeping until then to fail anyway.
 
 When the response carries a `Retry-After` header (seconds or an HTTP date), that delay is used instead of the exponential backoff — APIs with strict governance ban clients that retry earlier than they were told to. The delay is capped at `max_retry_after_seconds`; beyond the cap the wait is truncated and the next attempt will most likely fail, which surfaces as a `failed` run in `log_runs` rather than a notebook hanging for an hour.
 

@@ -354,6 +354,7 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `max_run_seconds` | — | — | wall-clock limit for the run; checked before each request and between chunks |
 | `single_instance` | — | — | refuses a second run of the same source while one is going (advisory lock) |
 | `lock_ttl_seconds` | — | — | how long a run's lock lives if the run dies; must exceed `max_run_seconds` |
+| `max_requests_per_second` | — | — | at most this many requests start per second, retries included; per run |
 
 #### `pagination` — common to every strategy
 
@@ -527,6 +528,7 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `max_attempts` | — | `3` |  |
 | `backoff_multiplier` | — | `1` |  |
 | `max_retry_after_seconds` | — | `300` | ceiling on a `Retry-After` the server asks for |
+| `jitter` | — | `true` | spreads the backoff between half and all of the delay; never a `Retry-After` |
 
 #### `errors`
 

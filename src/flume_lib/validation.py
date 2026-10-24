@@ -24,6 +24,7 @@ _OPTIONAL = (
     "errors", "template_paths", "batch_size", "write", "allow_body_on_get",
     "fail_on_empty", "allow_insecure_http", "allow_literal_secrets",
     "max_response_bytes", "max_run_seconds", "single_instance", "lock_ttl_seconds",
+    "max_requests_per_second",
 )
 
 # Clés autorisées par type d'auth. Les formes historiques *_env_var sont
@@ -107,7 +108,7 @@ _INCREMENTAL_KEYS = (
 _INCREMENTAL_INJECTS = ("query_param", "body_template")
 _INCREMENTAL_WINDOW_KEYS = ("upper_param", "upper_value")
 _INCREMENTAL_ADVANCES = ("field_max", "field_max_capped", "upper_bound")
-_RETRY_KEYS = ("max_attempts", "backoff_multiplier", "max_retry_after_seconds")
+_RETRY_KEYS = ("max_attempts", "backoff_multiplier", "max_retry_after_seconds", "jitter")
 
 # Champs d'auth dont la valeur est un secret : une chaîne littérale y est
 # refusée. Les identifiants publics (client_id, username, consumer_key) n'y
@@ -403,6 +404,7 @@ def _validate_top_level(config: dict) -> _Flags:
     _check_number("config", config, "timeout_seconds", integer=False)
     _check_number("config", config, "max_response_bytes")
     _check_number("config", config, "max_run_seconds", integer=False)
+    _check_number("config", config, "max_requests_per_second", integer=False)
     _check_number("config", config, "lock_ttl_seconds", integer=False)
     if not isinstance(config.get("single_instance", False), bool):
         raise ConfigError("config: 'single_instance' must be a boolean")
@@ -961,6 +963,8 @@ def _validate_retry(config: dict) -> None:
         "retry", retry, "max_retry_after_seconds",
         integer=False, allow_zero=True,
     )
+    if not isinstance(retry.get("jitter", True), bool):
+        raise ConfigError("retry: 'jitter' must be a boolean")
 
 
 def validate_config(config: dict) -> None:
