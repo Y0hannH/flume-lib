@@ -54,6 +54,11 @@ LINEAGE_INGESTED_AT = "_flume_ingested_at"
 
 DRY_RUN_SAMPLE_SIZE = 3
 
+# Préfixe du montage local du lakehouse par défaut : delta-rs ne peut pas y
+# commiter. `resolve_lakehouse_tables_path` le remplace par une URI ABFSS ; s'il
+# est encore là après la résolution, la résolution a échoué.
+LOCAL_LAKEHOUSE_PREFIX = "/lakehouse/default/"
+
 # Modes d'écriture passés à delta-rs. Les trois modes de config (append,
 # overwrite, replace_where) se ramènent à ces deux-là : un remplacement de
 # fenêtre est un overwrite porteur d'un prédicat. "append" reste le défaut,
@@ -603,6 +608,7 @@ class _BatchWriter:
         self._replace_where = write.get("replace_where")
         self._partition_by = write.get("partition_by")
         self._merge_keys = write.get("merge_keys")
+        self._column_types = write.get("column_types")
         # Consommé par le premier lot : voir _delta_write_args.
         self._replacement_pending = self._write_mode in _REPLACING_MODES
 
@@ -725,6 +731,7 @@ class _BatchWriter:
                 partition_by=self._partition_by,
                 storage_options=self._storage_options,
                 known_types=self._types,
+                column_types=self._column_types,
             )
             self.rows_inserted += inserted
             self.rows_updated += updated
@@ -735,6 +742,7 @@ class _BatchWriter:
                 **self._delta_write_args(),
                 storage_options=self._storage_options,
                 known_types=self._types,
+                column_types=self._column_types,
             )
         self._types.update(types)
         for message in fallbacks:
@@ -911,11 +919,26 @@ def run_source(
     window_end = None
     rows_inserted = None
     rows_updated = None
+    # Annulation (KeyboardInterrupt de Fabric, SystemExit…) : le run est
+    # consigné comme échoué, puis l'interruption est relancée à l'appelant.
+    interrupted: BaseException | None = None
 
     try:
         lakehouse_tables_path = resolve_lakehouse_tables_path(lakehouse_tables_path)
     except Exception:  # noqa: BLE001
         pass
+    if (
+        not dry_run
+        and isinstance(lakehouse_tables_path, str)
+        and lakehouse_tables_path.startswith(LOCAL_LAKEHOUSE_PREFIX)
+    ):
+        warnings.append(
+            f"lakehouse path '{lakehouse_tables_path}' was not resolved to an "
+            "ABFSS URI (outside Fabric, or the notebook context does not expose "
+            "the default lakehouse). The local mount does not support the Delta "
+            "commit: writes will probably fail with 'os error 1'. Pass "
+            "lakehouse_tables_path explicitly (abfss://…)."
+        )
 
     try:
         validate_config(config)
@@ -1029,6 +1052,12 @@ def run_source(
         status = "success"
     except Exception as exc:  # noqa: BLE001 — contrat : ne jamais lever
         error_message = f"{type(exc).__name__}: {exc}"
+    except BaseException as exc:  # noqa: BLE001 — consigné, puis relancé
+        # Sans cela, un notebook annulé en cours de route laissait des lots
+        # écrits (et, avec `checkpoint`, un watermark avancé) sans la moindre
+        # ligne dans log_runs : l'état de la table ne s'expliquait plus.
+        interrupted = exc
+        error_message = f"{type(exc).__name__}: run interrupted before completion"
     finally:
         session = getattr(fetch_page, "session", None)
         if session is not None:
@@ -1058,6 +1087,8 @@ def run_source(
     )
 
     if dry_run:
+        if interrupted is not None:
+            raise interrupted
         return result
 
     try:
@@ -1079,4 +1110,6 @@ def run_source(
             f"{error_message} | {log_error}" if error_message else log_error
         )
 
+    if interrupted is not None:
+        raise interrupted
     return result

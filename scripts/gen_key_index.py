@@ -315,6 +315,11 @@ _NOTES = {
         "lets a GET carry a body — refused by default, most APIs ignore it",
     ("config", "fail_on_empty"):
         "fails the run when no row was loaded, before the watermark moves",
+    ("write", "column_types"):
+        "imposed types: `decimal(p,s)`, `date`, `string`; a value that does not fit fails the run",
+    ("auth.oauth2_client_credentials", "urlencode_credentials"):
+        "form-urlencodes id and secret in the Basic header (RFC 6749 §2.3.1); "
+        'needs `"client_auth": "basic"`',
     ("config", "allow_literal_secrets"):
         "lifts the refusal of a literal secret in `auth` — throwaway tests only",
     ("config", "allow_insecure_http"):

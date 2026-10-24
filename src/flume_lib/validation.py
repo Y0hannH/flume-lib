@@ -9,6 +9,7 @@ import difflib
 import re
 from urllib.parse import urlsplit
 
+from flume_lib._delta import parse_column_type
 from flume_lib.auth import CLIENT_AUTH_MODES
 from flume_lib.oauth1 import SIGNATURE_METHODS
 from flume_lib.templating import NORMALIZERS, VALUE_FORMATS, templated_placeholders
@@ -34,7 +35,7 @@ _AUTH_KEYS = {
     "oauth2_client_credentials": (
         "token_url", "tenant_id", "client_id", "client_secret",
         "client_id_env_var", "client_secret_env_var", "scope", "client_auth",
-        "timeout_seconds",
+        "urlencode_credentials", "timeout_seconds",
     ),
     "token_endpoint": (
         "token_url", "method", "body", "body_format", "headers",
@@ -127,7 +128,10 @@ _SENSITIVE_NAME_RE = re.compile(
 
 _LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 
-_WRITE_KEYS = ("mode", "replace_where", "partition_by", "merge_keys", "when_matched")
+_WRITE_KEYS = (
+    "mode", "replace_where", "partition_by", "merge_keys", "when_matched",
+    "column_types",
+)
 _WRITE_MODES = ("append", "overwrite", "replace_where", "merge")
 _WRITE_WHEN_MATCHED = ("update",)
 
@@ -458,6 +462,14 @@ def validate_config(config: dict) -> None:
                     f"auth: unknown 'client_auth' '{client_auth}' — "
                     f"expected one of: {known}"
                 )
+            if "urlencode_credentials" in auth:
+                if not isinstance(auth["urlencode_credentials"], bool):
+                    raise ConfigError("auth: 'urlencode_credentials' must be a boolean")
+                if client_auth != "basic":
+                    raise ConfigError(
+                        "auth: 'urlencode_credentials' encodes the Basic header and "
+                        'only makes sense with "client_auth": "basic"'
+                    )
         if auth_type == "token_endpoint":
             token_method = str(auth.get("method", "POST")).upper()
             if token_method == "GET" and any(
@@ -725,6 +737,20 @@ def validate_config(config: dict) -> None:
                         f"write: '{key}' is ignored with \"mode\": \"{mode}\" — "
                         "set \"mode\": \"merge\" for it to be applied"
                     )
+        column_types = write.get("column_types")
+        if column_types is not None:
+            if not isinstance(column_types, dict) or not column_types:
+                raise ConfigError(
+                    "write: 'column_types' must be a non-empty object mapping a "
+                    'column name to a type, e.g. {"amount": "decimal(18,4)"}'
+                )
+            for column, spec in column_types.items():
+                if not isinstance(column, str) or not column:
+                    raise ConfigError("write: 'column_types' keys must be column names")
+                try:
+                    parse_column_type(spec)
+                except ValueError as exc:
+                    raise ConfigError(f"write: column_types['{column}']: {exc}") from None
         partition_by = write.get("partition_by")
         if partition_by is not None:
             if not isinstance(partition_by, (list, tuple)) or not partition_by:

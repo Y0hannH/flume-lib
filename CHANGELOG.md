@@ -4,6 +4,21 @@ All notable changes to this project are documented here. Versions follow [semant
 
 ## [Unreleased]
 
+### Added (robustness)
+
+- **`write.column_types`** — `decimal(p,s)`, `date`, `string` imposed on named columns, in every write mode. Amounts were inferred as `double`, dates stayed text. A value that does not fit **fails the run**: Arrow's cast does not — it returns a null for an unreadable text, an exponent form or an overflow, with no error, which for an amount is a silent loss (verified before writing the conversion). Values are therefore validated in Python first; more decimals than the scale are refused rather than rounded; the error names the column and the record position, never the value. `timestamp` is not offered (arro3's cast needs the system tz database).
+- **`auth.urlencode_credentials`** (with `client_auth: "basic"`) form-urlencodes the id and the secret as RFC 6749 §2.3.1 specifies. Off by default: some IdPs read the header undecoded and a default would break working configurations.
+- **A warning when the lakehouse path was not resolved to an ABFSS URI** — writes through the local mount fail with `os error 1`, which did not say why.
+
+### Fixed (robustness)
+
+- **A token with a short lifetime is no longer fetched again before every request.** The renewal margin was a fixed 60 s: a token announcing 30 s was expired on arrival. The margin is now 10 % of the lifetime, at most 60 s. A lifetime of zero or less is treated as unknown.
+- **An interrupted run leaves a trace.** `KeyboardInterrupt` and `SystemExit` were not caught, so a cancelled notebook wrote no `log_runs` row although batches — and, with `checkpoint`, the watermark — were already committed. The run is logged as `failed` with the rows really written, the session is closed, and the interruption is raised again. Ordinary errors are unchanged: they still never raise.
+
+### Documentation (robustness)
+
+- `docs/configuration.md`: "Typed columns", "Interrupted runs", "Unresolved lakehouse path", the token margin, `urlencode_credentials`, and a **measurement of `merge`**: on a 1 M-row table, one batch rewrote every file (950 000 rows copied) — its cost follows the table, not the batch. Local filesystem only; OneLake not measured.
+
 Security hardening of the places where the library trusts its inputs: the configuration, the API's next-page link, and the messages it writes to a table everyone with lakehouse access can read. Found by a code audit; each point was reproduced before it was fixed.
 
 ### Changed — breaking
