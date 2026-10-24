@@ -4,6 +4,7 @@ Mesuré sur la pile installée : huit écrivains qui créent la même table en m
 temps, six commits refusés (`Failed to commit transaction: Protocol changed
 since last commit`). Rien n'avait été écrit : rejouer est sûr."""
 
+import sys
 import threading
 
 import pytest
@@ -109,6 +110,12 @@ class TestWritesUnderContention:
             write_records(str(tmp_path / "t"), [{"n": 1}])
         assert f"{COMMIT_ATTEMPTS} attempts were not enough" in str(caught.value)
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="le système de fichiers local de Windows refuse parfois l'ouverture d'un "
+        "fichier du journal qu'un autre thread est en train d'écrire (os error 5) : "
+        "une particularité de ce test, absente de Linux et d'OneLake",
+    )
     def test_concurrent_merges_on_one_table_all_apply(self, tmp_path):
         uri = str(tmp_path / "bronze" / "merged")
         write_records(uri, [{"id": -1, "v": 0}])
