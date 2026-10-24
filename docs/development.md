@@ -42,6 +42,8 @@ Dependabot proposes updates to the GitHub Actions (pinned by commit SHA), to the
 
 [`docs/cookbook.md`](cookbook.md) and [`docs/agent-cookbook.md`](agent-cookbook.md) each carry a key reference between `BEGIN GENERATED KEY INDEX` and `END GENERATED KEY INDEX`. It is written by [`scripts/gen_key_index.py`](../scripts/gen_key_index.py) from the validator and from the defaults read in the implementation. Do not edit it by hand: after adding or changing a config key, run `python scripts/gen_key_index.py` and commit the result.
 
+`tests/test_examples.py` does the same for [`examples/`](../examples/): every config an example builds validates, the examples pin the current version, and every configuration key, public function and `run_source` parameter is shown by at least one of them — so a new option has to land in an example or the build fails.
+
 `tests/test_security_notes.py` ties [security.md](security.md) to what it describes: the numbers it quotes equal the constants in the code, every workflow action is pinned by SHA, the release is attested and built with hashed tools, the lockfiles carry hashes, and the weekly audit reads the lockfile. `tests/test_docs.py` also checks the documentation: every complete config in the agent cookbook validates, every Python block parses and imports only names the package exports, every relative link and anchor in the README and `docs/` resolves, and the pinned `flume-lib==X.Y.Z` of the install lines equals the package version.
 
 ## Release procedure

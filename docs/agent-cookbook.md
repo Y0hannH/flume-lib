@@ -13,7 +13,7 @@
 3. **Never write a secret in the config.** A credential is a reference — `{"env_var": "NAME"}` or `{"keyvault_url": "https://<vault>.vault.azure.net", "secret_name": "<name>"}` — never a literal. A literal in a secret field is refused by validation. Public identifiers (`client_id`, `username`, `consumer_key`, `tenant_id`) may be literals.
 4. **Run `run_source(config, dry_run=True)` before the first real run.** It calls the API for real (credentials, pagination, response shape) and writes nothing: no data, no watermark, no `log_runs` row.
 5. **`run_source` never raises on a source problem.** A failure is a `RunResult` with `status == "failed"` and a message in `error_message`. **Check `status`, and read `warnings` on a `success`.** (It does re-raise `KeyboardInterrupt` and `SystemExit`, after logging the run.)
-6. **A notebook that ignores `status` always ends green.** After the loop, raise if any source failed, so the Fabric pipeline sees the failure.
+6. **A notebook that ignores `status` always ends green.** Run the sources with `run_sources(...)` and end with `outcome.raise_for_failures()`, so the Fabric pipeline sees a failure.
 7. **Give every source a stable `name`.** The watermark and `log_runs` are keyed on it; a renamed source restarts from `initial_value`.
 8. **State the reload strategy explicitly.** The default is **append**: rerunning a source duplicates its rows. For a table that mirrors the source use `"write": {"mode": "overwrite"}`; for a changed-object feed use `merge` ([section 4.5](#45-reload-strategy)).
 9. **Do not assume an API's pagination or auth — read its documentation or ask.** [Section 4.1](#41-questions-to-ask-the-human-when-the-answer-is-not-in-the-api-documentation) lists what to ask.
@@ -648,7 +648,9 @@ Values of `body` and `headers` in `token_endpoint` are literals **or** reference
   "write": {
     "mode": "merge",
     "merge_keys": ["entry_id"],
-    "column_types": {"amount": "decimal(18,4)", "booked_on": "date", "entry_id": "string"}
+    "column_types": {
+      "amount": "decimal(18,4)", "fx_rate": "double", "booked_on": "date", "entry_id": "string"
+    }
   },
   "target_schema": "finance",
   "target_table": "ledger_entries"
@@ -679,6 +681,7 @@ Values of `body` and `headers` in `token_endpoint` are literals **or** reference
   "lock_ttl_seconds": 14400,
   "max_run_seconds": 7200,
   "max_response_bytes": 52428800,
+  "max_requests_per_second": 5,
   "target_schema": "bronze",
   "target_table": "orders"
 }
@@ -704,6 +707,10 @@ Values of `body` and `headers` in `token_endpoint` are literals **or** reference
 | `window_end` | with `incremental.window`: the upper bound sent |
 | `rows_inserted`, `rows_updated` | `merge` only; `rows_loaded` stays "rows processed" |
 | `pages`, `retries`, `token_renewals`, `duration_seconds` | what the run cost: data responses received, requests replayed, tokens obtained again, seconds. All are also columns of `log_runs`, with `target_table`, `write_mode` and `lib_version` |
+
+### 6.1b `SourcesResult` (from `run_sources`)
+
+`results` (input order), `succeeded`, `failed`, `skipped` (names of sources never started under `stop_on_failure`), `rows_loaded`, `duration_seconds`, `ok` (all succeeded, none skipped), `summary()` / `str()`, and `raise_for_failures()` which raises `RunSourcesError` (`.outcome` holds the whole `SourcesResult`).
 
 ### 6.2 `error_message` prefixes
 
@@ -737,6 +744,8 @@ Plus, appended after ` | `: `écriture log_runs impossible — …` when the `lo
 - *column '…': text according to a previous batch…* / *values not representable as …, written as text* — a column was frozen to or degraded to text; the typing section of [configuration.md](configuration.md#column-types-in-delta) explains.
 - *lakehouse path '…' was not resolved to an ABFSS URI* — pass `lakehouse_tables_path` as `abfss://…`.
 - *the run lock could not be released* — it expires on its own.
+- *column '…': text in the table, but this batch holds … values — they are written as text* — the table's column is text; the batch's numbers were converted.
+- *on_progress raised … and was disabled for the rest of the run* — your callback failed; the run itself was not affected.
 - *incremental: the new watermark … cannot be compared with the stored one* — fix the stored value or set `allow_regression`.
 
 ---
@@ -764,6 +773,9 @@ compact_technical_tables()                                    # weekly, between 
 
 - No XML/CSV/SOAP, no asynchronous export APIs, no exactly-once.
 - No `timestamp` column type; no flattening of nested JSON.
+- No SOCKS proxy, and no way to turn TLS verification off (`ca_bundle` names the authority to trust instead).
+- `max_requests_per_second` is per run: sources running in parallel under `run_sources` each have their own counter.
+- A batch that does not fit an existing table's column type **fails the run**; the library never coerces it.
 - `single_instance` is advisory: it only holds if every run of the source asks for it, and two simultaneous starts may both be refused.
 - Reaching `max_pages`/`max_rows` fails the run by design.
 - An API whose credential must be in the URL query string cannot be configured safely.

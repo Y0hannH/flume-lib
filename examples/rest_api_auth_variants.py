@@ -239,6 +239,13 @@ UMBRELLA = {
     # T-60s and a backfill longer than an hour survives.
 }
 
+# RFC 6749 section 2.3.1 says the id and the secret are form-urlencoded *before*
+# they are Base64-encoded into the Basic header. A secret holding `:`, `+` or
+# `%` is read wrongly by an IdP that follows the RFC. Many IdPs read the header
+# raw instead, and encoding for them would break a configuration that works —
+# which is why `urlencode_credentials` is opt-in. Needs `client_auth: "basic"`.
+STRICT_RFC_IDP = {**UMBRELLA, "urlencode_credentials": True}
+
 # The same flow with both credentials from the environment, and a timeout on
 # the token call. The client id is rarely secret — a literal is acceptable for
 # it; the client secret never is, whichever form it takes.

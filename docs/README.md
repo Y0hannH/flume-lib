@@ -10,7 +10,7 @@ Technical documentation for [flume-lib](../README.md). Start from the document t
 | [install.md](install.md) | Operators | Requirements, offline wheel install, GitHub install, OneLake specifics. |
 | [security.md](security.md) | Security reviewers | Threat model, supply chain, secrets, network, resource limits, how to report a vulnerability. |
 | [development.md](development.md) | Contributors | Checks to run, what CI does, release procedure. |
-| [`../examples/`](../examples/) | Everyone | Complete Fabric notebooks: every auth type, every pagination strategy, every write mode, the `run_source` parameters. |
+| [`../examples/`](../examples/) | Everyone | Complete Fabric notebooks: every auth type, every pagination strategy, every write mode, date windows and merge, limits and proxy, the `run_source` parameters and the functions around it. |
 | [`../CHANGELOG.md`](../CHANGELOG.md) | Everyone | Version history, breaking changes first. |
 
-`agent-cookbook.md` and the key index of `cookbook.md` are checked by CI against the code: a config in the agent cookbook that stopped validating, or a key that drifted, fails the build.
+`agent-cookbook.md` and the key index of `cookbook.md` are checked by CI against the code: a config in the agent cookbook that stopped validating, or a key that drifted, fails the build. So are the examples: every config they build validates, and every configuration key and public function appears in at least one of them.
