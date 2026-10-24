@@ -1,0 +1,31 @@
+# Les actions sont épinglées par SHA (voir docs/security.md) : un SHA ne bouge
+# jamais, donc rien ne les met à jour sauf ceci. Dependabot propose le nouveau
+# SHA et le commentaire de version dans une PR relue comme n'importe quelle autre.
+#
+# Le lot de wheels hors ligne est construit depuis requirements/runtime.txt, un
+# fichier à hashes : une dépendance qui change est un diff relu, pas une
+# résolution faite le jour de la release.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Les bornes déclarées dans pyproject.toml (dépendances et outils de dev)
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+
+  # Le lockfile à hashes de l'installation hors ligne
+  - package-ecosystem: pip
+    directory: "/requirements"
+    schedule:
+      interval: weekly
+      day: monday

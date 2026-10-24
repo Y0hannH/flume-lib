@@ -293,11 +293,12 @@ An `audit` job queries [OSV.dev](https://osv.dev) for known vulnerabilities in t
 ### Release procedure
 
 1. Bump the version in `pyproject.toml` and `src/flume_lib/__init__.py`, **and the pinned version of the `%pip install` lines** in this README and in `examples/` (`grep -rn "flume-lib==" README.md examples/`). These belong to the release commit, not after the tag: otherwise the tagged tree — and every artifact built from it — tells readers to install the previous version.
-2. Add the version's section to [CHANGELOG.md](CHANGELOG.md), breaking changes first. The release workflow uses it as the release notes and refuses to publish without it.
-3. `ruff check . && mypy && pytest --cov`
-4. Commit the release, then tag that commit: `git tag -a vX.Y.Z`
-5. Add the tagged SHA to the table above (`git rev-list -n1 vX.Y.Z`) in a **separate** commit — a commit cannot contain its own SHA, so this one always lands after the tag. `python scripts/check_readme_shas.py` prints the line to add, and CI fails on the next push if it is missing: v0.10.1 and v0.10.2 were both forgotten here before the check existed
-6. Push branch and tag. Tags are protected against update and deletion: review the tag before pushing, it cannot be moved afterwards
+2. If the dependencies should move, refresh the lockfile — `uv pip compile pyproject.toml --universal --python-version 3.10 --generate-hashes --no-header --upgrade -o requirements/runtime.txt` — and review the diff: it is the list of what will enter the offline bundle. Dependabot proposes the same weekly. CI fails when the lockfile and `pyproject.toml` disagree.
+3. Add the version's section to [CHANGELOG.md](CHANGELOG.md), breaking changes first. The release workflow uses it as the release notes and refuses to publish without it.
+4. `ruff check . && mypy && pytest --cov`
+5. Commit the release, then tag that commit: `git tag -a vX.Y.Z`
+6. Add the tagged SHA to the table above (`git rev-list -n1 vX.Y.Z`) in a **separate** commit — a commit cannot contain its own SHA, so this one always lands after the tag. `python scripts/check_readme_shas.py` prints the line to add, and CI fails on the next push if it is missing: v0.10.1 and v0.10.2 were both forgotten here before the check existed
+7. Push branch and tag. Tags are protected against update and deletion: review the tag before pushing, it cannot be moved afterwards
 7. Pushing the tag triggers [the release workflow](.github/workflows/release.yml): it builds one offline batch **per Fabric kernel version** (3.10, 3.11, 3.12), verifies each one, and publishes the GitHub Release with the three zips and the wheel attached, using the CHANGELOG section as its notes. Nothing to build by hand.
 
    A batch must be built by the interpreter of the version it targets — `pip download --python-version` only drives wheel tags and `Requires-Python`, never environment markers — which is why there is one runner per version rather than one runner for three batches. Building a 3.11 batch from a 3.12 machine silently drops `typing-extensions`, and the offline install then fails at the client. `build_fabric_wheels.py` refuses that combination by default.

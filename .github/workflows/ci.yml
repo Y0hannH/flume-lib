@@ -31,12 +31,12 @@ jobs:
   readme-shas:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # l'historique complet et les tags : le contrôle les compare à HEAD
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
@@ -51,9 +51,9 @@ jobs:
   key-index:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
           cache: pip
@@ -66,12 +66,36 @@ jobs:
       - name: Key index matches the code
         run: python scripts/gen_key_index.py --check
 
+  # requirements/runtime.txt fige les versions (et les hashes) de ce qui part chez
+  # le client. Une dépendance changée dans pyproject.toml sans que le lockfile
+  # suive donnerait un lot de wheels qui ne correspond plus à ce que le code
+  # déclare. `uv pip compile` repart du fichier existant : il ne bouge que ce que
+  # pyproject.toml impose, et la mise à jour d'une version est un geste explicite.
+  lockfile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install uv
+        run: pip install uv==0.13.5
+
+      - name: Lockfile matches pyproject.toml
+        run: |
+          uv pip compile pyproject.toml --universal --python-version 3.10 \
+            --generate-hashes --no-header -o requirements/runtime.txt
+          git diff --exit-code requirements/runtime.txt
+
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
           cache: pip
@@ -87,9 +111,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: tests
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
           cache: pip
@@ -116,7 +140,7 @@ jobs:
           print(f"{wheel.name} : {len(modules)} modules + py.typed")
           PY
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wheel
           path: dist/*.whl
