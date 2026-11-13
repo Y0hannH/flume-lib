@@ -25,7 +25,7 @@ _OPTIONAL = (
     "errors", "template_paths", "batch_size", "write", "allow_body_on_get",
     "fail_on_empty", "allow_insecure_http", "allow_literal_secrets",
     "max_response_bytes", "max_run_seconds", "single_instance", "lock_ttl_seconds",
-    "max_requests_per_second", "proxy", "ca_bundle",
+    "max_requests_per_second", "proxy", "ca_bundle", "persist_cookies",
 )
 
 # Clés autorisées par type d'auth. Les formes historiques *_env_var sont
@@ -415,6 +415,8 @@ def _validate_top_level(config: dict) -> _Flags:
     fail_on_empty = config.get("fail_on_empty", False)
     if not isinstance(fail_on_empty, bool):
         raise ConfigError("config: 'fail_on_empty' must be a boolean")
+    if not isinstance(config.get("persist_cookies", True), bool):
+        raise ConfigError("config: 'persist_cookies' must be a boolean")
     for flag in ("allow_insecure_http", "allow_literal_secrets"):
         if not isinstance(config.get(flag, False), bool):
             raise ConfigError(f"config: '{flag}' must be a boolean")

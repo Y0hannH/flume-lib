@@ -11,8 +11,9 @@
 #   4. a corporate proxy       proxy, ca_bundle
 #   5. two escape hatches      allow_insecure_http, allow_literal_secrets
 #   6. two request shapes      allow_body_on_get, fail_on_empty
+#   7. a session without cookies   persist_cookies
 #
-# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.20.0
+# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.21.0
 
 from flume_lib import ConfigError, validate_config
 
@@ -175,9 +176,28 @@ FILTER_IN_A_GET_BODY = {
 }
 
 
+# ---------------------------------------------------------------------------
+# 7. A session without cookies
+#
+# `persist_cookies`  a run keeps one HTTP session, and like a browser it sends
+#                    back the cookies the API sets. Some APIs then let the
+#                    session cookie win over the token and answer 401 from the
+#                    second request on — while the first page passed, and while
+#                    the same call works in Postman once its cookies are
+#                    cleared. `false` makes the run ignore every cookie.
+# ---------------------------------------------------------------------------
+
+BEARER_ONLY = {
+    **BASE,
+    "name": "events_no_cookies",
+    "target_table": "events_no_cookies",
+    "persist_cookies": False,
+}
+
+
 ALL_SOURCES = [
     BOUNDED, EXCLUSIVE, POLITE, BEHIND_A_PROXY, BEHIND_AN_OPEN_PROXY, INTERNAL_SANDBOX,
-    FILTER_IN_A_GET_BODY,
+    FILTER_IN_A_GET_BODY, BEARER_ONLY,
 ]
 
 

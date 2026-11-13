@@ -15,7 +15,7 @@
 #
 # The full reasoning is in docs/cookbook.md, section 4.3.
 #
-# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.20.0
+# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.21.0
 
 from datetime import date
 

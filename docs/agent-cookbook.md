@@ -73,7 +73,7 @@ from flume_lib import (
 - **Install** from wheels uploaded to the lakehouse, with the version pinned (a notebook cell of its own, run before the imports):
 
   ```text
-  %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.20.0
+  %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.21.0
   ```
 
   The library is not on PyPI. If the user has not uploaded the wheels, point them to [install.md](install.md); do not write `pip install flume-lib`.
@@ -264,6 +264,7 @@ Only `decimal(precision,scale)` (precision ≤ 38), `double`, `date` and `string
 | `proxy` | none | proxy URL (`http(s)://host:port`), or a secret reference holding it when it carries a login; applies to data and token calls, and wins over `HTTPS_PROXY` |
 | `ca_bundle` | none | path of a PEM file to trust instead of the default bundle (TLS-inspecting proxy); there is no way to disable verification |
 | `max_requests_per_second` | none | at most that many requests start per second (replays included); set it from the API's documented quota, below it, to avoid the 429 rather than handle it. `retry.jitter` (default true) disperses the backoff |
+| `persist_cookies` | true | the run sends back the cookies the API sets, like a browser. Set `false` when the first request passes and the second is a 401 with the same token (and Postman works again once its cookies are cleared): no cookie is stored or sent |
 | `batch_size` | 50 000 | rows per Delta commit; lower it if memory runs out |
 | `single_instance` | false | refuses a second run of the same source while one is going (advisory lock in `run_locks`); `lock_ttl_seconds` (default 21 600) must exceed `max_run_seconds` |
 | `allow_insecure_http`, `allow_literal_secrets` | false | escape hatches for a trusted network / a throwaway test. **Do not set them** unless the human asks. |
@@ -718,7 +719,7 @@ Values of `body` and `headers` in `token_endpoint` are literals **or** reference
 |---|---|---|
 | `ConfigError:` | invalid config; the network was not touched | fix the key it names |
 | `AuthError:` / `SecretResolutionError:` | the credential could not be **obtained**: env var unset, Key Vault name wrong, token call refused (the vendor's reply is quoted) | check names and permissions; a 401 from the token call with valid credentials usually means `client_auth` should be `"basic"` |
-| `HTTPError: HTTP 401` | credential obtained and refused | token value, `header_name`, `value_prefix` |
+| `HTTPError: HTTP 401` | credential obtained and refused | token value, `header_name`, `value_prefix`; if the first page passed and the second did not, the API lets a session cookie win over the token: set `"persist_cookies": false` |
 | `HTTPError: HTTP 403` | accepted, not authorised | vendor-side scope or role |
 | `HTTPError: HTTP 4xx` | the API refused the request; its reply is quoted (500 characters) | fix the request; never retried |
 | `RetryableHTTPError:` | 429 or 5xx persisted over `retry.max_attempts` | raise `max_attempts`; a `Retry-After` is already honoured |
@@ -825,6 +826,7 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `max_requests_per_second` | — | — | at most this many requests start per second, retries included; per run |
 | `proxy` | — | — | proxy URL, or a secret reference holding it (a login lives in the URL); data and token calls; wins over `HTTPS_PROXY` |
 | `ca_bundle` | — | — | PEM file of the authority to trust (TLS-inspecting proxy); verification cannot be disabled |
+| `persist_cookies` | — | `true` | `false` ignores every cookie the API sets — for a 401 from the second request on |
 
 #### `pagination` — common to every strategy
 
