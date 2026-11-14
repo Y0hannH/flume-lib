@@ -193,7 +193,7 @@ It exercises the credential, the pagination and the response shape, and touches 
 |---|---|---|
 | `ConfigError:` | never reached the network | the key it names — an unknown key comes with a "did you mean" |
 | `AuthError:` | the credential could not be *obtained* | Key Vault secret name, env var, the login call |
-| `HTTPError: HTTP 401` | obtained, and refused | the token itself, `header_name`, `value_prefix` |
+| `HTTPError: HTTP 401` | obtained, and refused | the token itself, `header_name`, `value_prefix`; if only the first page passes, [`"persist_cookies": false`](configuration.md#a-session-without-cookies) |
 | `HTTPError: HTTP 403` | accepted, but the scope or role is short | vendor-side permissions |
 | `RetryableHTTPError: HTTP 429` | rate limited past `retry.max_attempts` | raise `max_attempts`; a `Retry-After` is already honored |
 | `RetryableHTTPError: HTTP 5xx` | the vendor stayed down for every attempt | the vendor |
@@ -373,6 +373,7 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `max_requests_per_second` | — | — | at most this many requests start per second, retries included; per run |
 | `proxy` | — | — | proxy URL, or a secret reference holding it (a login lives in the URL); data and token calls; wins over `HTTPS_PROXY` |
 | `ca_bundle` | — | — | PEM file of the authority to trust (TLS-inspecting proxy); verification cannot be disabled |
+| `persist_cookies` | — | `true` | `false` ignores every cookie the API sets — for a 401 from the second request on |
 
 #### `pagination` — common to every strategy
 

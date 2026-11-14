@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here. Versions follow [semantic versioning](https://semver.org/); until 1.0.0, minor versions may contain breaking changes — these are always listed first.
 
+## [0.21.0] — 2026-11-13
+
+One option, for an API that answers `401` from the second request on.
+
+### Added
+
+- **`persist_cookies`** (default `true`). A run keeps one `requests` session for all its pages, and a session behaves like a browser: the `Set-Cookie` of page 1 goes back with page 2. Some APIs then let that session cookie win over the `Authorization` header, and refuse a request whose token is valid. Seen on a `bearer_token` source with `page` pagination: page 1 passed, page 2 was a `401`, every time — and the same two calls in Postman did the same until its cookies were cleared. `"persist_cookies": false` makes the run ignore every cookie: none is stored, none is sent. A cookie policy on the session's jar is not enough for that — `requests` follows a redirect with a jar of its own, so a cookie set by a `302` still reached its target (measured on requests 2.34) — and the `Cookie` header is also removed from every redirected request. There was no workaround in the config: a `Cookie` written in `headers` is rewritten by the session from its jar. The default stays `true` so that no existing source changes: an API pinned to a backend by a load-balancer cookie relies on getting it back. A value that is not a boolean is a `ConfigError`, before any request. The token calls (`oauth2_client_credentials`, `token_endpoint`) never went through the session and are unchanged.
+
+### Documentation
+
+- `docs/configuration.md`: "A session without cookies", with the symptoms that tell this case from a bad token. Both cookbooks point to it from the `HTTP 401` row of their error tables, and `examples/limits_and_network.py` shows the key.
+
 ## [0.20.0] — 2026-10-24
 
 A run that tells the truth about what it wrote, and that can run with others. Six pieces that came out of one question — what is still missing, functionally — each reproduced on the installed stack before it was fixed: a table whose column type silently truncated the next batch, a `log_runs` that said nothing of a run's warnings or cost, the loop every notebook rewrote around `run_source`, a 429 handled only after the limit was crossed, no way through a corporate proxy, and data tables that nothing ever compacted.

@@ -1,6 +1,7 @@
 """Point d'entrée unique : run_source(config) -> RunResult. Ne lève jamais
 d'exception vers l'appelant."""
 
+import http.cookiejar
 import json
 import random
 import threading
@@ -551,6 +552,55 @@ def _scope_auth_headers(session, header_names: set) -> None:
     session.rebuild_auth = rebuild_auth
 
 
+class _NoCookies(http.cookiejar.DefaultCookiePolicy):
+    """Politique d'un jar qui ne retient rien et ne renvoie rien."""
+
+    def set_ok(self, cookie, request) -> bool:
+        return False
+
+    def return_ok(self, cookie, request) -> bool:
+        return False
+
+
+def _refuse_cookies(session) -> None:
+    """Fait ignorer par la session tout cookie que l'API lui pose
+    (`"persist_cookies": false`).
+
+    Une `requests.Session` se comporte comme un navigateur : le `Set-Cookie`
+    de la page 1 repart avec la page 2. Certaines APIs donnent alors au cookie
+    de session le pas sur le header d'authentification, et répondent 401 à une
+    requête dont le token est pourtant valide — dès la deuxième page.
+
+    Deux verrous, parce que la politique du jar ne suffit pas. Elle empêche
+    la session de retenir un cookie et d'en renvoyer un, mais `requests` suit
+    une redirection avec un jar propre à la requête, qui ne l'hérite pas : le
+    cookie posé par un 302 arrivait quand même à sa destination (mesuré sur
+    requests 2.34). Le header `Cookie` est donc aussi retiré de chaque requête
+    de redirection, par le même crochet que `_scope_auth_headers` — appelé
+    après que `requests` l'a recalculé.
+
+    Les appels de token (`auth.py`) n'utilisent pas de session : ils n'ont
+    jamais porté de cookie, et rien ne change pour eux.
+    """
+    jar = getattr(session, "cookies", None)
+    inherited = getattr(session, "rebuild_auth", None)
+    if jar is None or inherited is None:
+        return  # session factice : elle ne tient aucun cookie
+    jar.set_policy(_NoCookies())
+
+    def rebuild_auth(prepared_request, response):
+        inherited(prepared_request, response)
+        prepared_request.headers.pop("Cookie", None)
+
+    session.rebuild_auth = rebuild_auth
+
+
+def _set_cookie_persistence(session, persist: bool) -> None:
+    """Le défaut de `requests` — garder et renvoyer les cookies — ou rien."""
+    if not persist:
+        _refuse_cookies(session)
+
+
 def _build_fetch_page(
     config: dict, variables: dict | None = None, deadline: float | None = None
 ):
@@ -598,6 +648,7 @@ def _build_fetch_page(
     # (la validation le garantit) : seuls ceux de l'auth sont suivis.
     auth_header_names = set(auth_headers)
     _scope_auth_headers(session, auth_header_names)
+    _set_cookie_persistence(session, config.get("persist_cookies", True))
     if auth.signer is not None:
         session.auth = auth.signer
     body_key = "json" if body_format == "json" else "data"

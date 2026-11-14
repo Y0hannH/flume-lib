@@ -56,6 +56,7 @@ Looking something up rather than reading through? [cookbook.md](cookbook.md) map
 | `method` | string | no | `GET` | HTTP method of the data calls: `GET`, `POST`, `PUT`, `PATCH`. |
 | `body` | object | no | `{}` | Request body sent on every data call. Requires a non-`GET` `method`, unless `allow_body_on_get` says otherwise. |
 | `allow_body_on_get` | boolean | no | `false` | Lets a `GET` carry a body. See [A body on a GET](#a-body-on-a-get). |
+| `persist_cookies` | boolean | no | `true` | `false` makes the run ignore every cookie the API sets. See [A session without cookies](#a-session-without-cookies). |
 | `body_format` | string | no | `json` | `json` or `form` encoding of `body`. |
 | `headers` | object | no | `{}` | Fixed HTTP headers added to every data call (literal strings only). Auth headers always win over these. For a credential, use `auth`: a header whose name looks like a credential (`Authorization`, `X-API-Key`, anything containing `token`, `secret`, `password`…) holding a literal is refused. |
 | `errors` | object | no | disabled | Application-error envelope of APIs that report failures inside a successful HTTP response. See [Application errors in a 200](#application-errors-in-a-200). |
@@ -964,6 +965,28 @@ Once declared, a `GET` follows exactly the same paths as a `POST`: `pagination.p
 ```
 
 The flag only lifts a refusal; it changes nothing for a config that does not set a body.
+
+### A session without cookies
+
+A run keeps one HTTP session for all its pages, and that session behaves like a browser: a cookie the API sets on one response is sent back with every following request. Most APIs either set none or ignore it. Some let it win over the credential: the first request is authenticated by its token, the response sets a session cookie, and the second request — same token, plus that cookie — is answered `401`.
+
+The symptoms are specific enough to recognise:
+
+- the run fails with `HTTPError: HTTP 401` on the **second** request, never the first — a single-page source works, a paginated one does not;
+- the same two calls in Postman behave the same way, and work again once its cookies are cleared;
+- the token is valid: nothing expired between the two requests.
+
+`"persist_cookies": false` makes the run ignore every cookie: none is stored, none is sent, for the whole run, including across a redirect.
+
+```json
+{
+  "auth": {"type": "bearer_token", "token": {"keyvault_url": "https://mykv.vault.azure.net", "secret_name": "api-token"}},
+  "pagination": {"type": "page", "page_param": "page", "size_param": "per_page", "page_size": 100},
+  "persist_cookies": false
+}
+```
+
+The default stays `true`: an API whose load balancer pins a client by cookie, or whose login is a session, relies on getting it back. Writing a `Cookie` in `headers` does not help either way — the session rewrites that header from what it holds. The token calls of `oauth2_client_credentials` and `token_endpoint` do not go through the session and never carried a cookie.
 
 ## Incremental (watermark)
 

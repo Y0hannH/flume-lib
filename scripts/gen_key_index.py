@@ -318,6 +318,8 @@ _NOTES = {
     ("config", "batch_size"): "rows per Delta commit; caps the memory a run uses",
     ("config", "allow_body_on_get"):
         "lets a GET carry a body — refused by default, most APIs ignore it",
+    ("config", "persist_cookies"):
+        "`false` ignores every cookie the API sets — for a 401 from the second request on",
     ("config", "fail_on_empty"):
         "fails the run when no row was loaded, before the watermark moves",
     ("write", "column_types"):
