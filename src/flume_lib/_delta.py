@@ -7,7 +7,7 @@ import re
 import time
 from datetime import date
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, cast
 
 import arro3.core as ac
 from deltalake import DeltaTable, QueryBuilder, write_deltalake
@@ -814,7 +814,11 @@ def query_table(
     qb = QueryBuilder()
     qb.register(alias, dt)
     result = qb.execute(sql)
-    return ac.Table.from_arrow(result).to_struct_array().to_pylist()
+    rows = ac.Table.from_arrow(result).to_struct_array().to_pylist()
+    # Les stubs d'arro3 annoncent un `NDArray` : c'est bien une liste de dicts.
+    # `cast` plutôt que `type: ignore` — sans numpy installé (la CI), `NDArray`
+    # vaut `Any` et l'ignore serait signalé comme inutile.
+    return cast("list[dict]", rows)
 
 
 def delete_rows(uri: str, predicate: str, storage_options: dict | None = None) -> int:
