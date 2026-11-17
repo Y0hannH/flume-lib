@@ -34,7 +34,7 @@ from flume_lib.locks import RunLock
 from flume_lib.logging_ import write_log_run
 from flume_lib.network import resolve_network
 from flume_lib.pagination import _MISSING, get_path, paginate
-from flume_lib.secrets_ import redact
+from flume_lib.secrets_ import SENSITIVE_NAME_RE, redact, register_secret
 from flume_lib.templating import (
     check_value,
     normalize_value,
@@ -601,6 +601,15 @@ def _set_cookie_persistence(session, persist: bool) -> None:
         _refuse_cookies(session)
 
 
+def _register_sensitive_headers(headers: dict) -> None:
+    """Un header fixe au nom sensible n'est littéral qu'avec
+    `allow_literal_secrets` : sa valeur est un secret, masqué comme tel dans
+    les messages."""
+    for name, value in headers.items():
+        if SENSITIVE_NAME_RE.search(str(name)):
+            register_secret(value)
+
+
 def _build_fetch_page(
     config: dict, variables: dict | None = None, deadline: float | None = None
 ):
@@ -641,7 +650,9 @@ def _build_fetch_page(
     )
     session = requests.Session()
     # headers de la config d'abord : l'auth ne doit jamais être écrasée par eux
-    session.headers.update(config.get("headers", {}))
+    fixed_headers = config.get("headers", {})
+    _register_sensitive_headers(fixed_headers)
+    session.headers.update(fixed_headers)
     auth_headers = auth.headers()
     session.headers.update(auth_headers)
     # Les headers de `config['headers']` sont des littéraux non sensibles

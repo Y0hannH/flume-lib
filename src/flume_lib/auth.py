@@ -10,7 +10,12 @@ from urllib.parse import quote_plus
 import requests
 
 from flume_lib.oauth1 import OAuth1Signer
-from flume_lib.secrets_ import SecretResolutionError, register_secret, resolve_secret
+from flume_lib.secrets_ import (
+    SENSITIVE_NAME_RE,
+    SecretResolutionError,
+    register_secret,
+    resolve_secret,
+)
 from flume_lib.urls_ import safe_url, sanitized_request_error
 
 DEFAULT_TOKEN_TIMEOUT_SECONDS = 30
@@ -40,6 +45,15 @@ TOKEN_EXPIRY_MARGIN_SECONDS = 60
 TOKEN_EXPIRY_MARGIN_RATIO = 0.1
 
 
+# Champs d'auth dont la valeur est un secret, tous types confondus. Écrits en
+# littéral (`allow_literal_secrets`), ils sont masqués dans les messages comme
+# une valeur lue dans une variable d'environnement. Les identifiants publics
+# (client_id, username, consumer_key) n'y figurent pas.
+SECRET_FIELDS = frozenset(
+    ("token", "key", "password", "client_secret", "consumer_secret", "token_secret")
+)
+
+
 class AuthError(Exception):
     pass
 
@@ -57,7 +71,7 @@ def _resolve(auth_config: dict, field: str) -> str:
             f"Key '{field}' (or '{legacy_key}') missing from the auth config"
         )
     try:
-        return resolve_secret(ref, field)
+        return resolve_secret(ref, field, sensitive=field in SECRET_FIELDS)
     except SecretResolutionError as exc:
         raise AuthError(str(exc)) from exc
 
@@ -204,11 +218,15 @@ def _fetch_token_endpoint(
         )
 
     body = {
-        key: resolve_secret(ref, f"body.{key}")
+        key: resolve_secret(
+            ref, f"body.{key}", sensitive=bool(SENSITIVE_NAME_RE.search(str(key)))
+        )
         for key, ref in auth_config.get("body", {}).items()
     }
     headers = {
-        key: resolve_secret(ref, f"headers.{key}")
+        key: resolve_secret(
+            ref, f"headers.{key}", sensitive=bool(SENSITIVE_NAME_RE.search(str(key)))
+        )
         for key, ref in auth_config.get("headers", {}).items()
     }
 

@@ -383,8 +383,8 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `record_field` | — | — | extracts a sub-object out of each record |
 | `params_in` | — | `"query"` | one of `query` / `body` / `body_template` |
 | `params_path` | — | — | nests the params inside the body; requires `"params_in": "body"` |
-| `max_pages` | — | — | safety bound; the run fails when it is hit |
-| `max_rows` | — | — | safety bound; the run fails when it is hit |
+| `max_pages` | — | — | safety bound; the run fails when the source exceeds it |
+| `max_rows` | — | — | safety bound; the run fails when the source exceeds it |
 
 #### `pagination` — `"type": "offset"`
 
