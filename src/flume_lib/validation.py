@@ -109,7 +109,14 @@ _INCREMENTAL_KEYS = (
 )
 _INCREMENTAL_INJECTS = ("query_param", "body_template")
 _INCREMENTAL_WINDOW_KEYS = ("upper_param", "upper_value")
-_INCREMENTAL_ADVANCES = ("field_max", "field_max_capped", "upper_bound")
+# Ce que devient le watermark à la fin d'un run (`incremental.advance`).
+# `field_max` est le comportement historique : le plus grand `field` vu. Les
+# deux autres existent pour les APIs dont le filtre est une fenêtre de dates
+# que `field` ne reflète qu'approximativement — voir docs/configuration.md.
+ADVANCE_FIELD_MAX = "field_max"
+ADVANCE_FIELD_MAX_CAPPED = "field_max_capped"
+ADVANCE_UPPER_BOUND = "upper_bound"
+_INCREMENTAL_ADVANCES = (ADVANCE_FIELD_MAX, ADVANCE_FIELD_MAX_CAPPED, ADVANCE_UPPER_BOUND)
 _RETRY_KEYS = ("max_attempts", "backoff_multiplier", "max_retry_after_seconds", "jitter")
 
 # Champs d'auth dont la valeur est un secret : une chaîne littérale y est
@@ -135,7 +142,15 @@ _WRITE_KEYS = (
     "mode", "replace_where", "partition_by", "merge_keys", "when_matched",
     "column_types",
 )
-_WRITE_MODES = ("append", "overwrite", "replace_where", "merge")
+# Modes d'écriture de la config. "append" reste le défaut : c'est le seul qui
+# ne détruit rien.
+WRITE_APPEND = "append"
+WRITE_OVERWRITE = "overwrite"
+WRITE_REPLACE_WHERE = "replace_where"
+# `merge` est un MERGE INTO : idempotent, donc le seul mode non-append
+# compatible avec `incremental.checkpoint`.
+WRITE_MERGE = "merge"
+_WRITE_MODES = (WRITE_APPEND, WRITE_OVERWRITE, WRITE_REPLACE_WHERE, WRITE_MERGE)
 _WRITE_WHEN_MATCHED = ("update",)
 
 
@@ -322,7 +337,7 @@ def _validate_incremental_options(config: dict, incremental: dict) -> None:
     ):
         raise ConfigError("incremental: 'allow_regression' must be a boolean")
 
-    advance = incremental.get("advance", "field_max")
+    advance = incremental.get("advance", ADVANCE_FIELD_MAX)
     if advance not in _INCREMENTAL_ADVANCES:
         known = ", ".join(f"'{a}'" for a in _INCREMENTAL_ADVANCES)
         raise ConfigError(
@@ -331,7 +346,7 @@ def _validate_incremental_options(config: dict, incremental: dict) -> None:
     _check_number("incremental", incremental, "lookback", allow_zero=True)
 
     window = incremental.get("window")
-    if advance != "field_max" and window is None:
+    if advance != ADVANCE_FIELD_MAX and window is None:
         raise ConfigError(
             f"incremental: \"advance\": \"{advance}\" needs a 'window' — "
             "it is the window's upper bound that the watermark is capped to, "
@@ -940,7 +955,7 @@ def _validate_write(config: dict) -> None:
     if not isinstance(write, dict):
         raise ConfigError("write: must be an object")
     _check_unknown("write", write, _WRITE_KEYS)
-    mode = write.get("mode", "append")
+    mode = write.get("mode", WRITE_APPEND)
     if mode not in _WRITE_MODES:
         known = ", ".join(f"'{m}'" for m in _WRITE_MODES)
         raise ConfigError(
@@ -958,7 +973,7 @@ def _validate_checkpoint_mode(config: dict) -> None:
     # la reprise de `checkpoint` ne l'abîme pas, contrairement à un
     # remplacement qui effacerait ce que le run interrompu avait déjà écrit.
     if (config.get("incremental") or {}).get("checkpoint") and (
-        (config.get("write") or {}).get("mode", "append") not in ("append", "merge")
+        (config.get("write") or {}).get("mode", WRITE_APPEND) not in (WRITE_APPEND, WRITE_MERGE)
     ):
         raise ConfigError(
             "write: \"mode\": \"{mode}\" is incompatible with "

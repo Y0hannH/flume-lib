@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from flume_lib import http_ as http_module
 from flume_lib import locks, secrets_, templating
 from flume_lib import source as source_module
 
@@ -34,22 +35,22 @@ class TestNumbersMatchTheCode:
         assert f"shorter than {secrets_.MIN_REDACTABLE_LENGTH} characters" in SECURITY
 
     def test_the_response_cap(self):
-        mib = source_module.DEFAULT_MAX_RESPONSE_BYTES // (1024 * 1024)
+        mib = http_module.DEFAULT_MAX_RESPONSE_BYTES // (1024 * 1024)
         assert f"{mib} MiB" in SECURITY
 
     def test_the_quoted_error_text(self):
-        assert f"{source_module.MAX_ERROR_DETAIL_CHARS} characters" in SECURITY
-        assert f"first {source_module.MAX_ERRORS_REPORTED} errors" in SECURITY
+        assert f"{http_module.MAX_ERROR_DETAIL_CHARS} characters" in SECURITY
+        assert f"first {http_module.MAX_ERRORS_REPORTED} errors" in SECURITY
 
     def test_the_part_of_a_4xx_body_that_is_read(self):
-        kib = source_module._ERROR_BODY_READ_BYTES // 1024
+        kib = http_module._ERROR_BODY_READ_BYTES // 1024
         assert f"{kib} KiB" in SECURITY
 
     def test_the_retry_after_ceiling(self):
-        assert f"default {source_module.DEFAULT_MAX_RETRY_AFTER_SECONDS} s" in SECURITY
+        assert f"default {http_module.DEFAULT_MAX_RETRY_AFTER_SECONDS} s" in SECURITY
 
     def test_the_timeouts(self):
-        assert f"default {source_module.DEFAULT_TIMEOUT_SECONDS} s" in SECURITY
+        assert f"default {http_module.DEFAULT_TIMEOUT_SECONDS} s" in SECURITY
         from flume_lib.auth import DEFAULT_TOKEN_TIMEOUT_SECONDS
 
         assert f"default {DEFAULT_TOKEN_TIMEOUT_SECONDS} s" in SECURITY

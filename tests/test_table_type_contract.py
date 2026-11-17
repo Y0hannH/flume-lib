@@ -8,6 +8,7 @@ précisément la coercition de delta-rs qui est en cause.
 """
 
 import pytest
+from fakes import SinglePageSession
 
 from flume_lib._delta import (
     DeltaWriteError,
@@ -16,6 +17,10 @@ from flume_lib._delta import (
     write_records,
 )
 from flume_lib.source import run_source
+
+
+class FakeSession(SinglePageSession):
+    items_field = "items"
 
 
 def rows(uri, column="x"):
@@ -205,33 +210,9 @@ class TestDeclaredDouble:
         assert "secret-looking" not in str(caught.value)
 
 
-class FakeResponse:
-    status_code = 200
-    headers: dict = {}
-
-    def __init__(self, payload):
-        self._payload = payload
-
-    def json(self):
-        return self._payload
-
-
-class FakeSession:
-    payload: list = []
-
-    def __init__(self):
-        self.headers = {}
-
-    def close(self):
-        pass
-
-    def request(self, method, url, **kwargs):
-        return FakeResponse({"items": FakeSession.payload})
-
-
 @pytest.fixture
 def http(monkeypatch):
-    monkeypatch.setattr("flume_lib.source.requests.Session", FakeSession)
+    monkeypatch.setattr("flume_lib.http_.requests.Session", FakeSession)
 
 
 @pytest.fixture
@@ -326,6 +307,6 @@ class TestAtRunLevel:
             calls.append(1)
             return real(*args, **kwargs)
 
-        monkeypatch.setattr("flume_lib.source.read_table_types", counting)
+        monkeypatch.setattr("flume_lib.writer.read_table_types", counting)
         assert run(config, tmp_path).status == "success"
         assert len(calls) == 1

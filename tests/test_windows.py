@@ -9,6 +9,7 @@ tourner la boucle de l'appelant à l'infini."""
 from datetime import date
 
 import pytest
+from fakes import FakeResponse
 
 from flume_lib import RunResult, WindowRunError, read_watermark, run_source_windows
 from flume_lib.windows import _as_date
@@ -190,14 +191,9 @@ class BoundaryOnlyAPI:
                 api.calls.append(dict(params))
                 day = params["Accounting_Date_From"]
 
-                class Response:
-                    status_code = 200
-                    headers = {}
-
-                    def json(self):
-                        return {"Report_Entry": [{"Inv_Ref_ID": "INV-1", "Last_Inv_Date": day}]}
-
-                return Response()
+                return FakeResponse(
+                    {"Report_Entry": [{"Inv_Ref_ID": "INV-1", "Last_Inv_Date": day}]}
+                )
 
         return Session
 
@@ -205,7 +201,7 @@ class BoundaryOnlyAPI:
 class TestEndToEnd:
     def test_boundary_only_rows_do_not_stall_with_upper_bound(self, tmp_path, monkeypatch):
         api = BoundaryOnlyAPI()
-        monkeypatch.setattr("flume_lib.source.requests.Session", api())
+        monkeypatch.setattr("flume_lib.http_.requests.Session", api())
 
         results = run_source_windows(
             window_config, "2026-09-20", 7, lakehouse_tables_path=str(tmp_path)
@@ -219,7 +215,7 @@ class TestEndToEnd:
 
     def test_the_same_data_with_field_max_stalls_and_says_so(self, tmp_path, monkeypatch):
         api = BoundaryOnlyAPI()
-        monkeypatch.setattr("flume_lib.source.requests.Session", api())
+        monkeypatch.setattr("flume_lib.http_.requests.Session", api())
 
         def factory(end):
             return window_config(end, advance="field_max")

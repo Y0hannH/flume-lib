@@ -6,10 +6,11 @@ instable, et ce qu'on veut vérifier est l'écart entre deux départs."""
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import fakes
 import pytest
 
 from flume_lib import ConfigError, run_source, validate_config
-from flume_lib.source import RetryableHTTPError, RunTimeoutError, _build_wait, _Throttle
+from flume_lib.http_ import RetryableHTTPError, RunTimeoutError, _build_wait, _Throttle
 
 BASE = {
     "name": "s",
@@ -38,9 +39,11 @@ class Clock:
 @pytest.fixture
 def clock(monkeypatch):
     c = Clock()
-    monkeypatch.setattr(
-        "flume_lib.source.time", SimpleNamespace(monotonic=c.monotonic, sleep=c.sleep)
-    )
+    fake = SimpleNamespace(monotonic=c.monotonic, sleep=c.sleep)
+    # la cadence vit dans http_, l'échéance du run se calcule dans source :
+    # les deux doivent lire la même horloge
+    monkeypatch.setattr("flume_lib.http_.time", fake)
+    monkeypatch.setattr("flume_lib.source.time", fake)
     return c
 
 
@@ -97,18 +100,8 @@ class TestThrottle:
         assert clock.slept == [1.0]
 
 
-class FakeResponse:
-    def __init__(self, status, payload, headers=None):
-        self.status_code = status
-        self._payload = payload
-        self.headers = headers or {}
-        self.text = str(payload)
-
-    def json(self):
-        return self._payload
-
-    def close(self):
-        pass
+def FakeResponse(status, payload, headers=None):
+    return fakes.FakeResponse(payload, headers, status)
 
 
 class Recording:
@@ -133,7 +126,7 @@ class Recording:
 @pytest.fixture
 def http(monkeypatch, clock):
     Recording.script, Recording.starts, Recording.clock = [], [], clock
-    monkeypatch.setattr("flume_lib.source.requests.Session", Recording)
+    monkeypatch.setattr("flume_lib.http_.requests.Session", Recording)
 
 
 def ok(items):

@@ -764,12 +764,12 @@ The watermark and the key can share one body — the watermark bounds the window
 
 | Key | Default | Description |
 |---|---|---|
-| `next_field` | `next` | Response field containing the full next-page URL (e.g. `@odata.nextLink` for Microsoft APIs). |
+| `next_field` | `next` | Response field containing the next-page URL (e.g. `@odata.nextLink` for Microsoft APIs). A relative URL (`/v1/items?page=2`) is resolved against the URL of the page that gives it. |
 | `allowed_hosts` | none | Bare host names (no scheme, port or path) the next-page URL may point to besides the host of `base_url` — a CDN, a regional host. |
 
 The `params`/`incremental` query params are sent on the first call only — the next-page URL already carries its own. Stops when the field is absent or `null`.
 
-**The next-page URL must stay on the origin of `base_url`** (same scheme, host and port). It is chosen by the API, and the request that follows carries the session's credentials: without this check a compromised endpoint could name any host and receive them. A URL pointing elsewhere fails the run before any request is sent, and the message says which host. A host listed in `allowed_hosts` is followed, but never from `https` down to `http`.
+**The next-page URL must stay on the origin of `base_url`** (same scheme, host and port). It is chosen by the API, and the request that follows carries the session's credentials: without this check a compromised endpoint could name any host and receive them. A relative URL is resolved first, so the URL checked is the one requested. A URL pointing elsewhere fails the run before any request is sent, and the message says which host. A host listed in `allowed_hosts` is followed, but never from `https` down to `http`.
 
 ```json
 {"type": "next_link", "next_field": "@odata.nextLink", "items_field": "value"}

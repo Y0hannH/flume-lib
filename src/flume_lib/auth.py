@@ -9,6 +9,7 @@ from urllib.parse import quote_plus
 
 import requests
 
+from flume_lib._paths import MISSING, get_path
 from flume_lib.oauth1 import OAuth1Signer
 from flume_lib.secrets_ import (
     SENSITIVE_NAME_RE,
@@ -94,13 +95,9 @@ def _error_detail(response) -> str:
 
 def _extract_json_path(payload: dict, path: str):
     """Extrait une valeur d'un dict par chemin pointé, ex. 'data.token'."""
-    value = payload
-    for part in path.split("."):
-        if not isinstance(value, dict) or part not in value:
-            raise AuthError(
-                f"Path '{path}' not found in the token endpoint response"
-            )
-        value = value[part]
+    value = get_path(payload, path)
+    if value is MISSING:
+        raise AuthError(f"Path '{path}' not found in the token endpoint response")
     return value
 
 
@@ -110,11 +107,9 @@ def _expires_in(payload: dict, path: str | None) -> float | None:
     à un 401, jamais par anticipation."""
     if not path:
         return None
-    value: Any = payload
-    for part in path.split("."):
-        if not isinstance(value, dict) or part not in value:
-            return None
-        value = value[part]
+    value: Any = get_path(payload, path)
+    if value is MISSING:
+        return None
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -354,31 +349,6 @@ class AuthProvider:
         return headers
 
 
-def build_auth(auth_config: dict | None) -> tuple[dict[str, str], object | None]:
-    """Point d'entrée historique : retourne (headers statiques, signataire par
-    requête). Ne renouvelle rien — pour un run susceptible de dépasser
-    l'expiration du token, utiliser AuthProvider.
-
-    Le signataire — un `requests.auth.AuthBase` — vaut None pour toutes les
-    stratégies dont l'auth tient dans un header fixe ; il n'est renseigné que
-    pour oauth1, dont la signature dépend de l'URL et des paramètres de chaque
-    requête et doit donc être recalculée page après page.
-    """
-    provider = AuthProvider(auth_config)
-    return provider.headers(), provider.signer
-
-
-def build_auth_headers(auth_config: dict | None) -> dict[str, str]:
-    """Construit les headers HTTP d'authentification à partir de la config.
-
-    Types supportés : bearer_token, api_key_header, basic,
-    oauth2_client_credentials (service principal Entra ID ou IdP standard),
-    token_endpoint (login API arbitraire). oauth1 n'entre pas dans ce cadre :
-    passer par build_auth().
-    """
-    return _build_headers(auth_config)[0]
-
-
 def _build_headers(
     auth_config: dict | None, network: dict | None = None
 ) -> tuple[dict[str, str], float | None]:
@@ -417,9 +387,7 @@ def _build_headers(
         return {header_name: f"{value_prefix}{token}"}, expires_in
 
     if auth_type == "oauth1":
-        raise AuthError(
-            "oauth1 signs every request and does not fit in a fixed header — "
-            "use build_auth()"
-        )
+        # signé requête par requête : `AuthProvider.signer`, jamais un header
+        raise AuthError("oauth1 signs every request and does not fit in a fixed header")
 
     raise AuthError(f"Unknown auth type: '{auth_type}'")

@@ -8,7 +8,7 @@ ont à NULL."""
 
 import arro3.core as ac
 
-from flume_lib._delta import table_uri, write_records
+from flume_lib._delta import DEFAULT_LOG_SCHEMA, table_uri, write_records
 
 LOG_RUNS_TABLE = "log_runs"
 
@@ -46,7 +46,7 @@ def write_log_run(
     status: str,
     rows_loaded: int,
     error_message: str | None,
-    schema: str = "flume",
+    schema: str = DEFAULT_LOG_SCHEMA,
     storage_options: dict | None = None,
     details: dict | None = None,
 ) -> None:

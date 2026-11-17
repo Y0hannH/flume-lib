@@ -5,9 +5,14 @@ précisément là que se joue le remplacement d'une fenêtre : le mock dirait
 toujours oui."""
 
 import pytest
+from fakes import SinglePageSession
 
 from flume_lib._delta import DeltaWriteError, query_table, write_records
 from flume_lib.source import run_source
+
+
+class FakeSession(SinglePageSession):
+    """Sert `payload` telle quelle : une liste d'enregistrements."""
 
 
 def rows(uri):
@@ -109,35 +114,6 @@ class TestPartitioning:
             write_records(uri, recs(("02", 2)), partition_by=["m"])
 
 
-class FakeResponse:
-    def __init__(self, payload):
-        self._payload = payload
-        self.headers = {}
-        self.status_code = 200
-
-    def json(self):
-        return self._payload
-
-    def raise_for_status(self):
-        pass
-
-
-class FakeSession:
-    """Rejoue une page unique, quelle que soit la requête."""
-
-    payload: list = []
-
-    def __init__(self):
-        self.headers = {}
-        self.closed = False
-
-    def close(self):
-        self.closed = True
-
-    def request(self, method, url, **kwargs):
-        return FakeResponse(FakeSession.payload)
-
-
 class TestBackfillEndToEnd:
     """Le scénario qui motive tout ça : relancer un backfill sur la même
     fenêtre, jusqu'ici impossible sans dédoublonner à la main."""
@@ -154,7 +130,7 @@ class TestBackfillEndToEnd:
 
     @pytest.fixture(autouse=True)
     def http(self, monkeypatch):
-        monkeypatch.setattr("flume_lib.source.requests.Session", FakeSession)
+        monkeypatch.setattr("flume_lib.http_.requests.Session", FakeSession)
 
     def test_two_identical_runs_leave_one_copy(self, tmp_path, config):
         FakeSession.payload = recs(("01", 1), ("01", 2))

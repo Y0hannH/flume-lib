@@ -118,7 +118,7 @@ def fakes(monkeypatch):
 def run_blocks(path: Path, fakes_calls) -> dict:
     namespace: dict = {"__name__": "__doc_example__"}
     for source in blocks(path, "python"):
-        exec(compile(source, f"{path.name} (python block)", "exec"), namespace)  # noqa: S102
+        exec(compile(source, f"{path.name} (python block)", "exec"), namespace)
     return namespace
 
 

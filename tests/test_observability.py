@@ -5,6 +5,7 @@ compteurs de `RunResult`, et le callback `on_progress`.
 (une colonne NULL au premier run ne doit pas se figer en texte) et dans
 l'évolution d'une table créée par une version antérieure."""
 
+import fakes
 import pytest
 
 import flume_lib
@@ -12,18 +13,8 @@ from flume_lib import run_source, run_source_windows
 from flume_lib._delta import query_table, read_table_types, write_records
 
 
-class FakeResponse:
-    def __init__(self, status, payload, headers=None):
-        self.status_code = status
-        self._payload = payload
-        self.headers = headers or {}
-        self.text = str(payload)
-
-    def json(self):
-        return self._payload
-
-    def close(self):
-        pass
+def FakeResponse(status, payload, headers=None):
+    return fakes.FakeResponse(payload, headers, status)
 
 
 class FakeSession:
@@ -49,7 +40,7 @@ def ok(items):
 @pytest.fixture(autouse=True)
 def http(monkeypatch):
     FakeSession.script, FakeSession.calls = [], []
-    monkeypatch.setattr("flume_lib.source.requests.Session", FakeSession)
+    monkeypatch.setattr("flume_lib.http_.requests.Session", FakeSession)
 
 
 @pytest.fixture

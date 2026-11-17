@@ -15,6 +15,8 @@ un placeholder sans variable correspondante est une erreur — même logique que
 import re
 from datetime import datetime, timezone
 
+from flume_lib._paths import MISSING, get_path
+
 _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 # Une valeur interpolée dans une requête (SQL, filtre OData…) ne doit pas
@@ -159,13 +161,9 @@ def templated_placeholders(value, template_paths=None) -> set[str]:
         return placeholders(value)
     names: set[str] = set()
     for path in template_paths:
-        node = value
-        for part in path.split("."):
-            if not isinstance(node, dict) or part not in node:
-                node = None
-                break
-            node = node[part]
-        names |= placeholders(node)
+        node = get_path(value, path)
+        if node is not MISSING:
+            names |= placeholders(node)
     return names
 
 

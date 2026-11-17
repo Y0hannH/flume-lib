@@ -646,9 +646,27 @@ class TestNextLinkOrigin:
         with pytest.raises(PaginationError, match="outside the origin"):
             _paged("https://evil.test/x", allowed_hosts=["cdn.example.net"])
 
-    def test_a_relative_url_is_left_to_requests(self):
-        """Pas d'hôte à contrôler ; `requests` refusera l'URL sans schéma."""
+    def test_check_next_url_leaves_a_relative_url_alone(self):
+        """Pas d'hôte à contrôler : la résolution est faite par l'appelant."""
         assert check_next_url("/v1?page=2", "https://api.example.com/v1") == "/v1?page=2"
+
+    @pytest.mark.parametrize(
+        "relative, expected",
+        [
+            ("/v1/items?page=2", "https://api.example.com/v1/items?page=2"),
+            ("?page=2", "https://api.example.com/v1?page=2"),
+            ("items?page=2", "https://api.example.com/items?page=2"),
+        ],
+    )
+    def test_a_relative_next_url_is_resolved_against_the_page(self, relative, expected):
+        seen, pages = _paged(relative)
+        assert seen == ["https://api.example.com/v1", expected]
+        assert len(pages) == 2
+
+    def test_a_protocol_relative_url_is_still_checked(self):
+        """`//evil.test/x` hérite du schéma mais change d'hôte : refusée."""
+        with pytest.raises(PaginationError, match="outside the origin"):
+            _paged("//evil.test/x")
 
     def test_a_non_string_is_an_error_not_a_request(self):
         with pytest.raises(PaginationError, match="not a URL"):
@@ -763,7 +781,7 @@ class TestLiteralSecretsAreRedacted:
         assert redact("alice-account application/json") == "alice-account application/json"
 
     def test_a_literal_credential_in_top_level_headers_is_redacted(self):
-        from flume_lib.source import _build_fetch_page
+        from flume_lib.http_ import _build_fetch_page
 
         fetch_page = _build_fetch_page(cfg(
             headers={"Authorization": f"Token {SECRET}", "Accept": "application/json"},

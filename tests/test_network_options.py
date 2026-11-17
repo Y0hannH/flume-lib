@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import requests
+from fakes import FakeResponse
 
 from flume_lib import ConfigError, run_source, validate_config
 from flume_lib.auth import AuthProvider
@@ -121,17 +122,13 @@ class Recording:
         Recording.kwargs.append(kwargs)
         if Recording.behaviour is not None:
             Recording.behaviour()
-        response = MagicMock()
-        response.status_code = 200
-        response.headers = {}
-        response.json.return_value = {"items": [{"id": 1}]}
-        return response
+        return FakeResponse({"items": [{"id": 1}]})
 
 
 @pytest.fixture
 def http(monkeypatch):
     Recording.kwargs, Recording.behaviour = [], None
-    monkeypatch.setattr("flume_lib.source.requests.Session", Recording)
+    monkeypatch.setattr("flume_lib.http_.requests.Session", Recording)
 
 
 def run(config, tmp_path):
