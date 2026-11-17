@@ -231,7 +231,7 @@ class FakeSession:
 
 @pytest.fixture
 def http(monkeypatch):
-    monkeypatch.setattr("flume_lib.source.requests.Session", FakeSession)
+    monkeypatch.setattr("flume_lib.http_.requests.Session", FakeSession)
 
 
 @pytest.fixture
@@ -326,6 +326,6 @@ class TestAtRunLevel:
             calls.append(1)
             return real(*args, **kwargs)
 
-        monkeypatch.setattr("flume_lib.source.read_table_types", counting)
+        monkeypatch.setattr("flume_lib.writer.read_table_types", counting)
         assert run(config, tmp_path).status == "success"
         assert len(calls) == 1

@@ -7,7 +7,7 @@ destination du 302.
 
 import requests
 
-from flume_lib.source import _scope_auth_headers
+from flume_lib.http_ import _scope_auth_headers
 
 
 def _redirect(session, from_url, to_url, headers):

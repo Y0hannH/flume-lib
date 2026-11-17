@@ -132,8 +132,8 @@ class TestNullBlocksMeanAbsent:
 
                 return Response()
 
-        monkeypatch.setattr("flume_lib.source.requests.Session", Session)
-        monkeypatch.setattr("flume_lib.source.write_records", lambda *a, **k: ({}, []))
+        monkeypatch.setattr("flume_lib.http_.requests.Session", Session)
+        monkeypatch.setattr("flume_lib.writer.write_records", lambda *a, **k: ({}, []))
         monkeypatch.setattr("flume_lib.source.write_log_run", lambda *a, **k: None)
 
         result = run_source(cfg(incremental=None), lakehouse_tables_path="/tmp/Tables")

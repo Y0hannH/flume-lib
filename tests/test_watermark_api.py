@@ -83,7 +83,7 @@ class TestPublicWatermarkApi:
 
                 return Response()
 
-        monkeypatch.setattr("flume_lib.source.requests.Session", Session)
+        monkeypatch.setattr("flume_lib.http_.requests.Session", Session)
         config = {
             "name": "wd_C1",
             "base_url": "https://api.test/items",

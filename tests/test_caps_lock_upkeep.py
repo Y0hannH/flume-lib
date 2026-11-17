@@ -24,6 +24,15 @@ from test_source import BASE_CONFIG, FakeResponse, delta, http  # noqa: F401
 
 from flume_lib import compact_technical_tables
 from flume_lib._delta import query_table, write_records
+from flume_lib.http_ import (
+    DEFAULT_MAX_RESPONSE_BYTES,
+    ResponseTooLargeError,
+    RunTimeoutError,
+    _check_deadline,
+    _error_body_text,
+    _read_json,
+    _response_detail,
+)
 from flume_lib.locks import (
     DEFAULT_LOCK_TTL_SECONDS,
     LOCKS_TABLE,
@@ -33,16 +42,7 @@ from flume_lib.locks import (
     active_runs,
     stamp,
 )
-from flume_lib.source import (
-    DEFAULT_MAX_RESPONSE_BYTES,
-    ResponseTooLargeError,
-    RunTimeoutError,
-    _check_deadline,
-    _error_body_text,
-    _read_json,
-    _response_detail,
-    run_source,
-)
+from flume_lib.source import run_source
 from flume_lib.validation import ConfigError, validate_config
 from flume_lib.watermark import read_watermark, write_watermark
 
@@ -186,19 +186,19 @@ class TestRunDeadline:
         _check_deadline(None, None)
 
     def test_a_passed_deadline_raises(self, monkeypatch):
-        monkeypatch.setattr("flume_lib.source.time.monotonic", lambda: 100.0)
+        monkeypatch.setattr("flume_lib.http_.time.monotonic", lambda: 100.0)
         with pytest.raises(RunTimeoutError, match=r"max_run_seconds \(10 s\)"):
             _check_deadline(50.0, 10)
 
     def test_a_deadline_still_ahead_is_fine(self, monkeypatch):
-        monkeypatch.setattr("flume_lib.source.time.monotonic", lambda: 10.0)
+        monkeypatch.setattr("flume_lib.http_.time.monotonic", lambda: 10.0)
         _check_deadline(50.0, 10)
 
     def test_a_slow_drip_is_cut_off_between_chunks(self, monkeypatch):
         """`timeout` borne le silence entre deux octets, pas la durée totale : un
         serveur qui en envoie un toutes les 50 s garde la requête ouverte."""
         clock = _Clock()
-        monkeypatch.setattr("flume_lib.source.time.monotonic", clock)
+        monkeypatch.setattr("flume_lib.http_.time.monotonic", clock)
 
         class Dripping(io.BytesIO):
             def read(self, size=-1):
@@ -214,7 +214,7 @@ class TestRunDeadline:
 
     def test_the_run_stops_before_the_next_request(self, http, delta, monkeypatch):
         clock = _Clock()
-        monkeypatch.setattr("flume_lib.source.time.monotonic", clock)
+        monkeypatch.setattr("flume_lib.http_.time.monotonic", clock)
         pages = [[{"id": 1}, {"id": 2}], [{"id": 3}, {"id": 4}], [{"id": 5}]]
 
         def request(self, method, url, **kwargs):
@@ -401,7 +401,7 @@ class _Session:
 
 @pytest.fixture
 def real_http(monkeypatch):
-    monkeypatch.setattr("flume_lib.source.requests.Session", _Session)
+    monkeypatch.setattr("flume_lib.http_.requests.Session", _Session)
     _Session.payload = [{"id": 1}, {"id": 2}]
     return _Session
 

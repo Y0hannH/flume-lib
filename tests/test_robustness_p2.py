@@ -498,7 +498,7 @@ class _Session:
 
 @pytest.fixture
 def real_http(monkeypatch):
-    monkeypatch.setattr("flume_lib.source.requests.Session", _Session)
+    monkeypatch.setattr("flume_lib.http_.requests.Session", _Session)
     return _Session
 
 

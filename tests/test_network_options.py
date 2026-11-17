@@ -131,7 +131,7 @@ class Recording:
 @pytest.fixture
 def http(monkeypatch):
     Recording.kwargs, Recording.behaviour = [], None
-    monkeypatch.setattr("flume_lib.source.requests.Session", Recording)
+    monkeypatch.setattr("flume_lib.http_.requests.Session", Recording)
 
 
 def run(config, tmp_path):

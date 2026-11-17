@@ -55,7 +55,7 @@ class FakeSession:
 @pytest.fixture(autouse=True)
 def http(monkeypatch):
     FakeSession.routes, FakeSession.seen = {}, []
-    monkeypatch.setattr("flume_lib.source.requests.Session", FakeSession)
+    monkeypatch.setattr("flume_lib.http_.requests.Session", FakeSession)
 
 
 def source(name, **extra):

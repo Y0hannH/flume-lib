@@ -12,7 +12,8 @@ code, jamais d'une saisie :
   - **la clé et son bloc** : importés de `flume_lib.validation`, qui est
     l'autorité — une clé absente de ces tuples est refusée à la validation ;
   - **le défaut** : lu dans l'implémentation par analyse AST, en cherchant les
-    `config.get("clé", défaut)` de auth.py, pagination.py et source.py. C'est
+    `config.get("clé", défaut)` de auth.py, pagination.py, source.py, http_.py et
+    writer.py. C'est
     la seule source honnête : les défauts ne vivent pas dans validation.py,
     ils vivent là où ils sont appliqués ;
   - **le caractère requis** : dérivé de `_REQUIRED` et `_AUTH_REQUIRED` quand
@@ -87,9 +88,9 @@ _SCOPES = {
     # _build_headers traite tous les types dans une suite de `if auth_type ==`
     # : la portée y est affinée branche par branche, ci-dessous.
     ("auth.py", "_build_headers"): "auth.*",
-    ("source.py", "_build_wait"): "retry",
-    ("source.py", "_check_response_errors"): "errors",
-    ("source.py", "_build_fetch_page"): "config",
+    ("http_.py", "_build_wait"): "retry",
+    ("http_.py", "_check_response_errors"): "errors",
+    ("http_.py", "_build_fetch_page"): "config",
     ("source.py", "run_source"): "config",
     ("source.py", "_run_write"): "config",
     ("locks.py", "acquire"): "config",
@@ -101,14 +102,15 @@ _SCOPES = {
 # portée de la fonction — c'est ce qui rattrape `write.get("mode")`, lu dans la
 # méthode d'une classe plutôt que dans une fonction listée ci-dessus.
 _RECEIVERS = {
-    ("source.py", "retry_config"): "retry",
-    ("source.py", "errors_config"): "errors",
+    ("http_.py", "retry_config"): "retry",
+    ("http_.py", "errors_config"): "errors",
     ("source.py", "incremental"): "incremental",
-    ("source.py", "write"): "write",
-    # Dans source.py, `pagination_config` ne sert qu'aux clés communes : les
+    ("writer.py", "incremental"): "incremental",
+    ("writer.py", "write"): "write",
+    # Dans http_.py, `pagination_config` ne sert qu'aux clés communes : les
     # clés propres à une stratégie sont lues dans pagination.py, où la fonction
     # dit déjà laquelle.
-    ("source.py", "pagination_config"): "pagination.*",
+    ("http_.py", "pagination_config"): "pagination.*",
 }
 
 # Porteurs dont les `.get()` ne décrivent aucune clé publique.
@@ -199,9 +201,9 @@ def _literal(node) -> str | None:
 
 
 def _named_constant(name: str) -> str | None:
-    from flume_lib import auth, source
+    from flume_lib import auth, http_, source, validation, writer
 
-    for module in (source, auth):
+    for module in (source, http_, writer, validation, auth):
         if hasattr(module, name):
             value = getattr(module, name)
             if isinstance(value, str):
@@ -214,7 +216,9 @@ def _named_constant(name: str) -> str | None:
 
 def collect_defaults() -> dict[tuple[str, str], str]:
     defaults: dict[tuple[str, str], str] = {}
-    for filename in ("pagination.py", "auth.py", "source.py", "locks.py"):
+    for filename in (
+        "pagination.py", "auth.py", "source.py", "http_.py", "writer.py", "locks.py"
+    ):
         tree = ast.parse((ROOT / "src" / "flume_lib" / filename).read_text(encoding="utf-8"))
         collector = _DefaultCollector(filename)
         collector.visit(tree)

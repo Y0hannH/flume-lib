@@ -66,7 +66,7 @@ class TestCompaction:
                 response.json = lambda: {"items": [{"n": i} for i in range(10)]}
                 return response
 
-        monkeypatch.setattr("flume_lib.source.requests.Session", Session)
+        monkeypatch.setattr("flume_lib.http_.requests.Session", Session)
         config = {
             "name": "s", "base_url": "https://api.test/x", "target_schema": "bronze",
             "target_table": "many", "batch_size": 2,

@@ -1,5 +1,5 @@
 """Logique pure du watermark : comparer deux bornes, les ramener à une date,
-les décaler. Aucune entrée-sortie ici — `source.py` s'en sert pour décider ce
+les décaler. Aucune entrée-sortie ici — `writer.py` s'en sert pour décider ce
 qui s'écrit, `windows.py` pour découper une période, `validation.py` pour
 refuser une fenêtre incohérente avant le premier appel.
 

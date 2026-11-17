@@ -18,7 +18,8 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 import requests
 
-from flume_lib.source import _refuse_cookies, run_source
+from flume_lib.http_ import _refuse_cookies
+from flume_lib.source import run_source
 from flume_lib.validation import ConfigError, validate_config
 
 ITEMS = [{"id": n} for n in range(1, 6)]  # 5 lignes : pages de 2, 2 et 1
@@ -180,7 +181,7 @@ class TestValidation:
         def no_session():
             raise AssertionError("a session was opened")
 
-        monkeypatch.setattr("flume_lib.source.requests.Session", no_session)
+        monkeypatch.setattr("flume_lib.http_.requests.Session", no_session)
 
         result = run(config("https://api.test/items", persist_cookies="false"), tmp_path)
 

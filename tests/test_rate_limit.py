@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from flume_lib import ConfigError, run_source, validate_config
-from flume_lib.source import RetryableHTTPError, RunTimeoutError, _build_wait, _Throttle
+from flume_lib.http_ import RetryableHTTPError, RunTimeoutError, _build_wait, _Throttle
 
 BASE = {
     "name": "s",
@@ -38,9 +38,11 @@ class Clock:
 @pytest.fixture
 def clock(monkeypatch):
     c = Clock()
-    monkeypatch.setattr(
-        "flume_lib.source.time", SimpleNamespace(monotonic=c.monotonic, sleep=c.sleep)
-    )
+    fake = SimpleNamespace(monotonic=c.monotonic, sleep=c.sleep)
+    # la cadence vit dans http_, l'échéance du run se calcule dans source :
+    # les deux doivent lire la même horloge
+    monkeypatch.setattr("flume_lib.http_.time", fake)
+    monkeypatch.setattr("flume_lib.source.time", fake)
     return c
 
 
@@ -133,7 +135,7 @@ class Recording:
 @pytest.fixture
 def http(monkeypatch, clock):
     Recording.script, Recording.starts, Recording.clock = [], [], clock
-    monkeypatch.setattr("flume_lib.source.requests.Session", Recording)
+    monkeypatch.setattr("flume_lib.http_.requests.Session", Recording)
 
 
 def ok(items):

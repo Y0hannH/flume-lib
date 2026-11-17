@@ -781,7 +781,7 @@ class TestLiteralSecretsAreRedacted:
         assert redact("alice-account application/json") == "alice-account application/json"
 
     def test_a_literal_credential_in_top_level_headers_is_redacted(self):
-        from flume_lib.source import _build_fetch_page
+        from flume_lib.http_ import _build_fetch_page
 
         fetch_page = _build_fetch_page(cfg(
             headers={"Authorization": f"Token {SECRET}", "Accept": "application/json"},

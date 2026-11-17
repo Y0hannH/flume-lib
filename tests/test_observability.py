@@ -49,7 +49,7 @@ def ok(items):
 @pytest.fixture(autouse=True)
 def http(monkeypatch):
     FakeSession.script, FakeSession.calls = [], []
-    monkeypatch.setattr("flume_lib.source.requests.Session", FakeSession)
+    monkeypatch.setattr("flume_lib.http_.requests.Session", FakeSession)
 
 
 @pytest.fixture

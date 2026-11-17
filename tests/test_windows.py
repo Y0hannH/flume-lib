@@ -205,7 +205,7 @@ class BoundaryOnlyAPI:
 class TestEndToEnd:
     def test_boundary_only_rows_do_not_stall_with_upper_bound(self, tmp_path, monkeypatch):
         api = BoundaryOnlyAPI()
-        monkeypatch.setattr("flume_lib.source.requests.Session", api())
+        monkeypatch.setattr("flume_lib.http_.requests.Session", api())
 
         results = run_source_windows(
             window_config, "2026-09-20", 7, lakehouse_tables_path=str(tmp_path)
@@ -219,7 +219,7 @@ class TestEndToEnd:
 
     def test_the_same_data_with_field_max_stalls_and_says_so(self, tmp_path, monkeypatch):
         api = BoundaryOnlyAPI()
-        monkeypatch.setattr("flume_lib.source.requests.Session", api())
+        monkeypatch.setattr("flume_lib.http_.requests.Session", api())
 
         def factory(end):
             return window_config(end, advance="field_max")

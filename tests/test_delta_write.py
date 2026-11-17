@@ -154,7 +154,7 @@ class TestBackfillEndToEnd:
 
     @pytest.fixture(autouse=True)
     def http(self, monkeypatch):
-        monkeypatch.setattr("flume_lib.source.requests.Session", FakeSession)
+        monkeypatch.setattr("flume_lib.http_.requests.Session", FakeSession)
 
     def test_two_identical_runs_leave_one_copy(self, tmp_path, config):
         FakeSession.payload = recs(("01", 1), ("01", 2))

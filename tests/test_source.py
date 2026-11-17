@@ -9,16 +9,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from flume_lib.oauth1 import OAuth1Signer
-from flume_lib.source import (
-    LINEAGE_INGESTED_AT,
-    LINEAGE_RUN_ID,
+from flume_lib.http_ import (
     MAX_ERROR_DETAIL_CHARS,
     RetryableHTTPError,
     _build_wait,
     _parse_retry_after,
-    run_source,
 )
+from flume_lib.oauth1 import OAuth1Signer
+from flume_lib.source import run_source
+from flume_lib.writer import LINEAGE_INGESTED_AT, LINEAGE_RUN_ID
 
 BASE_CONFIG = {
     "name": "s1",
@@ -75,7 +74,7 @@ def http(monkeypatch):
     """Injecte FakeSession et expose la dernière session créée."""
     FakeSession.instances = []
     FakeSession.next_payloads = []
-    monkeypatch.setattr("flume_lib.source.requests.Session", FakeSession)
+    monkeypatch.setattr("flume_lib.http_.requests.Session", FakeSession)
     return FakeSession
 
 
@@ -117,9 +116,9 @@ def delta(monkeypatch):
         calls["watermark_read"].append(source_name)
         return calls["watermark_value"]
 
-    monkeypatch.setattr("flume_lib.source.write_records", fake_write)
+    monkeypatch.setattr("flume_lib.writer.write_records", fake_write)
     monkeypatch.setattr("flume_lib.source.write_log_run", fake_log)
-    monkeypatch.setattr("flume_lib.source.write_watermark", fake_write_wm)
+    monkeypatch.setattr("flume_lib.writer.write_watermark", fake_write_wm)
     monkeypatch.setattr("flume_lib.source.read_watermark", fake_read_wm)
     return calls
 
@@ -360,7 +359,7 @@ class TestRetryAfter:
                     return FakeResponse({}, {"Retry-After": "7"}, status_code=429)
                 return FakeResponse([{"id": 1}])
 
-        monkeypatch.setattr("flume_lib.source.requests.Session", Throttling)
+        monkeypatch.setattr("flume_lib.http_.requests.Session", Throttling)
         Throttling.next_payloads = []
         result = run_source(BASE_CONFIG, lakehouse_tables_path=TABLES_PATH)
 
@@ -645,7 +644,7 @@ class TestResponseErrors:
                     {"data": {"orders": {"edges": [{"node": {"id": 1}}]}}}
                 )
 
-        monkeypatch.setattr("flume_lib.source.requests.Session", Throttled)
+        monkeypatch.setattr("flume_lib.http_.requests.Session", Throttled)
         Throttled.next_payloads = []
         result = run_source(self.GRAPHQL, lakehouse_tables_path=TABLES_PATH)
 
@@ -819,14 +818,14 @@ def _failing_run(status_code, body, config=None):
             self.calls.append({"method": method, "url": url})
             return FakeResponse({}, status_code=status_code, text=body)
 
-    import flume_lib.source as source_module
+    import flume_lib.http_ as http_module
 
-    source_module.requests.Session = Failing
+    http_module.requests.Session = Failing
     Failing.next_payloads = []
     try:
         return run_source(config or BASE_CONFIG, lakehouse_tables_path=TABLES_PATH)
     finally:
-        source_module.requests.Session = FakeSession
+        http_module.requests.Session = FakeSession
 
 
 class TestHTTPErrorDetail:
@@ -883,14 +882,14 @@ class TestHTTPErrorDetail:
                 self.calls.append({"method": method, "url": url})
                 return Undecodable()
 
-        import flume_lib.source as source_module
+        import flume_lib.http_ as http_module
 
-        source_module.requests.Session = Failing
+        http_module.requests.Session = Failing
         Failing.next_payloads = []
         try:
             result = run_source(BASE_CONFIG, lakehouse_tables_path=TABLES_PATH)
         finally:
-            source_module.requests.Session = FakeSession
+            http_module.requests.Session = FakeSession
 
         assert result.status == "failed"
         assert "400" in result.error_message
@@ -908,14 +907,14 @@ class TestErrorMessagesLeakNothing:
                 self.calls.append({"method": method, "url": url})
                 return FakeResponse({"error": "nope"}, status_code=403)
 
-        import flume_lib.source as source_module
+        import flume_lib.http_ as http_module
 
-        source_module.requests.Session = Failing
+        http_module.requests.Session = Failing
         Failing.next_payloads = []
         try:
             result = run_source(config, lakehouse_tables_path=TABLES_PATH)
         finally:
-            source_module.requests.Session = FakeSession
+            http_module.requests.Session = FakeSession
 
         assert result.status == "failed"
         assert "SECRET" not in result.error_message
@@ -935,14 +934,14 @@ class TestErrorMessagesLeakNothing:
                 self.calls.append({"method": method, "url": url})
                 return FakeResponse({}, status_code=503)
 
-        import flume_lib.source as source_module
+        import flume_lib.http_ as http_module
 
-        source_module.requests.Session = Failing
+        http_module.requests.Session = Failing
         Failing.next_payloads = []
         try:
             result = run_source(config, lakehouse_tables_path=TABLES_PATH)
         finally:
-            source_module.requests.Session = FakeSession
+            http_module.requests.Session = FakeSession
 
         assert result.status == "failed"
         assert "SECRET" not in result.error_message
@@ -959,14 +958,14 @@ class TestErrorMessagesLeakNothing:
                     return FakeResponse([{"id": start}, {"id": start + 1}])
                 return FakeResponse({}, status_code=403)
 
-        import flume_lib.source as source_module
+        import flume_lib.http_ as http_module
 
-        source_module.requests.Session = HalfWay
+        http_module.requests.Session = HalfWay
         HalfWay.next_payloads = []
         try:
             result = run_source(config, lakehouse_tables_path=TABLES_PATH)
         finally:
-            source_module.requests.Session = FakeSession
+            http_module.requests.Session = FakeSession
 
         assert result.status == "failed"
         # 2 pages complètes avant l'échec, mais sous le batch_size par défaut :
@@ -1026,14 +1025,14 @@ class TestBatchedWrites:
                     return FakeResponse([{"id": start}, {"id": start + 1}])
                 return FakeResponse({}, status_code=403)
 
-        import flume_lib.source as source_module
+        import flume_lib.http_ as http_module
 
-        source_module.requests.Session = HalfWay
+        http_module.requests.Session = HalfWay
         HalfWay.next_payloads = []
         try:
             result = run_source(config, lakehouse_tables_path=TABLES_PATH)
         finally:
-            source_module.requests.Session = FakeSession
+            http_module.requests.Session = FakeSession
 
         assert result.status == "failed"
         # les deux premières pages sont dans la table : le run est repris
@@ -1086,14 +1085,14 @@ class TestWatermarkCoherence:
                     return FakeResponse([{"ts": 1}, {"ts": 2}])
                 return FakeResponse({}, status_code=403)
 
-        import flume_lib.source as source_module
+        import flume_lib.http_ as http_module
 
-        source_module.requests.Session = HalfWay
+        http_module.requests.Session = HalfWay
         HalfWay.next_payloads = []
         try:
             result = run_source(config, lakehouse_tables_path=TABLES_PATH)
         finally:
-            source_module.requests.Session = FakeSession
+            http_module.requests.Session = FakeSession
 
         assert result.status == "failed"
         assert result.rows_loaded == 2
@@ -1180,7 +1179,7 @@ class TestTokenRefresh:
             response.json.return_value = {"access_token": f"tok-{len(issued)}"}
             return response
 
-        monkeypatch.setattr("flume_lib.source.requests.Session", FakeSession)
+        monkeypatch.setattr("flume_lib.http_.requests.Session", FakeSession)
         monkeypatch.setattr("flume_lib.auth.requests.post", fake_post)
         return issued
 
@@ -1206,7 +1205,7 @@ class TestTokenRefresh:
         # FakeSession.__init__ enregistre chaque instance sur la classe de
         # base ; la fixture `http` a remis la liste à zéro.
         monkeypatch.setattr(
-            "flume_lib.source.requests.Session", self._session_class(statuses)
+            "flume_lib.http_.requests.Session", self._session_class(statuses)
         )
         result = run_source(config, lakehouse_tables_path=TABLES_PATH)
         return result, FakeSession.instances[-1]
@@ -1307,13 +1306,13 @@ class TestTypeWarnings:
                     return FakeResponse([{"n": 1}])
                 return FakeResponse({}, status_code=403)
 
-        import flume_lib.source as source_module
+        import flume_lib.http_ as http_module
 
-        source_module.requests.Session = HalfWay
+        http_module.requests.Session = HalfWay
         try:
             result = run_source(config, lakehouse_tables_path=TABLES_PATH)
         finally:
-            source_module.requests.Session = FakeSession
+            http_module.requests.Session = FakeSession
 
         assert result.status == "failed"
         assert result.warnings == ["column 'n': written as text"]
@@ -1506,13 +1505,13 @@ class TestPageSizeIsNotLost:
                 )
 
         Paged.served = 0
-        import flume_lib.source as source_module
+        import flume_lib.http_ as http_module
 
-        source_module.requests.Session = Paged
+        http_module.requests.Session = Paged
         try:
             result = run_source(self.CONFIG, lakehouse_tables_path=TABLES_PATH)
         finally:
-            source_module.requests.Session = FakeSession
+            http_module.requests.Session = FakeSession
 
         assert result.status == "success", result.error_message
         assert result.rows_loaded == 2500
@@ -1616,7 +1615,7 @@ class TestWriteModes:
         def refuse(*args, **kwargs):
             raise DeltaWriteError("replace_where : des lignes écrites ne satisfont pas")
 
-        monkeypatch.setattr("flume_lib.source.write_records", refuse)
+        monkeypatch.setattr("flume_lib.writer.write_records", refuse)
         config = {
             **BASE_CONFIG,
             "write": {"mode": "replace_where", "replace_where": self.WINDOW},
@@ -1950,7 +1949,7 @@ class TestWindowedAdvance:
     def test_upper_bound_is_written_after_the_data(self, http, delta, monkeypatch):
         order = []
         monkeypatch.setattr(
-            "flume_lib.source.write_watermark",
+            "flume_lib.writer.write_watermark",
             lambda *a, **k: order.append(("watermark", len(delta["writes"]))),
         )
         delta["watermark_value"] = "2026-09-20"
@@ -1970,16 +1969,16 @@ class TestWindowedAdvance:
             def request(self, method, url, **kwargs):
                 return FakeResponse({}, status_code=403)
 
-        import flume_lib.source as source_module
+        import flume_lib.http_ as http_module
 
-        source_module.requests.Session = Boom
+        http_module.requests.Session = Boom
         try:
             result = run_source(
                 _date_window_config(advance="upper_bound"),
                 lakehouse_tables_path=TABLES_PATH,
             )
         finally:
-            source_module.requests.Session = FakeSession
+            http_module.requests.Session = FakeSession
 
         assert result.status == "failed"
         assert delta["watermark_write"] == []
