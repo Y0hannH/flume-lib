@@ -207,36 +207,58 @@ def _normalizer(dtype: ac.DataType):
     return normalize
 
 
+def _refusal(name: str, index: int, value, label: str, reason: str) -> DeltaWriteError:
+    """Refus d'une valeur destinée à une colonne déclarée. Le message donne la
+    colonne, le rang de l'enregistrement dans le lot et le type Python, jamais
+    la valeur : il part dans log_runs."""
+    return DeltaWriteError(
+        f"column '{name}' is declared {label} but record {index} of the batch "
+        f"{reason} (received a {type(value).__name__})"
+    )
+
+
+def _is_scalar(value) -> bool:
+    # bool est un int en Python : True ne doit pas passer pour 1
+    return not isinstance(value, (bool, dict, list))
+
+
+def _finite_number(name: str, index: int, value, label: str, not_a_number: str) -> Decimal:
+    """Valeur numérique exacte d'un scalaire : un nombre, ou un texte qui en
+    est un. `repr()` d'un flottant donne sa forme la plus courte —
+    `Decimal(0.1)` brut exposerait l'expansion binaire."""
+    text = repr(value) if isinstance(value, float) else str(value).strip()
+    try:
+        number = Decimal(text)
+    except InvalidOperation:
+        raise _refusal(name, index, value, label, not_a_number) from None
+    if not number.is_finite():
+        raise _refusal(name, index, value, label, "is not a finite number")
+    return number
+
+
 def _declared_text(name: str, index: int, value, kind: str, precision, scale) -> str:
-    """Forme texte, validée, d'une valeur destinée à un type déclaré.
+    """Forme texte, validée, d'une valeur destinée à un type déclaré
+    (`decimal`, `date`, `string`).
 
     Validée en Python parce que le cast d'Arrow ne proteste pas : une valeur
     illisible, trop large ou en notation exponentielle devient un **nul**, sans
-    erreur — pour un montant, une perte silencieuse. Le message donne la
-    colonne, le rang de l'enregistrement dans le lot et le type Python, jamais
-    la valeur : il part dans log_runs."""
-
-    def refuse(reason: str):
-        return DeltaWriteError(
-            f"column '{name}' is declared {_declared_label(kind, precision, scale)} "
-            f"but record {index} of the batch {reason} "
-            f"(received a {type(value).__name__})"
+    erreur — pour un montant, une perte silencieuse."""
+    label = _declared_label(kind, precision, scale)
+    if not _is_scalar(value):
+        raise _refusal(
+            name, index, value, label, "holds a value that is not a scalar number or text"
         )
-
-    if isinstance(value, bool) or isinstance(value, (dict, list)):
-        raise refuse("holds a value that is not a scalar number or text")
     if kind == "decimal":
-        try:
-            number = Decimal(repr(value) if isinstance(value, float) else str(value).strip())
-        except InvalidOperation:
-            raise refuse("is not a decimal number") from None
-        if not number.is_finite():
-            raise refuse("is not a finite number")
+        number = _finite_number(name, index, value, label, "is not a decimal number")
         exponent = int(number.normalize().as_tuple().exponent)
         if -exponent > scale:
-            raise refuse(f"has more than {scale} decimals — it would be rounded")
+            raise _refusal(
+                name, index, value, label, f"has more than {scale} decimals — it would be rounded"
+            )
         if number.adjusted() + 1 > precision - scale and number != 0:
-            raise refuse(f"does not fit in {precision - scale} integer digits")
+            raise _refusal(
+                name, index, value, label, f"does not fit in {precision - scale} integer digits"
+            )
         return format(number, "f")
     text = str(value).strip()
     if kind == "date":
@@ -244,12 +266,12 @@ def _declared_text(name: str, index: int, value, kind: str, precision, scale) ->
         day = text[:10] if len(text) > 10 and text[10] in "T " else text
         # le motif d'abord : `fromisoformat` accepte « 20260102 » à partir de
         # Python 3.11 et pas avant, et un entier n'est pas une date
-        if not isinstance(value, str) or not _ISO_DAY_RE.match(day):
-            raise refuse("is not a yyyy-MM-dd date")
         try:
+            if not isinstance(value, str) or not _ISO_DAY_RE.match(day):
+                raise ValueError
             date.fromisoformat(day)
         except ValueError:
-            raise refuse("is not a yyyy-MM-dd date") from None
+            raise _refusal(name, index, value, label, "is not a yyyy-MM-dd date") from None
         return day
     return text
 
@@ -265,31 +287,17 @@ MAX_EXACT_INT = 2**53
 def _declared_double(name: str, index: int, value) -> float:
     """Valeur d'une colonne déclarée `double`. Un identifiant entier au-delà de
     2^53 serait arrondi en silence : il est refusé, et se déclare `string`."""
-
-    def refuse(reason: str):
-        return DeltaWriteError(
-            f"column '{name}' is declared double but record {index} of the batch "
-            f"{reason} (received a {type(value).__name__})"
-        )
-
-    if isinstance(value, bool) or isinstance(value, (dict, list)):
-        raise refuse("holds a value that is not a number")
-    # repr() d'un flottant donne sa forme la plus courte : Decimal(0.1) brut
-    # exposerait l'expansion binaire
-    text = repr(value) if isinstance(value, float) else str(value).strip()
-    try:
-        number = Decimal(text)
-    except InvalidOperation:
-        raise refuse("is not a number") from None
-    if not number.is_finite():
-        raise refuse("is not a finite number")
+    if not _is_scalar(value):
+        raise _refusal(name, index, value, "double", "holds a value that is not a number")
+    number = _finite_number(name, index, value, "double", "is not a number")
     # un flottant natif est déjà un double : seul ce qui n'en est pas un
     # (entier, texte) peut être arrondi par la conversion
     exact_form = not isinstance(value, float)
     if exact_form and number == number.to_integral_value() and abs(number) > MAX_EXACT_INT:
-        raise refuse(
+        raise _refusal(
+            name, index, value, "double",
             "is an integer beyond 2^53, which a double would round — "
-            "declare the column string (identifiers) or decimal"
+            "declare the column string (identifiers) or decimal",
         )
     return float(number)
 
@@ -301,27 +309,17 @@ def _declared_bigint(name: str, index: int, value) -> int:
     """Valeur d'une colonne déclarée `bigint`. Un nombre à décimales serait
     tronqué par une conversion : il est refusé, comme tout ce qui ne tient pas
     dans 64 bits."""
-
-    def refuse(reason: str):
-        return DeltaWriteError(
-            f"column '{name}' is declared bigint but record {index} of the batch "
-            f"{reason} (received a {type(value).__name__})"
-        )
-
-    if isinstance(value, bool) or isinstance(value, (dict, list)):
-        raise refuse("holds a value that is not a number")
-    text = repr(value) if isinstance(value, float) else str(value).strip()
-    try:
-        number = Decimal(text)
-    except InvalidOperation:
-        raise refuse("is not a number") from None
-    if not number.is_finite():
-        raise refuse("is not a finite number")
+    if not _is_scalar(value):
+        raise _refusal(name, index, value, "bigint", "holds a value that is not a number")
+    number = _finite_number(name, index, value, "bigint", "is not a number")
     if number != number.to_integral_value():
-        raise refuse("has decimals — it would be truncated")
+        raise _refusal(name, index, value, "bigint", "has decimals — it would be truncated")
     whole = int(number)
     if not MIN_INT64 <= whole <= MAX_INT64:
-        raise refuse("does not fit in 64 bits — declare the column string or decimal")
+        raise _refusal(
+            name, index, value, "bigint",
+            "does not fit in 64 bits — declare the column string or decimal",
+        )
     return whole
 
 
@@ -332,10 +330,16 @@ def _declared_boolean(name: str, index: int, value) -> bool:
         return value
     if isinstance(value, str) and value.strip().lower() in ("true", "false"):
         return value.strip().lower() == "true"
-    raise DeltaWriteError(
-        f"column '{name}' is declared boolean but record {index} of the batch "
-        f"is not true or false (received a {type(value).__name__})"
-    )
+    raise _refusal(name, index, value, "boolean", "is not true or false")
+
+
+# Types déclarés construits directement depuis les valeurs Python : leur
+# conversion valide chaque valeur, et Arrow reçoit le type final.
+_DECLARED_SCALARS = {
+    "double": (_declared_double, ac.DataType.float64),
+    "bigint": (_declared_bigint, ac.DataType.int64),
+    "boolean": (_declared_boolean, ac.DataType.bool),
+}
 
 
 def _declared_array(name: str, values: list, spec: str) -> ac.Array:
@@ -346,23 +350,12 @@ def _declared_array(name: str, values: list, spec: str) -> ac.Array:
     if kind == "string":
         to_text = _normalizer(ac.DataType.string())
         return ac.Array([to_text(v) for v in values], type=ac.DataType.string())
-    if kind == "double":
+    if kind in _DECLARED_SCALARS:
+        convert, arrow_type = _DECLARED_SCALARS[kind]
         return ac.Array(
-            [None if v is None else _declared_double(name, i, v)
+            [None if v is None else convert(name, i, v)
              for i, v in enumerate(values, start=1)],
-            type=ac.DataType.float64(),
-        )
-    if kind == "bigint":
-        return ac.Array(
-            [None if v is None else _declared_bigint(name, i, v)
-             for i, v in enumerate(values, start=1)],
-            type=ac.DataType.int64(),
-        )
-    if kind == "boolean":
-        return ac.Array(
-            [None if v is None else _declared_boolean(name, i, v)
-             for i, v in enumerate(values, start=1)],
-            type=ac.DataType.bool(),
+            type=arrow_type(),
         )
     texts = [
         None if v is None else _declared_text(name, i, v, kind, precision, scale)
@@ -1029,6 +1022,18 @@ def _retype_problem(uri, column, kind, precision, scale, family, storage_options
     return None
 
 
+def _already_typed(kind: str, dtype) -> bool:
+    """La colonne a-t-elle déjà le type déclaré ? Un décimal ou une date se
+    réécrivent toujours : leur précision ou leur forme peuvent différer."""
+    name = _type_name(dtype)
+    return (
+        (kind == "string" and _type_family(dtype) == "text")
+        or (kind == "double" and name == "Float64")
+        or (kind == "bigint" and name == "Int64")
+        or (kind == "boolean" and _type_family(dtype) == "bool")
+    )
+
+
 def retype_table_columns(
     uri: str, column_types: dict, storage_options: dict | None = None
 ) -> int:
@@ -1068,13 +1073,7 @@ def retype_table_columns(
             )
         family = _type_family(current[column])
         label = _declared_label(kind, precision, scale)
-        if kind == "string" and family == "text":
-            continue  # déjà du texte
-        if kind == "double" and _type_name(current[column]) == "Float64":
-            continue
-        if kind == "bigint" and _type_name(current[column]) == "Int64":
-            continue
-        if kind == "boolean" and family == "bool":
+        if _already_typed(kind, current[column]):
             continue
         if family not in _RETYPE_FROM[kind]:
             raise DeltaWriteError(
@@ -1090,9 +1089,9 @@ def retype_table_columns(
             )
         plan[column] = _sql_type(kind, precision, scale)
 
-    rows = _count(uri, "true", storage_options)
     if not plan:
         return 0
+    rows = _count(uri, "true", storage_options)
     select = ", ".join(
         f"cast({_quote_column(c)} as {plan[c]}) as {_quote_column(c)}"
         if c in plan
