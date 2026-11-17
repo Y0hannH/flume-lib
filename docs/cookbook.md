@@ -538,7 +538,7 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `partition_by` | — | — | Delta partition columns |
 | `merge_keys` | conditional | — | columns identifying a row; required with `merge`, which accepts `checkpoint` |
 | `when_matched` | — | — | only `update` for now, which is also the default |
-| `column_types` | — | — | imposed types: `decimal(p,s)`, `double`, `date`, `string`; a value that does not fit fails the run |
+| `column_types` | — | — | declared types: `decimal(p,s)`, `double`, `bigint`, `boolean`, `date`, `string`; a declared column exists in the table even when the API omits the field; a value that does not fit fails the run |
 
 #### `retry`
 

@@ -36,11 +36,14 @@ _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # un montant est un décimal, pas un flottant ; une date reste du texte dans le
 # JSON ; et `double` fixe dès la création d'une table une colonne dont le
 # premier lot ne contient que des valeurs rondes (inférée entière, donc entière
-# pour toujours). `timestamp` en est absent : le cast d'arro3 vers un fuseau exige la base
-# tz du système, absente de certains environnements.
+# pour toujours). `bigint` et `boolean` complètent la liste pour qu'une config
+# puisse déclarer le schéma **entier** d'une source : une colonne déclarée
+# existe dans la table même quand l'API ne renvoie pas le champ (voir
+# `records_to_table`). `timestamp` en est absent : le cast d'arro3 vers un
+# fuseau exige la base tz du système, absente de certains environnements.
 _ISO_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _DECIMAL_TYPE_RE = re.compile(r"^decimal\(\s*(\d{1,2})\s*,\s*(\d{1,2})\s*\)$")
-COLUMN_TYPE_HELP = "decimal(precision,scale), double, date or string"
+COLUMN_TYPE_HELP = "decimal(precision,scale), double, bigint, boolean, date or string"
 MAX_DECIMAL_PRECISION = 38
 
 
@@ -49,7 +52,7 @@ def parse_column_type(spec) -> tuple[str, int | None, int | None]:
     Lève ValueError si le texte n'en est pas un."""
     if isinstance(spec, str):
         text = spec.strip().lower()
-        if text in ("date", "string", "double"):
+        if text in ("date", "string", "double", "bigint", "boolean"):
             return text, None, None
         match = _DECIMAL_TYPE_RE.match(text)
         if match:
@@ -286,6 +289,50 @@ def _declared_double(name: str, index: int, value) -> float:
     return float(number)
 
 
+MIN_INT64, MAX_INT64 = -(2**63), 2**63 - 1
+
+
+def _declared_bigint(name: str, index: int, value) -> int:
+    """Valeur d'une colonne déclarée `bigint`. Un nombre à décimales serait
+    tronqué par une conversion : il est refusé, comme tout ce qui ne tient pas
+    dans 64 bits."""
+
+    def refuse(reason: str):
+        return DeltaWriteError(
+            f"column '{name}' is declared bigint but record {index} of the batch "
+            f"{reason} (received a {type(value).__name__})"
+        )
+
+    if isinstance(value, bool) or isinstance(value, (dict, list)):
+        raise refuse("holds a value that is not a number")
+    text = repr(value) if isinstance(value, float) else str(value).strip()
+    try:
+        number = Decimal(text)
+    except InvalidOperation:
+        raise refuse("is not a number") from None
+    if not number.is_finite():
+        raise refuse("is not a finite number")
+    if number != number.to_integral_value():
+        raise refuse("has decimals — it would be truncated")
+    whole = int(number)
+    if not MIN_INT64 <= whole <= MAX_INT64:
+        raise refuse("does not fit in 64 bits — declare the column string or decimal")
+    return whole
+
+
+def _declared_boolean(name: str, index: int, value) -> bool:
+    """Valeur d'une colonne déclarée `boolean` : un booléen JSON, ou les textes
+    `true` / `false`. Ni 0/1 ni « yes » : les deviner serait une interprétation."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+        return value.strip().lower() == "true"
+    raise DeltaWriteError(
+        f"column '{name}' is declared boolean but record {index} of the batch "
+        f"is not true or false (received a {type(value).__name__})"
+    )
+
+
 def _declared_array(name: str, values: list, spec: str) -> ac.Array:
     """Colonne au type imposé par la config. Un échec est une erreur, pas un
     repli sur du texte : le type a été demandé, et le dégrader en silence
@@ -299,6 +346,18 @@ def _declared_array(name: str, values: list, spec: str) -> ac.Array:
             [None if v is None else _declared_double(name, i, v)
              for i, v in enumerate(values, start=1)],
             type=ac.DataType.float64(),
+        )
+    if kind == "bigint":
+        return ac.Array(
+            [None if v is None else _declared_bigint(name, i, v)
+             for i, v in enumerate(values, start=1)],
+            type=ac.DataType.int64(),
+        )
+    if kind == "boolean":
+        return ac.Array(
+            [None if v is None else _declared_boolean(name, i, v)
+             for i, v in enumerate(values, start=1)],
+            type=ac.DataType.bool(),
         )
     texts = [
         None if v is None else _declared_text(name, i, v, kind, precision, scale)
@@ -462,14 +521,22 @@ def records_to_table(
     known_types: dict | None = None,
     column_types: dict | None = None,
     table_types: dict | None = None,
+    fill_existing: bool = True,
 ) -> tuple[ac.Table, list[str]]:
     """Convertit une liste de dicts JSON en table Arrow. Types scalaires
     inférés par colonne ; les structures imbriquées sont sérialisées en JSON.
 
     `known_types` fixe le type de colonnes déjà écrites par un lot précédent.
     `column_types` impose le type de colonnes nommées (`decimal(p,s)`,
-    `double`, `date`, `string`) : il prime sur l'inférence et sur `known_types`,
-    et une valeur qui n'y rentre pas fait échouer l'écriture.
+    `double`, `bigint`, `boolean`, `date`, `string`) : il prime sur l'inférence
+    et sur `known_types`, et une valeur qui n'y rentre pas fait échouer
+    l'écriture. Une colonne déclarée qu'aucun enregistrement du lot ne porte
+    est écrite quand même, à NULL et à son type : la table a le schéma déclaré
+    dès le premier lot, que l'API ait renvoyé le champ ce jour-là ou non.
+    `fill_existing=False` (le merge) ne le fait que pour les colonnes que la
+    table n'a pas encore : une colonne de NULL dans la source d'un MERGE
+    effacerait la valeur des lignes mises à jour, là où une colonne absente la
+    laisse intacte.
     `table_types` donne les types de la table cible telle qu'elle existe : une
     colonne du lot qui ne rentre pas dans le type de la table fait échouer
     l'écriture (voir `_conform_to_table`), et un type déclaré qui diffère de
@@ -494,6 +561,14 @@ def records_to_table(
             if key not in seen:
                 seen.add(key)
                 keys.append(key)
+    # Les colonnes déclarées que le lot ne porte pas : sans elles, la table
+    # n'aurait que les champs que l'API a bien voulu renvoyer sur cette fenêtre,
+    # et une requête en aval sur un champ optionnel casserait selon la date.
+    keys.extend(
+        name
+        for name in column_types
+        if name not in seen and (fill_existing or name not in table_types)
+    )
     for key in keys:
         values = [r.get(key) for r in records]
         if key in column_types:
@@ -776,6 +851,7 @@ def _merge_once(
         known_types,
         column_types,
         table_types=_schema_types(dt.schema().to_arrow()),
+        fill_existing=False,
     )
     try:
         metrics = (
@@ -865,7 +941,13 @@ def sql_quote(value: str) -> str:
 
 
 # Types SQL (DataFusion) d'un type déclaré
-_SQL_TYPE = {"double": "double", "string": "varchar", "date": "date"}
+_SQL_TYPE = {
+    "double": "double",
+    "string": "varchar",
+    "date": "date",
+    "bigint": "bigint",
+    "boolean": "boolean",
+}
 
 
 def _sql_type(kind: str, precision, scale) -> str:
@@ -882,6 +964,9 @@ _RETYPE_FROM = {
     "string": ("int", "float", "bool", "text", "other"),
     "decimal": ("int", "text"),
     "date": ("text",),
+    # un flottant ne devient pas un entier : ce serait une troncature
+    "bigint": ("int", "text"),
+    "boolean": ("bool", "text"),
 }
 
 
@@ -906,6 +991,16 @@ def _retype_problem(uri, column, kind, precision, scale, family, storage_options
     name = _quote_column(column)
     target = _sql_type(kind, precision, scale)
     present = f"{name} is not null"
+    if kind == "boolean" and family == "text":
+        # le cast SQL lit aussi « yes », « 1 », « t » : l'écriture ne les
+        # accepte pas, la conversion non plus
+        other = _count(
+            uri,
+            f"{present} and lower(trim({name})) not in ('true', 'false')",
+            storage_options,
+        )
+        if other:
+            return f"{other} value(s) are not true or false"
     unreadable = _count(
         uri, f"{present} and try_cast({name} as {target}) is null", storage_options
     )
@@ -938,7 +1033,7 @@ def retype_table_columns(
     uri: str, column_types: dict, storage_options: dict | None = None
 ) -> int:
     """Convertit des colonnes d'une table Delta existante vers un type déclaré
-    (`double`, `string`, `decimal(p,s)`, `date`) en réécrivant la table, et
+    (`double`, `bigint`, `boolean`, `string`, `decimal(p,s)`, `date`) en réécrivant la table, et
     retourne le nombre de lignes réécrites.
 
     C'est la seule sortie d'une table dont un premier lot a figé le mauvais type :
@@ -976,6 +1071,10 @@ def retype_table_columns(
         if kind == "string" and family == "text":
             continue  # déjà du texte
         if kind == "double" and _type_name(current[column]) == "Float64":
+            continue
+        if kind == "bigint" and _type_name(current[column]) == "Int64":
+            continue
+        if kind == "boolean" and family == "bool":
             continue
         if family not in _RETYPE_FROM[kind]:
             raise DeltaWriteError(

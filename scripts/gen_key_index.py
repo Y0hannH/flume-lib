@@ -323,7 +323,8 @@ _NOTES = {
     ("config", "fail_on_empty"):
         "fails the run when no row was loaded, before the watermark moves",
     ("write", "column_types"):
-        "imposed types: `decimal(p,s)`, `double`, `date`, `string`; "
+        "declared types: `decimal(p,s)`, `double`, `bigint`, `boolean`, `date`, `string`; "
+        "a declared column exists in the table even when the API omits the field; "
         "a value that does not fit fails the run",
     ("auth.oauth2_client_credentials", "urlencode_credentials"):
         "form-urlencodes id and secret in the Basic header (RFC 6749 §2.3.1); "

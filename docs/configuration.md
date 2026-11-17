@@ -871,7 +871,7 @@ By default every run **appends**. That is the safe behavior and it stays the def
 | `merge_keys` | **yes** with `mode: "merge"` | Columns that identify a row. A row whose key exists is updated, the others are inserted. |
 | `when_matched` | no (default `update`) | What a matching row does. Only `update` exists for now. |
 | `partition_by` | no | Partition columns of the target table. Fixed at creation. |
-| `column_types` | no | Types imposed on named columns: `{"amount": "decimal(18,4)", "day": "date", "id": "string"}`. See [Typed columns](#typed-columns). |
+| `column_types` | no | Types declared for named columns: `{"amount": "decimal(18,4)", "day": "date", "id": "string"}`. A declared column exists in the table even when the API omits the field. See [Typed columns](#typed-columns) and [Declaring the whole schema](#declaring-the-whole-schema). |
 
 ```json
 "write": {
@@ -1147,14 +1147,40 @@ Inference cannot know that `1234567.89` is money, or that `"2026-01-02"` is a da
 |---|---|---|
 | `decimal(precision,scale)` | integers, floats, numeric texts (`"1234.5"`, `"1.5e3"`); precision 1 to 38, scale up to precision | `decimal(p,s)` — exact |
 | `double` | integers, floats, numeric texts — never a boolean, `nan`, `inf`, or an integer beyond 2^53 (a double would round it: an identifier is a `string`) | `double` |
+| `bigint` | integers, floats and numeric texts without decimals (`2.0`, `"42"`) — never a boolean, a number with decimals (it would be truncated) or one beyond 64 bits | `bigint` |
+| `boolean` | `true` / `false`, or those two words as text — never `0`/`1` or `"yes"` | `boolean` |
 | `date` | `yyyy-MM-dd`, or an ISO instant (`2026-01-02T03:04:05Z`), which gives its day | `date` |
 | `string` | anything; objects and lists become JSON, numbers their text | `string` |
 
-The declared type wins over the inferred one, in every write mode, and a column that is absent from a batch is simply not written. **A value that does not fit fails the run** — more decimals than the scale, more integer digits than the precision allows, a non-numeric text, an invalid date. It is never rounded, truncated or turned into text: asking for a type and receiving something else would be the silent degradation this feature exists to end. Floats are read by their shortest form (`0.1`, not its binary expansion), so `0.1 + 0.2` — `0.30000000000000004` — needs a scale of 17 or more. The error names the column and the record's position in the batch, never the value, since it is stored in `log_runs`.
+The declared type wins over the inferred one, in every write mode. **A value that does not fit fails the run** — more decimals than the scale, more integer digits than the precision allows, a non-numeric text, an invalid date. It is never rounded, truncated or turned into text: asking for a type and receiving something else would be the silent degradation this feature exists to end. Floats are read by their shortest form (`0.1`, not its binary expansion), so `0.1 + 0.2` — `0.30000000000000004` — needs a scale of 17 or more. The error names the column and the record's position in the batch, never the value, since it is stored in `log_runs`.
 
 `timestamp` is not offered: Arrow's conversion to a time zone needs the system's tz database, which not every runtime ships. Keep timestamps as text, or declare a `date`.
 
 Declare the type **before the first run**. Delta cannot change a column's type by writing: declaring `decimal` over a table that holds `double` fails before any write, naming both types. `double` exists for the commonest trap — a first batch of round amounts (`100`, `250`) creates an integer column, and the next batch of `1234.56` could not be stored. Declared `double`, the column is a double from the first run.
+
+### Declaring the whole schema
+
+An API often leaves a field out when no object of the window carries it: an optional `closed_at` is absent from every record on a day when nothing was closed, and present the next. A table built from what was received then has a different set of columns depending on the dates loaded — a query on `closed_at` fails until the first day it appears — and its type is decided by whichever batch saw it first.
+
+**A column declared in `write.column_types` is written even when no record of the batch has it**, as nulls of the declared type. Declare every field the API can return and the table has that schema from the first run on, whatever the window:
+
+```json
+"write": {"column_types": {
+  "id": "bigint",
+  "status": "string",
+  "amount": "decimal(18,2)",
+  "ratio": "double",
+  "is_closed": "boolean",
+  "closed_on": "date",
+  "closed_at": "string"
+}}
+```
+
+- Fields that are not declared are still written, typed by inference: the declaration is a floor, not a filter. Nothing is dropped.
+- A declared column that an existing table does not have yet is added by the next write, null for the rows already there.
+- A declared column absent from a batch is checked against the table like any other: declared `decimal` over a table that holds `double`, the run fails before writing.
+- In `merge`, a column the table already has and the batch does not carry is left out of the merge, as before, so the rows being updated keep their value for it. (A record that lacks a field other records of the same batch have is updated to null — also as before.)
+- Timestamps stay `string` (see above). A run that loads no row writes nothing, so it does not create the table.
 
 ### The table's types are a contract
 
@@ -1181,7 +1207,7 @@ from flume_lib import retype_columns
 retype_columns("bronze", "ledger", {"amount": "double"})   # rows rewritten
 ```
 
-`retype_columns(target_schema, target_table, column_types, lakehouse_tables_path=…, storage_options=None)` takes the same types as `write.column_types`. Every value is checked **before** anything is written, and one that does not fit stops the call with a count (never the values): text that is not a number, a `decimal` that would be rounded, an integer beyond 2^53 going to `double`. A float is not converted to a `decimal` (its value is binary: the conversion is a rounding), and a partition column cannot be retyped. The table is rewritten in one atomic commit, so its cost follows the size of the table, and the previous version stays readable by time travel until it is vacuumed. Run it between runs, not during one.
+`retype_columns(target_schema, target_table, column_types, lakehouse_tables_path=…, storage_options=None)` takes the same types as `write.column_types`. Every value is checked **before** anything is written, and one that does not fit stops the call with a count (never the values): text that is not a number, a `decimal` that would be rounded, an integer beyond 2^53 going to `double`, text that is not an integer going to `bigint` or not `true`/`false` going to `boolean`. A `double` column does not become a `bigint` (a truncation). A float is not converted to a `decimal` (its value is binary: the conversion is a rounding), and a partition column cannot be retyped. The table is rewritten in one atomic commit, so its cost follows the size of the table, and the previous version stays readable by time travel until it is vacuumed. Run it between runs, not during one.
 
 ## Running several sources
 

@@ -412,9 +412,10 @@ class TestDeclaredDecimal:
         assert types["n"] == ac.DataType.int64()
         assert types["s"] == ac.DataType.string()
 
-    def test_a_declared_column_absent_from_the_records_is_ignored(self):
+    def test_a_declared_column_absent_from_the_records_is_written_null(self):
+        # ignorée jusqu'à la 0.21 : la table n'avait alors que les champs reçus
         types, _, _ = table_values([{"n": 1}], {"ghost": "decimal(10,2)"})
-        assert "ghost" not in types
+        assert types["ghost"] == ac.DataType.decimal128(10, 2)
 
 
 class TestDeclaredDateAndString:

@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here. Versions follow [semantic versioning](https://semver.org/); until 1.0.0, minor versions may contain breaking changes — these are always listed first.
 
+## [0.22.0] — 2026-11-17
+
+A table with the same columns whatever the dates loaded.
+
+### Changed
+
+- **A column declared in `write.column_types` is written even when no record of the batch has it**, as nulls of the declared type. It used to be skipped, so a table only had the fields the API returned on the windows loaded so far: an optional field absent from every record one day and present the next gave a table whose columns depended on the dates, and a query on that field failed until it first appeared. Declaring every field the API can return now gives the table that schema from its first write. For an existing source this adds the declared columns the table does not have yet (null for the rows already there); no value changes. A declared column absent from a batch is also checked against the table's type, so a declaration that conflicts with the table fails the run even on a day the field is missing. `merge` is the one exception: a column the table already has and the batch does not carry stays out of the merge, as before — a column of nulls in a MERGE source would erase the value of every updated row.
+
+### Added
+
+- **`bigint` and `boolean` in `write.column_types`** (and `retype_columns`), so that a whole schema can be declared, not only the types inference cannot guess. `bigint` takes integers, and floats or numeric texts without decimals; a number with decimals fails the run rather than being truncated, as does one beyond 64 bits. `boolean` takes `true`/`false` and those two words as text — not `0`/`1`. `retype_columns` converts text to either after checking every value; it does not turn a `double` column into a `bigint`.
+
+### Documentation
+
+- `docs/configuration.md`: "Declaring the whole schema".
+
 ## [0.21.0] — 2026-11-13
 
 One option, for an API that answers `401` from the second request on.

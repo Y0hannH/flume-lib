@@ -115,7 +115,7 @@ def retype_columns(
     Pour sortir d'une table dont un premier lot a figé le mauvais type — une
     colonne de montants créée entière parce que le premier mois n'avait que des
     valeurs rondes. `column_types` est de la même forme que `write.column_types`
-    (`double`, `string`, `decimal(p,s)`, `date`). Une valeur qui ne tient pas
+    (`double`, `bigint`, `boolean`, `string`, `decimal(p,s)`, `date`). Une valeur qui ne tient pas
     dans le type visé arrête tout **avant** d'écrire : un décimal qui serait
     arrondi, un entier au-delà de 2^53 vers un `double`, un texte illisible.
 

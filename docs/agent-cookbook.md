@@ -32,7 +32,7 @@ Facts that shape the code you write:
 
 - **JSON only.** One HTTP call returns one page of JSON. Bulk-export APIs (submit a job, poll, download a CSV/JSONL file), XML, SOAP and CSV responses are not supported.
 - **Schema-enabled lakehouse required.** `target_schema` is mandatory (`bronze`, …). Names (`target_schema`, `target_table`) accept letters, digits and underscore only, not starting with a digit.
-- **Typing:** each column is typed from all the values of a batch — integers → `bigint`, floats (or ints and floats) → `double`, booleans → `boolean`, anything else → `string`. Nested objects and lists are stored as **one JSON string column**; the library never flattens. Dates and timestamps stay strings unless `write.column_types` declares them. Once a table exists, its column types win: a batch that does not fit fails the run rather than being coerced. A column that cannot be typed is written as text and reported in `warnings`.
+- **Typing:** each column is typed from all the values of a batch — integers → `bigint`, floats (or ints and floats) → `double`, booleans → `boolean`, anything else → `string`. Nested objects and lists are stored as **one JSON string column**; the library never flattens. Dates and timestamps stay strings unless `write.column_types` declares them. A column declared there exists in the table even when the API omits the field. Once a table exists, its column types win: a batch that does not fit fails the run rather than being coerced. A column that cannot be typed is written as text and reported in `warnings`.
 - **Every written row carries `_flume_run_id` and `_flume_ingested_at`** (lineage; do not name an API field like that).
 - **At-least-once.** Rows are committed by batches of `batch_size` (default 50 000). A run that fails midway leaves its earlier batches in the table. Data is committed **before** its watermark.
 - **Technical tables** are created in `log_schema` (default `flume`): `watermark` (`source_name`, `last_value`, `updated_ts`), `log_runs` (`run_id`, `source_name`, `start_ts`, `end_ts`, `status`, `rows_loaded`, `error_message` — it does **not** carry `warnings`), `run_locks` (only with `single_instance`).
@@ -60,7 +60,7 @@ from flume_lib import (
 | `reset_watermark` | `(source_name, schema="flume", storage_options=None, lakehouse_tables_path=…)` | `int`, rows deleted for that source only. |
 | `compact_technical_tables` | `(lakehouse_tables_path=…, schema="flume", storage_options=None, vacuum=False)` | `dict` per table: `rows_pruned`, `files_removed`, `files_added`. |
 | `compact_data_tables` | `(tables, lakehouse_tables_path=…, storage_options=None, vacuum=False, retention_hours=168)` | `dict` per `"schema.table"`: `files_removed`, `files_added`, and `files_vacuumed` with `vacuum=True`. `ValueError` before any work if a table is absent or `retention_hours` < 168. Between runs. |
-| `retype_columns` | `(target_schema, target_table, column_types, lakehouse_tables_path=…, storage_options=None)` | `int`, rows rewritten. Changes the type of existing columns (`double`, `string`, `decimal(p,s)`, `date`); every value is checked first, nothing is written if one does not fit. Raises `DeltaWriteError`. |
+| `retype_columns` | `(target_schema, target_table, column_types, lakehouse_tables_path=…, storage_options=None)` | `int`, rows rewritten. Changes the type of existing columns (`double`, `bigint`, `boolean`, `string`, `decimal(p,s)`, `date`); every value is checked first, nothing is written if one does not fit. Raises `DeltaWriteError`. |
 | `resolve_lakehouse_tables_path` | `(path)` | `str`; in Fabric, the ABFSS URI of the default lakehouse. |
 
 `lakehouse_tables_path` defaults to the notebook's default lakehouse and is resolved to its OneLake ABFSS URI automatically; `storage_options` is only for other storage. Leave both alone in a Fabric notebook.
@@ -73,7 +73,7 @@ from flume_lib import (
 - **Install** from wheels uploaded to the lakehouse, with the version pinned (a notebook cell of its own, run before the imports):
 
   ```text
-  %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.21.0
+  %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.22.0
   ```
 
   The library is not on PyPI. If the user has not uploaded the wheels, point them to [install.md](install.md); do not write `pip install flume-lib`.
@@ -249,7 +249,7 @@ Constraints validation enforces:
 
 `"write": {"column_types": {"amount": "decimal(18,4)", "invoice_date": "date", "account_id": "string"}}`
 
-Only `decimal(precision,scale)` (precision ≤ 38), `double`, `date` and `string` exist; there is **no `timestamp`**. A value that does not fit **fails the run** (more decimals than the scale, too many integer digits, non-numeric text, invalid date, an integer beyond 2^53 for a `double`) — it is never rounded or nulled. Declare types **before the first run**: Delta cannot change a column's type by writing. Declare `double` for any amount that may start with round values (`100`, `250`): otherwise the first batch creates an integer column, and a later `1234.56` fails the run instead of being stored as `1234`. Identifiers are `string`, never `double`.
+Only `decimal(precision,scale)` (precision ≤ 38), `double`, `bigint`, `boolean`, `date` and `string` exist; there is **no `timestamp`**. **A declared column is written even when no record has it** (nulls of the declared type): when an API omits optional fields depending on the window, declare every field it can return and the table has the same columns on every date. Undeclared fields are still written, typed by inference. A value that does not fit **fails the run** (more decimals than the scale, too many integer digits, non-numeric text, invalid date, an integer beyond 2^53 for a `double`) — it is never rounded or nulled. Declare types **before the first run**: Delta cannot change a column's type by writing. Declare `double` for any amount that may start with round values (`100`, `250`): otherwise the first batch creates an integer column, and a later `1234.56` fails the run instead of being stored as `1234`. Identifiers are `string`, never `double`.
 
 **The existing table's types are a contract.** A batch that does not fit them fails the run with `DeltaWriteError` before anything is written (floats into a `bigint` column, text into a number…); integers into a `double` column and anything into a `string` column are accepted. To fix a table that froze the wrong type, call `retype_columns("bronze", "table", {"amount": "double"})` between runs.
 
@@ -991,7 +991,7 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `partition_by` | — | — | Delta partition columns |
 | `merge_keys` | conditional | — | columns identifying a row; required with `merge`, which accepts `checkpoint` |
 | `when_matched` | — | — | only `update` for now, which is also the default |
-| `column_types` | — | — | imposed types: `decimal(p,s)`, `double`, `date`, `string`; a value that does not fit fails the run |
+| `column_types` | — | — | declared types: `decimal(p,s)`, `double`, `bigint`, `boolean`, `date`, `string`; a declared column exists in the table even when the API omits the field; a value that does not fit fails the run |
 
 #### `retry`
 
