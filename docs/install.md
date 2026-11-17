@@ -61,6 +61,7 @@ Pin the **full commit SHA** of a release, never a tag: a tag can be moved by som
 
 | Version | SHA |
 |---|---|
+| v0.23.0 | `b97c87726139b72cf0c40bc9ffeb83e8da879651` |
 | v0.22.0 | `9f8e7bb7e03f84537da68880923354240487046e` |
 | v0.21.0 | `b48c1a4cd58309075533bb28b7f5edf7cb58791c` |
 | v0.20.0 | `6f3afd8073e4d7c73e30c3ecbe8df6435d297138` |
