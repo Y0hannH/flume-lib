@@ -6,6 +6,7 @@ instable, et ce qu'on veut vérifier est l'écart entre deux départs."""
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import fakes
 import pytest
 
 from flume_lib import ConfigError, run_source, validate_config
@@ -99,18 +100,8 @@ class TestThrottle:
         assert clock.slept == [1.0]
 
 
-class FakeResponse:
-    def __init__(self, status, payload, headers=None):
-        self.status_code = status
-        self._payload = payload
-        self.headers = headers or {}
-        self.text = str(payload)
-
-    def json(self):
-        return self._payload
-
-    def close(self):
-        pass
+def FakeResponse(status, payload, headers=None):
+    return fakes.FakeResponse(payload, headers, status)
 
 
 class Recording:

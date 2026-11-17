@@ -3,37 +3,18 @@
 d'un MERGE — correspondance des clés, doublons dans un lot, types, lignage."""
 
 import pytest
+from fakes import SinglePageSession
 
 from flume_lib._delta import DeltaWriteError, merge_records, query_table
 from flume_lib.source import run_source
 
 
+class FakeSession(SinglePageSession):
+    items_field = "Report_Entry"
+
+
 def rows(uri):
     return query_table(uri, "select * from t order by Inv_Ref_ID", alias="t")
-
-
-class FakeResponse:
-    status_code = 200
-    headers = {}
-
-    def __init__(self, payload):
-        self._payload = payload
-
-    def json(self):
-        return self._payload
-
-
-class FakeSession:
-    payload: list = []
-
-    def __init__(self):
-        self.headers = {}
-
-    def close(self):
-        pass
-
-    def request(self, method, url, **kwargs):
-        return FakeResponse({"Report_Entry": FakeSession.payload})
 
 
 def invoice(ref, status="Unpaid", lines=None, **extra):

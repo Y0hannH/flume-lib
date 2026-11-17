@@ -8,6 +8,7 @@ précisément la coercition de delta-rs qui est en cause.
 """
 
 import pytest
+from fakes import SinglePageSession
 
 from flume_lib._delta import (
     DeltaWriteError,
@@ -16,6 +17,10 @@ from flume_lib._delta import (
     write_records,
 )
 from flume_lib.source import run_source
+
+
+class FakeSession(SinglePageSession):
+    items_field = "items"
 
 
 def rows(uri, column="x"):
@@ -203,30 +208,6 @@ class TestDeclaredDouble:
             write(uri, batch(1.5, "secret-looking", ), column_types={"x": "double"})
         assert "record 2" in str(caught.value)
         assert "secret-looking" not in str(caught.value)
-
-
-class FakeResponse:
-    status_code = 200
-    headers: dict = {}
-
-    def __init__(self, payload):
-        self._payload = payload
-
-    def json(self):
-        return self._payload
-
-
-class FakeSession:
-    payload: list = []
-
-    def __init__(self):
-        self.headers = {}
-
-    def close(self):
-        pass
-
-    def request(self, method, url, **kwargs):
-        return FakeResponse({"items": FakeSession.payload})
 
 
 @pytest.fixture

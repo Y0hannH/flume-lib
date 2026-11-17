@@ -9,6 +9,7 @@ tourner la boucle de l'appelant à l'infini."""
 from datetime import date
 
 import pytest
+from fakes import FakeResponse
 
 from flume_lib import RunResult, WindowRunError, read_watermark, run_source_windows
 from flume_lib.windows import _as_date
@@ -190,14 +191,9 @@ class BoundaryOnlyAPI:
                 api.calls.append(dict(params))
                 day = params["Accounting_Date_From"]
 
-                class Response:
-                    status_code = 200
-                    headers = {}
-
-                    def json(self):
-                        return {"Report_Entry": [{"Inv_Ref_ID": "INV-1", "Last_Inv_Date": day}]}
-
-                return Response()
+                return FakeResponse(
+                    {"Report_Entry": [{"Inv_Ref_ID": "INV-1", "Last_Inv_Date": day}]}
+                )
 
         return Session
 

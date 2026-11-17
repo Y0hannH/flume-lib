@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 
 import arro3.core as ac
 import pytest
+from fakes import SinglePageSession
 
 # Import à plat : voir test_error_sanitization.py
 from test_source import BASE_CONFIG, FakeResponse, delta, http  # noqa: F401
@@ -483,17 +484,8 @@ class TestColumnTypesConfig:
 # ---------------------------------------------------------------------------
 
 
-class _Session:
-    payload: list = []
-
-    def __init__(self):
-        self.headers = {}
-
-    def close(self):
-        pass
-
-    def request(self, method, url, **kwargs):
-        return FakeResponse({"items": _Session.payload})
+class _Session(SinglePageSession):
+    items_field = "items"
 
 
 @pytest.fixture

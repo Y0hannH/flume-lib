@@ -4,10 +4,25 @@ All notable changes to this project are documented here. Versions follow [semant
 
 ## [Unreleased]
 
+### Breaking
+
+- **`flume_lib.auth.build_auth()` and `flume_lib.auth.build_auth_headers()` are removed.** Neither was exported from `flume_lib` nor documented, and the library itself stopped using them when `AuthProvider` arrived. Code that imported them from `flume_lib.auth` should build an `AuthProvider(auth_config)` and read `.headers()` and `.signer`.
+- **Internal modules moved.** `flume_lib.source` only holds `run_source`, `RunResult` and the preparation and recording of a run. The HTTP client (retry, throttle, bounded reads, redirect and cookie handling, `RunTimeoutError`, `ResponseTooLargeError`, `APIError`) is in `flume_lib.http_`, and the batch writer and its watermark logic (`IncrementalError`, `EmptyResultError`, the lineage column names) in `flume_lib.writer`. Nothing exported from `flume_lib` changes; only imports of those names from `flume_lib.source` are affected.
+
+### Changed
+
+- **`next_link` follows a relative next-page URL.** An API answering `"next": "/v1/items?page=2"` used to fail the run, because `requests` refuses a URL without a host. The URL is now resolved against the page that gives it, before the origin check, so the URL checked is the one requested; `//other-host/…` resolves to another host and is still refused.
+- The message appended when the `log_runs` row cannot be written is now in English, like every other message: `log_runs write failed — …` (it was `écriture log_runs impossible — …`).
+
 ### Fixed
 
 - **A source that ends exactly on `max_pages` or `max_rows` no longer fails.** The bound fired on the count alone: a source of exactly `max_pages` pages was read in full and the run still ended `failed`, because it had stopped before observing the end. The run now requests the page after the bound — if the source ends there, the run succeeds; if a page comes back, it is not written and the run fails. That costs one request, on runs that hit the bound only. A page that takes the row count past `max_rows` still fails the run at once, after being written, as before. The error message now says the source has *more than* the bound.
 - **A literal secret allowed by `allow_literal_secrets` is now redacted from error messages and `log_runs`.** A credential read from an environment variable or Key Vault was masked; the same value written in the configuration was not, so an API echoing it in an error body put it in clear text in `log_runs`. The secret fields of `auth` (`token`, `key`, `password`, `client_secret`, `consumer_secret`, `token_secret`), the `token_endpoint` body and header values whose name looks sensitive, and top-level `headers` with such a name are now registered like resolved secrets. Public identifiers (`client_id`, `username`, `consumer_key`) and other literals are left readable.
+
+### Internal
+
+- **The tests read responses the way production does.** The HTTP doubles were plain objects with a `.json()`, so the library kept a branch for them and its streaming read — the response-size cap, the deadline checked during the body — ran in a handful of tests only. `tests/fakes.py` now provides a `FakeResponse` that is a real `requests.Response`; every test goes through the streaming read, and the branch is gone. Three copies of a one-page session became one.
+- Code quality: one dotted-path walker instead of four; the advance and write-mode names defined once; the declared-type checks of `_delta.py` share their parsing; `_build_fetch_page` returns a typed `PageFetcher`; ruff's `BLE` and `RUF100` rules make every broad `except` carry its reason. Tests cover a `log_runs` write failure.
 
 ## [0.22.0] — 2026-11-17
 

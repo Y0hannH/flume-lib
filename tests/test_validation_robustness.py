@@ -12,6 +12,7 @@ import copy
 import random
 
 import pytest
+from fakes import FakeResponse
 
 from flume_lib.validation import ConfigError, validate_config
 
@@ -122,15 +123,7 @@ class TestNullBlocksMeanAbsent:
                 pass
 
             def request(self, method, url, **kwargs):
-                class Response:
-                    status_code = 200
-                    headers = {}
-                    text = "[]"
-
-                    def json(self):
-                        return [{"id": 1}]
-
-                return Response()
+                return FakeResponse([{"id": 1}])
 
         monkeypatch.setattr("flume_lib.http_.requests.Session", Session)
         monkeypatch.setattr("flume_lib.writer.write_records", lambda *a, **k: ({}, []))

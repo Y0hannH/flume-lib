@@ -2,12 +2,12 @@
 Aucun appel réseau ni écriture Delta réels — requests.Session et les helpers
 Delta sont mockés."""
 
-import json
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from unittest.mock import MagicMock
 
 import pytest
+from fakes import FakeResponse
 
 from flume_lib.http_ import (
     MAX_ERROR_DETAIL_CHARS,
@@ -26,23 +26,6 @@ BASE_CONFIG = {
     "target_table": "items",
 }
 TABLES_PATH = "/tmp/Tables"  # chemin non-Fabric : renvoyé tel quel
-
-
-class FakeResponse:
-    def __init__(self, payload, headers=None, status_code=200, text=None):
-        self._payload = payload
-        self.headers = headers or {}
-        self.status_code = status_code
-        # Une réponse réelle porte toujours un corps, y compris en erreur :
-        # le message d'un 4xx en reprend un extrait.
-        self.text = json.dumps(payload) if text is None else text
-
-    def json(self):
-        return self._payload
-
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            raise AssertionError(f"HTTP {self.status_code}")
 
 
 class FakeSession:
@@ -256,6 +239,34 @@ class TestErrorReporting:
     def test_failed_run_is_still_logged(self, http, delta):
         run_source({**BASE_CONFIG, "foo": 1}, lakehouse_tables_path=TABLES_PATH)
         assert delta["log"][0]["status"] == "failed"
+
+    def test_a_log_runs_failure_is_reported_not_raised(self, http, delta, monkeypatch):
+        """La ligne de `log_runs` est la dernière écriture : son échec ne fait
+        pas échouer un run dont les données sont écrites, mais il se dit."""
+
+        def broken_log(*args, **kwargs):
+            raise OSError("storage unavailable")
+
+        monkeypatch.setattr("flume_lib.source.write_log_run", broken_log)
+        http.next_payloads = [[{"id": 1}]]
+        result = run_source(BASE_CONFIG, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "success"
+        assert result.rows_loaded == 1
+        assert result.error_message == "log_runs write failed — OSError: storage unavailable"
+
+    def test_a_log_runs_failure_is_appended_to_the_run_error(self, http, delta, monkeypatch):
+        def broken_log(*args, **kwargs):
+            raise OSError("storage unavailable")
+
+        monkeypatch.setattr("flume_lib.source.write_log_run", broken_log)
+        result = run_source({**BASE_CONFIG, "foo": 1}, lakehouse_tables_path=TABLES_PATH)
+
+        assert result.status == "failed"
+        assert result.error_message.startswith("ConfigError: ")
+        assert result.error_message.endswith(
+            " | log_runs write failed — OSError: storage unavailable"
+        )
 
     def test_dry_run_reports_config_error(self, http, delta):
         result = run_source(

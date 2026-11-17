@@ -2,6 +2,7 @@
 OPTIMIZE, pas ce qu'un mock en dirait."""
 
 import pytest
+from fakes import FakeResponse
 
 import flume_lib
 from flume_lib import compact_data_tables, run_source
@@ -61,10 +62,7 @@ class TestCompaction:
                 pass
 
             def request(self, method, url, **kwargs):
-                response = type("R", (), {})()
-                response.status_code, response.headers = 200, {}
-                response.json = lambda: {"items": [{"n": i} for i in range(10)]}
-                return response
+                return FakeResponse({"items": [{"n": i} for i in range(10)]})
 
         monkeypatch.setattr("flume_lib.http_.requests.Session", Session)
         config = {

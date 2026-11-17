@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 
+import fakes
 import pytest
 
 import flume_lib
@@ -15,18 +16,8 @@ from flume_lib import RunSourcesError, SourcesResult, run_sources
 from flume_lib._delta import query_table, read_table_types
 
 
-class FakeResponse:
-    def __init__(self, status, payload):
-        self.status_code = status
-        self._payload = payload
-        self.headers = {}
-        self.text = str(payload)
-
-    def json(self):
-        return self._payload
-
-    def close(self):
-        pass
+def FakeResponse(status, payload, headers=None):
+    return fakes.FakeResponse(payload, headers, status)
 
 
 class FakeSession:

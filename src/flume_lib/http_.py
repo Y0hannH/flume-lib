@@ -157,12 +157,9 @@ def _response_detail(response) -> str:
 
 
 def _error_body_text(response) -> str:
-    """Début du corps d'une réponse d'erreur. Une vraie réponse est lue en flux
-    et abandonnée après quelques kilooctets : `response.text` aurait chargé tout
-    le corps, et un serveur hostile choisit sa taille. Toute autre réponse (les
-    doublures des tests) garde `.text`."""
-    if not isinstance(response, requests.Response):
-        return response.text
+    """Début du corps d'une réponse d'erreur, lu en flux et abandonné après
+    quelques kilooctets : `response.text` aurait chargé tout le corps, et un
+    serveur hostile choisit sa taille."""
     data = b""
     for chunk in response.iter_content(chunk_size=_READ_CHUNK_BYTES):
         data += chunk
@@ -195,11 +192,7 @@ def _read_json(response, url: str, max_bytes: int, deadline, limit):
 
     `requests` ne borne la durée que **entre deux octets** (`timeout`) : un
     serveur qui en envoie un toutes les 50 secondes garde la requête ouverte
-    indéfiniment. L'échéance est donc revérifiée à chaque bloc lu. Toute
-    réponse qui n'est pas une `requests.Response` (les doublures des tests) garde
-    `.json()`."""
-    if not isinstance(response, requests.Response):
-        return response.json()
+    indéfiniment. L'échéance est donc revérifiée à chaque bloc lu."""
     declared = response.headers.get("Content-Length", "")
     if declared.isdigit() and int(declared) > max_bytes:
         response.close()

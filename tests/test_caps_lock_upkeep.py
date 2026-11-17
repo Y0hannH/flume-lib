@@ -17,12 +17,14 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 import requests
+from fakes import SinglePageSession
 from requests.structures import CaseInsensitiveDict
 
 # Import à plat : voir test_error_sanitization.py
 from test_source import BASE_CONFIG, FakeResponse, delta, http  # noqa: F401
 
 from flume_lib import compact_technical_tables
+from flume_lib import writer as writer_module
 from flume_lib._delta import query_table, write_records
 from flume_lib.http_ import (
     DEFAULT_MAX_RESPONSE_BYTES,
@@ -185,6 +187,34 @@ class TestRunDeadline:
     def test_no_deadline_never_raises(self):
         _check_deadline(None, None)
 
+    def test_a_page_finishing_after_the_deadline_is_not_written(
+        self, http, delta, monkeypatch
+    ):
+        """L'échéance est revérifiée pendant la lecture du corps : une page
+        dont la réponse se termine trop tard n'est pas écrite."""
+        clock = _Clock()
+        monkeypatch.setattr("flume_lib.http_.time.monotonic", clock)
+        pages = [[{"id": 1}, {"id": 2}], [{"id": 3}, {"id": 4}], [{"id": 5}]]
+
+        def request(self, method, url, **kwargs):
+            clock.now += 6  # deux appels dépassent la limite, pas un seul
+            return FakeResponse(pages.pop(0))
+
+        monkeypatch.setattr(http, "request", request)
+        config = {
+            **BASE_CONFIG,
+            "max_run_seconds": 10,
+            "batch_size": 2,
+            "pagination": {"type": "offset", "limit": 2},
+        }
+
+        result = run_source(config, lakehouse_tables_path="/tmp/Tables")
+
+        assert result.status == "failed"
+        assert "max_run_seconds (10 s)" in result.error_message
+        assert result.rows_loaded == 2
+        assert len(pages) == 1  # la deuxième page a été demandée, pas écrite
+
     def test_a_passed_deadline_raises(self, monkeypatch):
         monkeypatch.setattr("flume_lib.http_.time.monotonic", lambda: 100.0)
         with pytest.raises(RunTimeoutError, match=r"max_run_seconds \(10 s\)"):
@@ -218,10 +248,18 @@ class TestRunDeadline:
         pages = [[{"id": 1}, {"id": 2}], [{"id": 3}, {"id": 4}], [{"id": 5}]]
 
         def request(self, method, url, **kwargs):
-            clock.now += 11  # chaque appel dure plus que la limite
             return FakeResponse(pages.pop(0))
 
+        # La page arrive dans les temps ; c'est son écriture qui dure plus que
+        # la limite. L'échéance est alors constatée avant la requête suivante.
+        write = writer_module.write_records
+
+        def slow_write(*args, **kwargs):
+            clock.now += 11
+            return write(*args, **kwargs)
+
         monkeypatch.setattr(http, "request", request)
+        monkeypatch.setattr(writer_module, "write_records", slow_write)
         config = {
             **BASE_CONFIG,
             "max_run_seconds": 10,
@@ -386,17 +424,8 @@ class TestRunLock:
         assert DEFAULT_LOCK_TTL_SECONDS == 6 * 3600
 
 
-class _Session:
-    payload: list = []
-
-    def __init__(self):
-        self.headers = {}
-
-    def close(self):
-        pass
-
-    def request(self, method, url, **kwargs):
-        return FakeResponse({"items": _Session.payload})
+class _Session(SinglePageSession):
+    items_field = "items"
 
 
 @pytest.fixture

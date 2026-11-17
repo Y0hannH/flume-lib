@@ -2,6 +2,7 @@
 chemin par défaut. Vraies tables Delta, dans un répertoire temporaire."""
 
 import pytest
+from fakes import FakeResponse
 
 from flume_lib import read_watermark, reset_watermark, run_source, write_watermark
 from flume_lib._delta import query_table
@@ -74,14 +75,7 @@ class TestPublicWatermarkApi:
                 pass
 
             def request(self, method, url, **kwargs):
-                class Response:
-                    status_code = 200
-                    headers = {}
-
-                    def json(self):
-                        return [{"id": 1, "ts": "2026-09-10"}]
-
-                return Response()
+                return FakeResponse([{"id": 1, "ts": "2026-09-10"}])
 
         monkeypatch.setattr("flume_lib.http_.requests.Session", Session)
         config = {

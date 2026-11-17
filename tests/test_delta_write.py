@@ -5,9 +5,14 @@ précisément là que se joue le remplacement d'une fenêtre : le mock dirait
 toujours oui."""
 
 import pytest
+from fakes import SinglePageSession
 
 from flume_lib._delta import DeltaWriteError, query_table, write_records
 from flume_lib.source import run_source
+
+
+class FakeSession(SinglePageSession):
+    """Sert `payload` telle quelle : une liste d'enregistrements."""
 
 
 def rows(uri):
@@ -107,35 +112,6 @@ class TestPartitioning:
         write_records(uri, recs(("01", 1)))
         with pytest.raises(DeltaWriteError, match="frozen at creation"):
             write_records(uri, recs(("02", 2)), partition_by=["m"])
-
-
-class FakeResponse:
-    def __init__(self, payload):
-        self._payload = payload
-        self.headers = {}
-        self.status_code = 200
-
-    def json(self):
-        return self._payload
-
-    def raise_for_status(self):
-        pass
-
-
-class FakeSession:
-    """Rejoue une page unique, quelle que soit la requête."""
-
-    payload: list = []
-
-    def __init__(self):
-        self.headers = {}
-        self.closed = False
-
-    def close(self):
-        self.closed = True
-
-    def request(self, method, url, **kwargs):
-        return FakeResponse(FakeSession.payload)
 
 
 class TestBackfillEndToEnd:
