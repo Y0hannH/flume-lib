@@ -697,3 +697,78 @@ class TestAllowedHostsConfig:
             validate_config(
                 cfg(pagination={"type": "offset", "allowed_hosts": ["cdn.example.net"]})
             )
+
+
+# ---------------------------------------------------------------------------
+# Secrets littéraux admis par `allow_literal_secrets` : masqués quand même
+# ---------------------------------------------------------------------------
+
+
+class TestLiteralSecretsAreRedacted:
+    """`allow_literal_secrets` autorise un secret en clair dans la config ; il
+    ne doit pas pour autant finir en clair dans `log_runs`. Une valeur lue dans
+    une variable d'environnement était masquée, la même écrite en littéral ne
+    l'était pas."""
+
+    def test_a_literal_bearer_token_is_redacted(self):
+        auth._build_headers({"type": "bearer_token", "token": SECRET})
+        assert redact(f"echoed {SECRET}") == f"echoed {REDACTED}"
+
+    @pytest.mark.parametrize(
+        "auth_config, field",
+        [(a, f) for _, a, f in LITERAL_SECRET_AUTHS],
+        ids=[i for i, _, _ in LITERAL_SECRET_AUTHS],
+    )
+    def test_every_literal_secret_field_is_redacted(self, auth_config, field, monkeypatch):
+        for name in ("CS", "TS", "PWD", "TOK"):
+            monkeypatch.setenv(name, "other-value-123")
+        auth._resolve(auth_config, field)
+        assert redact(SECRET) == REDACTED
+
+    def test_a_literal_public_identifier_is_not_redacted(self):
+        """Masquer un client_id ou un nom d'utilisateur détruirait les messages
+        qui le citent, sans rien protéger."""
+        auth._resolve({"client_id": "public-client-id"}, "client_id")
+        auth._resolve({"username": "alice-account"}, "username")
+        assert redact("public-client-id alice-account") == "public-client-id alice-account"
+
+    def test_resolve_secret_only_registers_a_sensitive_literal(self):
+        resolve_secret("plain-grant-type")
+        resolve_secret(SECRET, "password", sensitive=True)
+        assert redact(f"plain-grant-type {SECRET}") == f"plain-grant-type {REDACTED}"
+
+    def test_token_endpoint_literals_are_redacted_by_key_name(self, monkeypatch):
+        sent = {}
+
+        class Response:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {"access_token": "issued-token-abcdef"}
+
+        def fake_request(method, url, **kwargs):
+            sent.update(kwargs)
+            return Response()
+
+        monkeypatch.setattr(auth.requests, "request", fake_request)
+        auth._fetch_token_endpoint({
+            "token_url": "https://idp.test/login",
+            "body": {"username": "alice-account", "password": SECRET},
+            "headers": {"X-Api-Key": "header-key-123456", "Accept": "application/json"},
+        })
+        assert sent["json"]["password"] == SECRET
+        assert redact(SECRET) == REDACTED
+        assert redact("header-key-123456") == REDACTED
+        assert redact("alice-account application/json") == "alice-account application/json"
+
+    def test_a_literal_credential_in_top_level_headers_is_redacted(self):
+        from flume_lib.source import _build_fetch_page
+
+        fetch_page = _build_fetch_page(cfg(
+            headers={"Authorization": f"Token {SECRET}", "Accept": "application/json"},
+            allow_literal_secrets=True,
+        ))
+        fetch_page.session.close()
+        assert redact(f"Token {SECRET}") == REDACTED
+        assert redact("application/json") == "application/json"

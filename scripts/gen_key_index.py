@@ -355,8 +355,8 @@ _NOTES = {
     ("pagination.*", "params_in"): f"one of {_ENUM_PARAMS_IN}",
     ("pagination.*", "params_path"):
         'nests the params inside the body; requires `"params_in": "body"`',
-    ("pagination.*", "max_pages"): "safety bound; the run fails when it is hit",
-    ("pagination.*", "max_rows"): "safety bound; the run fails when it is hit",
+    ("pagination.*", "max_pages"): "safety bound; the run fails when the source exceeds it",
+    ("pagination.*", "max_rows"): "safety bound; the run fails when the source exceeds it",
     ("pagination.offset", "limit"): "also the stop condition — a shorter page ends the loop",
     ("pagination.page", "size_param"):
         "no effect unless `page_size` is set too — the pair goes together",

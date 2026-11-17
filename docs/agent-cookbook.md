@@ -136,7 +136,7 @@ outcome.raise_for_failures()     # raises RunSourcesError if a source failed or 
 
 `run_sources` is the loop around `run_source`, written once: results in the order given, a failing source never stops the others (unless `stop_on_failure=True`), `max_workers` runs sources in parallel, and `raise_for_failures()` fails the notebook — which is what a pipeline sees. Duplicate or missing `name`s are refused before anything runs; with `max_workers > 1` so are two sources writing the same table. For one source, call `run_source` directly.
 
-A dry run walks the **whole** pagination: while testing a large source, add `"max_pages": 2` to `pagination` (reaching it fails the run, which is acceptable for a probe) or test against a narrow filter.
+A dry run walks the **whole** pagination: while testing a large source, add `"max_pages": 2` to `pagination` (exceeding it fails the run, which is acceptable for a probe) or test against a narrow filter.
 
 ---
 
@@ -211,7 +211,7 @@ Rules the library enforces — design around them:
 - **Set `has_more_field` (cursor) or `total_pages_header`/`total_pages_field` (page) whenever the API gives one.** An API that filters server-side after cutting the page returns short or empty pages mid-result; every stop-on-empty rule reads that as the end and the run succeeds with a fraction of the data.
 - `size_param` and `page_size` go together (neither has an effect alone).
 - A page shorter than the requested size ends pagination, unless no full page was seen yet: one more request is made, and if the API caps the page size below `limit`, pagination continues and a **warning** says which size the API serves.
-- `max_pages` / `max_rows` are safety bounds: **reaching one fails the run** (never truncates silently). A page identical to the previous one also fails the run.
+- `max_pages` / `max_rows` are safety bounds: **exceeding one fails the run** (never truncates silently; a source ending exactly on the bound succeeds). A page identical to the previous one also fails the run.
 - `next_link` only follows URLs on the origin of `base_url` (same scheme, host, port). A legitimate second host goes in `"allowed_hosts": ["cdn.example.com"]`.
 - `params` (top level) are sent on **every** call as query parameters. With `next_link` they are sent on the first call only, because the next URL carries its own.
 
@@ -778,7 +778,7 @@ compact_technical_tables()                                    # weekly, between 
 - `max_requests_per_second` is per run: sources running in parallel under `run_sources` each have their own counter.
 - A batch that does not fit an existing table's column type **fails the run**; the library never coerces it.
 - `single_instance` is advisory: it only holds if every run of the source asks for it, and two simultaneous starts may both be refused.
-- Reaching `max_pages`/`max_rows` fails the run by design.
+- Exceeding `max_pages`/`max_rows` fails the run by design; a source ending exactly on the bound succeeds.
 - An API whose credential must be in the URL query string cannot be configured safely.
 
 More depth: [configuration.md](configuration.md) (every option, with the reasoning), [cookbook.md](cookbook.md) (watermark operations, windows), [security.md](security.md), runnable notebooks in [`examples/`](../examples/).
@@ -836,8 +836,8 @@ Every key the validator accepts, its block, whether it is required, and its defa
 | `record_field` | — | — | extracts a sub-object out of each record |
 | `params_in` | — | `"query"` | one of `query` / `body` / `body_template` |
 | `params_path` | — | — | nests the params inside the body; requires `"params_in": "body"` |
-| `max_pages` | — | — | safety bound; the run fails when it is hit |
-| `max_rows` | — | — | safety bound; the run fails when it is hit |
+| `max_pages` | — | — | safety bound; the run fails when the source exceeds it |
+| `max_rows` | — | — | safety bound; the run fails when the source exceeds it |
 
 #### `pagination` — `"type": "offset"`
 

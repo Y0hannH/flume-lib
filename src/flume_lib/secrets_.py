@@ -12,6 +12,7 @@ Formes acceptées pour une référence :
 """
 
 import os
+import re
 import threading
 from urllib.parse import quote, quote_plus
 
@@ -20,6 +21,14 @@ from flume_lib.urls_ import REDACTED
 # En deçà, une « valeur secrète » est un mot courant : la masquer détruirait
 # les messages d'erreur sans protéger quoi que ce soit.
 MIN_REDACTABLE_LENGTH = 6
+
+# Nom d'une clé de header ou de corps qui porte un secret. Sert à la
+# validation (une chaîne littérale y est refusée) et à l'exécution (une
+# chaîne littérale qui y est admise, `allow_literal_secrets`, est masquée).
+SENSITIVE_NAME_RE = re.compile(
+    r"secret|passw|token|api[-_]?key|credential|authorization|signature",
+    re.IGNORECASE,
+)
 
 _known_secrets: set[str] = set()
 _known_lock = threading.Lock()
@@ -85,15 +94,24 @@ def _get_keyvault_secret(vault_url: str, secret_name: str) -> str:
     return client.get_secret(secret_name).value
 
 
-def resolve_secret(ref, field_name: str = "secret") -> str:
+def resolve_secret(ref, field_name: str = "secret", sensitive: bool = False) -> str:
     """Résout une référence de secret vers sa valeur.
 
     field_name n'apparaît que dans les messages d'erreur, jamais la valeur.
+
+    Une chaîne littérale est en principe une valeur non sensible (un
+    grant_type, un nom d'utilisateur) et n'est pas masquée : la masquer
+    détruirait les messages qui la citent. `sensitive=True` dit le contraire —
+    le champ attend un secret, que `allow_literal_secrets` a laissé écrire en
+    clair — et la valeur est alors masquée comme une valeur résolue.
     """
     # strip : un secret copié avec un espace ou retour à la ligne final
     # produit des 401 difficiles à diagnostiquer
     if isinstance(ref, str):
-        return ref.strip()
+        literal = ref.strip()
+        if sensitive:
+            register_secret(literal)
+        return literal
 
     if isinstance(ref, dict):
         if "env_var" in ref:

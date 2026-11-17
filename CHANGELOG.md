@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here. Versions follow [semantic versioning](https://semver.org/); until 1.0.0, minor versions may contain breaking changes — these are always listed first.
 
+## [Unreleased]
+
+### Fixed
+
+- **A source that ends exactly on `max_pages` or `max_rows` no longer fails.** The bound fired on the count alone: a source of exactly `max_pages` pages was read in full and the run still ended `failed`, because it had stopped before observing the end. The run now requests the page after the bound — if the source ends there, the run succeeds; if a page comes back, it is not written and the run fails. That costs one request, on runs that hit the bound only. A page that takes the row count past `max_rows` still fails the run at once, after being written, as before. The error message now says the source has *more than* the bound.
+- **A literal secret allowed by `allow_literal_secrets` is now redacted from error messages and `log_runs`.** A credential read from an environment variable or Key Vault was masked; the same value written in the configuration was not, so an API echoing it in an error body put it in clear text in `log_runs`. The secret fields of `auth` (`token`, `key`, `password`, `client_secret`, `consumer_secret`, `token_secret`), the `token_endpoint` body and header values whose name looks sensitive, and top-level `headers` with such a name are now registered like resolved secrets. Public identifiers (`client_id`, `username`, `consumer_key`) and other literals are left readable.
+
 ## [0.22.0] — 2026-11-17
 
 A table with the same columns whatever the dates loaded.

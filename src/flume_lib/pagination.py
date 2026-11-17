@@ -517,9 +517,18 @@ def _bounded(pages: Iterator[list], pagination_config: dict) -> Iterator[list]:
     première n'a aucune condition d'arrêt naturelle, et le notebook tournait
     jusqu'à son timeout, mémoire en hausse.
 
-    Atteindre une borne est une **erreur**, pas un arrêt propre : tronquer en
+    Dépasser une borne est une **erreur**, pas un arrêt propre : tronquer en
     silence donnerait un run `success` amputé d'une partie des données. Les
     lignes déjà écrites le restent, et le message dit ce qui s'est passé.
+
+    *Atteindre* une borne n'en est pas une : une source qui tient exactement
+    dans `max_pages` pages (ou `max_rows` lignes) est lue en entier, et le run
+    échouait pourtant, faute d'avoir observé la fin. La page suivante est donc
+    demandée : si la stratégie s'arrête là, la source est complète ; si une
+    page arrive, elle n'est pas livrée et le run échoue. Le prix est une
+    requête de plus, sur les seuls runs qui touchent la borne. Une page qui
+    fait franchir `max_rows` prouve à elle seule que la source le dépasse :
+    elle est livrée, puis le run échoue sans requête de plus.
     """
     max_pages = pagination_config.get("max_pages")
     max_rows = pagination_config.get("max_rows")
@@ -528,7 +537,19 @@ def _bounded(pages: Iterator[list], pagination_config: dict) -> Iterator[list]:
     previous = None
 
     for page in pages:
-        current = _fingerprint(page) if page else None
+        if not page:
+            # une page vide ne livre rien : elle ne dépasse aucune borne
+            yield page
+            continue
+        if max_pages is not None and pages_seen >= max_pages:
+            raise PaginationError(
+                f"pagination: the source has more than 'max_pages' = {max_pages} "
+                f"pages ({rows_seen} rows read) — run stopped before reaching the "
+                "end of the source. Raise the cap, or narrow the source window."
+            )
+        if max_rows is not None and rows_seen >= max_rows:
+            raise _max_rows_error(max_rows, pages_seen)
+        current = _fingerprint(page)
         if current is not None and current == previous:
             raise PaginationError(
                 f"pagination: page {pages_seen + 1} is identical to the "
@@ -540,18 +561,16 @@ def _bounded(pages: Iterator[list], pagination_config: dict) -> Iterator[list]:
         rows_seen += len(page)
         yield page
 
-        if max_pages is not None and pages_seen >= max_pages:
-            raise PaginationError(
-                f"pagination: 'max_pages' cap of {max_pages} reached "
-                f"({rows_seen} rows read) — run stopped before reaching the end "
-                "of the source. Raise the cap, or narrow the source window."
-            )
-        if max_rows is not None and rows_seen >= max_rows:
-            raise PaginationError(
-                f"pagination: 'max_rows' cap of {max_rows} reached "
-                f"({pages_seen} pages read) — run stopped before reaching the end "
-                "of the source. Raise the cap, or narrow the source window."
-            )
+        if max_rows is not None and rows_seen > max_rows:
+            raise _max_rows_error(max_rows, pages_seen)
+
+
+def _max_rows_error(max_rows: int, pages_seen: int) -> PaginationError:
+    return PaginationError(
+        f"pagination: the source has more than 'max_rows' = {max_rows} rows "
+        f"({pages_seen} pages read) — run stopped before reaching the end "
+        "of the source. Raise the cap, or narrow the source window."
+    )
 
 
 def paginate(

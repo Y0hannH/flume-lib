@@ -504,23 +504,70 @@ class TestPaginationBounds:
     OFFSET = {"type": "offset", "limit": 2}
 
     def test_max_pages_stops_the_run_instead_of_truncating(self):
-        fetch = make_fetch([[{"id": 1}, {"id": 2}], [{"id": 3}, {"id": 4}]])
+        fetch = make_fetch([
+            [{"id": 1}, {"id": 2}], [{"id": 3}, {"id": 4}], [{"id": 5}, {"id": 6}],
+        ])
         pages = paginate(
             fetch, "https://api/items", {}, {**self.OFFSET, "max_pages": 2}
         )
         collected = []
-        with pytest.raises(PaginationError, match="max_pages"):
+        with pytest.raises(PaginationError, match="more than 'max_pages' = 2"):
             for page in pages:
                 collected.append(page)
-        # les pages lues sont bien livrées avant l'erreur : elles sont écrites
+        # les pages sous la borne sont livrées avant l'erreur : elles sont
+        # écrites ; celle qui la dépasse ne l'est pas
         assert [len(p) for p in collected] == [2, 2]
+
+    def test_a_source_ending_exactly_on_max_pages_succeeds(self):
+        """La borne atteinte n'est pas la borne dépassée : la page suivante,
+        vide, prouve que la source est lue en entier."""
+        fetch = make_fetch([[{"id": 1}, {"id": 2}], [{"id": 3}, {"id": 4}], []])
+        pages = list(paginate(
+            fetch, "https://api/items", {}, {**self.OFFSET, "max_pages": 2}
+        ))
+        assert [len(p) for p in pages] == [2, 2]
+
+    def test_a_source_ending_exactly_on_max_pages_succeeds_with_page_numbers(self):
+        fetch = make_fetch([[{"id": 1}], [{"id": 2}], []])
+        pages = list(paginate(
+            fetch, "https://api/items", {}, {"type": "page", "max_pages": 2}
+        ))
+        assert [len(p) for p in pages] == [1, 1]
 
     def test_max_rows_stops_the_run(self):
         fetch = make_fetch([[{"id": 1}, {"id": 2}], [{"id": 3}, {"id": 4}]])
-        with pytest.raises(PaginationError, match="max_rows"):
-            list(paginate(
+        collected = []
+        with pytest.raises(PaginationError, match="more than 'max_rows' = 3"):
+            for page in paginate(
                 fetch, "https://api/items", {}, {**self.OFFSET, "max_rows": 3}
-            ))
+            ):
+                collected.append(page)
+        # la page qui franchit la borne prouve le dépassement : livrée, puis
+        # échec, sans requête de plus
+        assert [len(p) for p in collected] == [2, 2]
+
+    def test_a_source_ending_exactly_on_max_rows_succeeds(self):
+        fetch = make_fetch([[{"id": 1}, {"id": 2}], [{"id": 3}, {"id": 4}], []])
+        pages = list(paginate(
+            fetch, "https://api/items", {}, {**self.OFFSET, "max_rows": 4}
+        ))
+        assert [len(p) for p in pages] == [2, 2]
+
+    def test_an_empty_page_never_counts_against_the_bounds(self):
+        from flume_lib.pagination import _bounded
+
+        pages = list(_bounded(iter([[{"id": 1}], [], [], []]), {"max_pages": 1}))
+        assert pages == [[{"id": 1}], [], [], []]
+
+    def test_a_page_beyond_an_exactly_reached_max_rows_fails(self):
+        fetch = make_fetch([[{"id": 1}, {"id": 2}], [{"id": 3}, {"id": 4}], [{"id": 5}]])
+        collected = []
+        with pytest.raises(PaginationError, match="more than 'max_rows' = 4"):
+            for page in paginate(
+                fetch, "https://api/items", {}, {**self.OFFSET, "max_rows": 4}
+            ):
+                collected.append(page)
+        assert [len(p) for p in collected] == [2, 2]
 
     def test_a_run_under_the_bounds_is_untouched(self):
         fetch = make_fetch([[{"id": 1}, {"id": 2}], [{"id": 3}]])

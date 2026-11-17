@@ -646,7 +646,7 @@ The type is selected by `pagination.type`. All strategies accept:
 | `record_field` | absent | Dotted path unwrapped from **each item** of that list. GraphQL connections wrap every record in a `{cursor, node}` — `"record_field": "node"` keeps the record. Missing from any item ⇒ explicit error. |
 | `params_in` | `query` | Where pagination and incremental params are sent: `query` (query string), `body` (merged into the request payload as JSON values), or `body_template` (each param whose `{placeholder}` appears in `body` is substituted there, the rest go to the query string). The last two require a non-`GET` `method`. |
 | `params_path` | root | With `"params_in": "body"`, dotted path inside `body` under which those params are merged (GraphQL: `variables`). The branch is created if absent. |
-| `max_pages` | none | Stops the run with an error past that many pages. See [Safety bounds](#safety-bounds). |
+| `max_pages` | none | Fails the run when the source has more pages than that. See [Safety bounds](#safety-bounds). |
 | `max_rows` | none | Same, on the number of rows read. |
 
 ### `offset` — offset/limit
@@ -824,7 +824,7 @@ A single HTTP call, no loop. The common keys still apply: `items_field` and `rec
 
 ### Safety bounds
 
-`max_pages` and `max_rows` bound a run whose order of magnitude is known. Reaching one is an **error**, not a clean stop: truncating silently would produce a `success` run short of part of its data, which is the failure mode this library exists to avoid. Rows already written stay written, and the message says what happened. The bound fires on the count alone — a source that happens to end exactly on it still fails, because the run stopped before observing the end.
+`max_pages` and `max_rows` bound a run whose order of magnitude is known. Exceeding one is an **error**, not a clean stop: truncating silently would produce a `success` run short of part of its data, which is the failure mode this library exists to avoid. Rows already written stay written, and the message says what happened. Reaching one is not an error: a source that ends exactly on the bound is read in full. To tell the two apart, the run requests the page after the bound — if the source ends there, the run succeeds; if a page comes back, it is not written and the run fails. That costs one request, on runs that hit the bound only. A page that takes the row count past `max_rows` proves the source is larger on its own: it is written, then the run fails, with no extra request.
 
 Independently of any configuration, a page **identical to the one before it** stops the run. An API that clamps an out-of-range page number and serves the first page again has no natural stop condition — the notebook used to run until its timeout, memory climbing. The strategies that read a cursor, a next link or a keyset key have their own no-progress checks on top.
 

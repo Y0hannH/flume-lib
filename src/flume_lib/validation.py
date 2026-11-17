@@ -15,6 +15,7 @@ from flume_lib.auth import CLIENT_AUTH_MODES
 from flume_lib.locks import DEFAULT_LOCK_TTL_SECONDS
 from flume_lib.network import parse_proxy_url
 from flume_lib.oauth1 import SIGNATURE_METHODS
+from flume_lib.secrets_ import SENSITIVE_NAME_RE
 from flume_lib.templating import NORMALIZERS, VALUE_FORMATS, templated_placeholders
 
 # Clés top-level
@@ -126,10 +127,7 @@ _AUTH_SECRET_FIELDS = {
 # Nom d'une clé de header ou de corps qui porte un secret. Les valeurs de
 # `token_endpoint.body` / `.headers` et de `headers` peuvent être littérales —
 # un grant_type, un nom d'utilisateur — mais pas celles-ci.
-_SENSITIVE_NAME_RE = re.compile(
-    r"secret|passw|token|api[-_]?key|credential|authorization|signature",
-    re.IGNORECASE,
-)
+_SENSITIVE_NAME_RE = SENSITIVE_NAME_RE
 
 _LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 
