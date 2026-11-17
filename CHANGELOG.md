@@ -2,7 +2,9 @@
 
 All notable changes to this project are documented here. Versions follow [semantic versioning](https://semver.org/); until 1.0.0, minor versions may contain breaking changes — these are always listed first.
 
-## [Unreleased]
+## [0.23.0] — 2026-11-17
+
+A code quality pass: two fixes, relative `next_link` URLs, and the run split into a client, a writer and the run itself.
 
 ### Breaking
 

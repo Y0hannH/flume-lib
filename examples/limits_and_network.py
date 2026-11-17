@@ -13,7 +13,7 @@
 #   6. two request shapes      allow_body_on_get, fail_on_empty
 #   7. a session without cookies   persist_cookies
 #
-# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.22.0
+# %pip install --no-index --find-links=/lakehouse/default/Files/libs flume-lib==0.23.0
 
 from flume_lib import ConfigError, validate_config
 
