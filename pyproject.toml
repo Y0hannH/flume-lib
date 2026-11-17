@@ -51,7 +51,9 @@ extend-exclude = ["fabric-wheels", "dist"]
 [tool.ruff.lint]
 # C90 : la complexité cyclomatique. `validate_config` avait atteint 86 avant
 # d'être découpée par section ; le plafond empêche d'y retourner.
-select = ["E", "F", "W", "I", "UP", "B", "C90"]
+# BLE : tout `except Exception` se justifie par un `noqa` ; RUF100 signale un
+# `noqa` devenu inutile, qui ne justifierait plus rien.
+select = ["E", "F", "W", "I", "UP", "B", "C90", "BLE", "RUF100"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 15

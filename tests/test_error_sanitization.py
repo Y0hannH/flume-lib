@@ -109,6 +109,6 @@ class TestAuthDoesNotLeakTheTokenUrl:
             "client_secret": "shh",
         }
         with pytest.raises(auth.AuthError) as excinfo:
-            auth.build_auth_headers(config)
+            auth._build_headers(config)
         assert "SUPERSECRET" not in str(excinfo.value)
         assert "idp.test/token" in str(excinfo.value)

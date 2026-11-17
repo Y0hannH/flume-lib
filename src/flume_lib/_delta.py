@@ -29,6 +29,11 @@ DEFAULT_LOG_SCHEMA = "flume"
 # correct dans le cas courant, et les clés du contexte varient selon le runtime.
 WORKSPACE_CONTEXT_KEYS = ("defaultLakehouseWorkspaceId", "currentWorkspaceId")
 
+class DeltaWriteError(Exception):
+    """Écriture Delta refusée. Le message de delta-rs est conservé, précédé de
+    ce qu'il signifie pour la config qui l'a provoqué."""
+
+
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Types qu'une config peut imposer à une colonne (`write.column_types`).
@@ -596,11 +601,6 @@ def _schema_types(schema) -> dict:
     return {field.name: field.type for field in schema}
 
 
-class DeltaWriteError(Exception):
-    """Écriture Delta refusée. Le message de delta-rs est conservé, précédé de
-    ce qu'il signifie pour la config qui l'a provoqué."""
-
-
 # Un commit Delta perdu face à un autre écrivain n'a rien écrit : le rejouer
 # est sûr, et c'est la réponse prévue au protocole (concurrence optimiste).
 # Sans cela, le premier run d'un lakehouse neuf échoue pour la plupart des
@@ -729,7 +729,7 @@ def write_records(
                 storage_options=storage_options_for(uri, storage_options),
             )
         )
-    except Exception as exc:  # noqa: BLE001 — retraduit, puis relevé
+    except Exception as exc:
         raise DeltaWriteError(
             _explain_write_error(exc, mode, predicate, partition_by)
         ) from exc
@@ -868,7 +868,7 @@ def _merge_once(
         )
     except CommitFailedError:
         raise  # `merge_records` le rejoue
-    except Exception as exc:  # noqa: BLE001 — retraduit, puis relevé
+    except Exception as exc:
         raise DeltaWriteError(_explain_merge_error(exc, merge_keys)) from exc
     return (
         _schema_types(table.schema),
@@ -1115,7 +1115,7 @@ def retype_table_columns(
             partition_by=partitions or None,
             storage_options=storage_options_for(uri, storage_options),
         )
-    except Exception as exc:  # noqa: BLE001 — retraduit, puis relevé
+    except Exception as exc:
         detail = str(exc)[:MAX_DELTA_ERROR_CHARS]
         raise DeltaWriteError(f"retype: Delta write refused: {detail}") from exc
     return rows

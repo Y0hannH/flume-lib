@@ -10,6 +10,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from typing import Literal
 
 import requests
 from tenacity import (
@@ -42,7 +43,16 @@ from flume_lib.templating import (
     templated_placeholders,
 )
 from flume_lib.urls_ import safe_url, sanitized_request_error
-from flume_lib.validation import ConfigError, validate_config
+from flume_lib.validation import (
+    ADVANCE_FIELD_MAX,
+    ADVANCE_UPPER_BOUND,
+    WRITE_APPEND,
+    WRITE_MERGE,
+    WRITE_OVERWRITE,
+    WRITE_REPLACE_WHERE,
+    ConfigError,
+    validate_config,
+)
 from flume_lib.watermark import read_watermark, write_watermark
 
 DEFAULT_TIMEOUT_SECONDS = 60
@@ -77,26 +87,11 @@ _ERROR_BODY_READ_BYTES = 16 * 1024
 # est encore là après la résolution, la résolution a échoué.
 LOCAL_LAKEHOUSE_PREFIX = "/lakehouse/default/"
 
-# Modes d'écriture passés à delta-rs. Les trois modes de config (append,
-# overwrite, replace_where) se ramènent à ces deux-là : un remplacement de
-# fenêtre est un overwrite porteur d'un prédicat. "append" reste le défaut,
-# c'est le seul qui ne détruit rien.
-WRITE_APPEND = "append"
-WRITE_OVERWRITE = "overwrite"
-# `merge` ne passe pas par `write_deltalake` : c'est un MERGE INTO, qui met à
-# jour les lignes dont la clé existe et insère les autres. Idempotent, donc le
-# seul mode non-append compatible avec `incremental.checkpoint`.
-WRITE_MERGE = "merge"
-# Modes qui détruisent ce qu'ils remplacent, au premier lot seulement.
-_REPLACING_MODES = ("overwrite", "replace_where")
-
-# Ce que devient le watermark à la fin d'un run (`incremental.advance`).
-# `field_max` est le comportement historique : le plus grand `field` vu. Les
-# deux autres existent pour les APIs dont le filtre est une fenêtre de dates
-# que `field` ne reflète qu'approximativement — voir docs/configuration.md.
-ADVANCE_FIELD_MAX = "field_max"
-ADVANCE_FIELD_MAX_CAPPED = "field_max_capped"
-ADVANCE_UPPER_BOUND = "upper_bound"
+# Les modes de config se ramènent à deux modes delta-rs (append, overwrite) :
+# un remplacement de fenêtre est un overwrite porteur d'un prédicat. `merge`
+# ne passe pas par `write_deltalake`. Modes qui détruisent ce qu'ils
+# remplacent, au premier lot seulement :
+_REPLACING_MODES = (WRITE_OVERWRITE, WRITE_REPLACE_WHERE)
 
 # Nombre de lignes tamponnées avant écriture. Borne la mémoire d'un run : elle
 # ne dépend plus du volume de la source. Une source qui tient sous ce seuil
@@ -244,7 +239,7 @@ def _read_json(response, url: str, max_bytes: int, deadline, limit):
     if declared.isdigit() and int(declared) > max_bytes:
         response.close()
         raise ResponseTooLargeError(
-            f"response from {_safe_url(url)} announces {int(declared)} bytes, above "
+            f"response from {safe_url(url)} announces {int(declared)} bytes, above "
             f"max_response_bytes ({max_bytes})"
         )
     chunks, size = [], 0
@@ -253,7 +248,7 @@ def _read_json(response, url: str, max_bytes: int, deadline, limit):
         if size > max_bytes:
             response.close()
             raise ResponseTooLargeError(
-                f"response from {_safe_url(url)} exceeds max_response_bytes "
+                f"response from {safe_url(url)} exceeds max_response_bytes "
                 f"({max_bytes}) — the API is not paginating, or the page size is too large"
             )
         _check_deadline(deadline, limit)
@@ -264,19 +259,6 @@ def _read_json(response, url: str, max_bytes: int, deadline, limit):
     except ValueError as exc:
         # même type que `response.json()` : c'est lui que `error_message` recopie
         raise requests.exceptions.JSONDecodeError(str(exc), "", 0) from None
-
-
-def _safe_url(url: str) -> str:
-    """URL sans query string, pour les messages d'erreur. `error_message` est
-    persisté dans la table Delta log_runs, lisible par tout le lakehouse : une
-    URL complète y recopierait les query params, et donc un secret qu'une
-    config mal écrite y aurait placé. La position du run reste lisible via
-    RunResult.rows_loaded.
-
-    Ne couvre que les messages rédigés par la lib. Ceux que requests forme
-    lui-même sont traités par `sanitized_request_error` — voir urls_.py.
-    """
-    return safe_url(url)
 
 
 def _parse_retry_after(raw: str | None) -> float | None:
@@ -376,7 +358,7 @@ _RETRYABLE_EXCEPTIONS = (
 @dataclass
 class RunResult:
     source_name: str
-    status: str  # "success" | "failed"
+    status: Literal["success", "failed"]
     rows_loaded: int
     error_message: str | None
     start_ts: str
@@ -663,11 +645,11 @@ def _build_fetch_page(
     if auth.signer is not None:
         session.auth = auth.signer
     body_key = "json" if body_format == "json" else "data"
-    # Un GET porteur d'un corps n'a pas de semantique definie par HTTP, et la
-    # plupart des APIs l'ignorent : le refuser est le bon defaut. Certaines
-    # l'exigent pourtant — leur filtre ne vit que la. Une fois l'exception
-    # declaree, un GET suit exactement les memes branches qu'un POST : c'est
-    # `params_in` qui decide ou vont les parametres, pas la methode.
+    # Un GET porteur d'un corps n'a pas de sémantique définie par HTTP, et la
+    # plupart des APIs l'ignorent : le refuser est le bon défaut. Certaines
+    # l'exigent pourtant — leur filtre ne vit que là. Une fois l'exception
+    # déclarée, un GET suit exactement les mêmes branches qu'un POST : c'est
+    # `params_in` qui décide où vont les paramètres, pas la méthode.
     allow_body_on_get = bool(config.get("allow_body_on_get"))
 
     def _request(url: str, params: dict, state: dict):
@@ -719,7 +701,7 @@ def _build_fetch_page(
         retry_after = _parse_retry_after(response.headers.get("Retry-After"))
         if response.status_code == 429 or response.status_code >= 500:
             _discard(response)
-            raise RetryableHTTPError(response.status_code, _safe_url(url), retry_after)
+            raise RetryableHTTPError(response.status_code, safe_url(url), retry_after)
         if (
             response.status_code == 401
             and auth.refreshable
@@ -733,15 +715,15 @@ def _build_fetch_page(
             renewed = auth.refresh()
             session.headers.update(renewed)
             auth_header_names.update(renewed)
-            raise ExpiredTokenError(_safe_url(url))
+            raise ExpiredTokenError(safe_url(url))
         if response.status_code >= 400:
             raise requests.HTTPError(
-                f"HTTP {response.status_code} on {_safe_url(url)}"
+                f"HTTP {response.status_code} on {safe_url(url)}"
                 f"{_response_detail(response)}",
                 response=response,
             )
         payload = _read_json(response, url, max_bytes, deadline, run_limit)
-        _check_response_errors(payload, errors_config, _safe_url(url), retry_after)
+        _check_response_errors(payload, errors_config, safe_url(url), retry_after)
         # headers requis par certaines stratégies (ex. total de pages)
         return payload, response.headers
 
@@ -1348,7 +1330,7 @@ def _persist_run(
             details=_run_details(result, config),
         )
     except Exception as exc:  # noqa: BLE001
-        log_error = f"écriture log_runs impossible — {type(exc).__name__}: {exc}"
+        log_error = f"log_runs write failed — {type(exc).__name__}: {exc}"
         result.error_message = _publishable(
             f"{result.error_message} | {log_error}" if result.error_message else log_error
         )
@@ -1426,7 +1408,7 @@ def run_source(
     run_id = str(uuid.uuid4())
     start_ts = _utc_now()
     started = time.monotonic()
-    status = "failed"
+    status: Literal["success", "failed"] = "failed"
     error_message = None
     fetch_page = None
     progress = _Progress()

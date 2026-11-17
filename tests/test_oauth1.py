@@ -10,8 +10,14 @@ realm hors signature."""
 import pytest
 import requests
 
-from flume_lib.auth import AuthError, build_auth, build_auth_headers
+from flume_lib.auth import AuthError, AuthProvider, _build_headers
 from flume_lib.oauth1 import OAuth1Signer
+
+
+def build_auth(auth_config):
+    """(headers, signataire) d'une config, tels que `run_source` les pose."""
+    provider = AuthProvider(auth_config)
+    return provider.headers(), provider.signer
 
 # Vecteur de référence Twitter — HMAC-SHA1, corps form-urlencoded
 REF = {
@@ -169,9 +175,9 @@ class TestBuildAuth:
     def test_no_auth_returns_nothing(self):
         assert build_auth(None) == ({}, None)
 
-    def test_legacy_header_builder_refuses_oauth1(self, monkeypatch):
-        with pytest.raises(AuthError, match="build_auth"):
-            build_auth_headers(self._config(monkeypatch))
+    def test_the_header_builder_refuses_oauth1(self, monkeypatch):
+        with pytest.raises(AuthError, match="signs every request"):
+            _build_headers(self._config(monkeypatch))
 
     def test_missing_token_secret_raises(self, monkeypatch):
         config = self._config(monkeypatch)

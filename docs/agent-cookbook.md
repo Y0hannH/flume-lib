@@ -736,7 +736,7 @@ Values of `body` and `headers` in `token_endpoint` are literals **or** reference
 | `RunTimeoutError:` | `max_run_seconds` exceeded, or `max_requests_per_second` too slow to reach the end of the run within it | raise it or narrow the source; written batches stay |
 | `KeyboardInterrupt:` / `SystemExit:` … `run interrupted before completion` | the notebook was cancelled; the exception is re-raised | none |
 
-Plus, appended after ` | `: `écriture log_runs impossible — …` when the `log_runs` row itself could not be written.
+Plus, appended after ` | `: `log_runs write failed — …` when the `log_runs` row itself could not be written.
 
 ### 6.3 Frequent warnings
 

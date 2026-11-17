@@ -124,13 +124,13 @@ class _DefaultCollector(ast.NodeVisitor):
         self.branch = None
         self.found: dict[tuple[str, str], str] = {}
 
-    def visit_FunctionDef(self, node):  # noqa: N802
+    def visit_FunctionDef(self, node):
         previous = self.scope
         self.scope = _SCOPES.get((self.module, node.name), None)
         self.generic_visit(node)
         self.scope = previous
 
-    def visit_If(self, node):  # noqa: N802
+    def visit_If(self, node):
         # `if auth_type == "bearer_token":` — affine la portée dans la branche
         branch = _auth_type_tested(node.test)
         if branch is not None:
@@ -143,7 +143,7 @@ class _DefaultCollector(ast.NodeVisitor):
             return
         self.generic_visit(node)
 
-    def visit_Call(self, node):  # noqa: N802
+    def visit_Call(self, node):
         self.generic_visit(node)
         if not (isinstance(node.func, ast.Attribute) and node.func.attr == "get"):
             return

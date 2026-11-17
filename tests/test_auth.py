@@ -8,9 +8,14 @@ from flume_lib.auth import (
     TOKEN_EXPIRY_MARGIN_SECONDS,
     AuthError,
     AuthProvider,
-    build_auth_headers,
+    _build_headers,
 )
 from flume_lib.secrets_ import SecretResolutionError, resolve_secret
+
+
+def build_auth_headers(auth_config):
+    """Headers d'auth d'une config, sans la durée de vie du token."""
+    return _build_headers(auth_config)[0]
 
 
 class TestBearerToken:
