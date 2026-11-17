@@ -5,32 +5,18 @@ l'auth sont gérés par l'appelant."""
 
 import hashlib
 from collections.abc import Callable, Iterator
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
+from flume_lib._paths import MISSING as _MISSING
+from flume_lib._paths import get_path
 from flume_lib.templating import check_value
 from flume_lib.urls_ import safe_url
 
 _DEFAULT_ITEMS_FIELDS = ("data", "items", "results", "value")
 
-# Distingue « chemin absent » de « chemin présent valant None » : hasNextPage
-# à False et hasNextPage absent n'ont pas le même sens, le second est une
-# réponse qu'on ne sait pas interpréter.
-_MISSING = object()
-
-
 class PaginationError(Exception):
     pass
 
-
-def get_path(payload, path: str):
-    """Descend un chemin pointé (`data.orders.pageInfo.endCursor`) dans une
-    réponse JSON. Retourne `_MISSING` si une étape n'existe pas."""
-    value = payload
-    for part in path.split("."):
-        if not isinstance(value, dict) or part not in value:
-            return _MISSING
-        value = value[part]
-    return value
 
 
 def _locate_records(payload, items_field: str | None) -> list:
@@ -185,8 +171,8 @@ def check_next_url(url, base_url: str, allowed_hosts=None) -> str:
     Même origine (schéma, hôte, port) : acceptée. Autre hôte : refusée, sauf
     s'il figure dans `allowed_hosts` (un CDN, un hôte régional) ; et jamais de
     rétrogradation de https vers http, même vers un hôte autorisé. Une URL
-    relative n'a pas d'hôte à contrôler : elle est rendue telle quelle, et
-    `requests` la refusera.
+    relative n'a pas d'hôte à contrôler : elle est rendue telle quelle.
+    `paginate_next_link` les résout avant l'appel, contre l'URL de la page.
     """
     if not isinstance(url, str):
         raise PaginationError(
@@ -245,6 +231,12 @@ def paginate_next_link(
         if not isinstance(payload, dict):
             return
         next_url = payload.get(next_field)
+        if isinstance(next_url, str) and next_url:
+            # Une URL relative (`/v1/items?page=2`) se lit par rapport à la
+            # page qui la donne, comme un navigateur le ferait. Résolue
+            # *avant* le contrôle d'origine : c'est l'URL qui part réellement
+            # qui est contrôlée.
+            next_url = urljoin(url, next_url)
         url = check_next_url(next_url, base_url, allowed_hosts) if next_url else None
         # l'URL suivante embarque déjà ses query params
         page_params = {}

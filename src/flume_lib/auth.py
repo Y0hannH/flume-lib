@@ -9,6 +9,7 @@ from urllib.parse import quote_plus
 
 import requests
 
+from flume_lib._paths import MISSING, get_path
 from flume_lib.oauth1 import OAuth1Signer
 from flume_lib.secrets_ import (
     SENSITIVE_NAME_RE,
@@ -94,13 +95,9 @@ def _error_detail(response) -> str:
 
 def _extract_json_path(payload: dict, path: str):
     """Extrait une valeur d'un dict par chemin pointé, ex. 'data.token'."""
-    value = payload
-    for part in path.split("."):
-        if not isinstance(value, dict) or part not in value:
-            raise AuthError(
-                f"Path '{path}' not found in the token endpoint response"
-            )
-        value = value[part]
+    value = get_path(payload, path)
+    if value is MISSING:
+        raise AuthError(f"Path '{path}' not found in the token endpoint response")
     return value
 
 
@@ -110,11 +107,9 @@ def _expires_in(payload: dict, path: str | None) -> float | None:
     à un 401, jamais par anticipation."""
     if not path:
         return None
-    value: Any = payload
-    for part in path.split("."):
-        if not isinstance(value, dict) or part not in value:
-            return None
-        value = value[part]
+    value: Any = get_path(payload, path)
+    if value is MISSING:
+        return None
     try:
         return float(value)
     except (TypeError, ValueError):

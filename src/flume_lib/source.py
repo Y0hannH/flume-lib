@@ -29,12 +29,13 @@ from flume_lib._delta import (
     table_uri,
     write_records,
 )
+from flume_lib._paths import MISSING, get_path
 from flume_lib.auth import AuthProvider
 from flume_lib.incremental import compare, shift_days
 from flume_lib.locks import RunLock
 from flume_lib.logging_ import write_log_run
 from flume_lib.network import resolve_network
-from flume_lib.pagination import _MISSING, get_path, paginate
+from flume_lib.pagination import paginate
 from flume_lib.secrets_ import SENSITIVE_NAME_RE, redact, register_secret
 from flume_lib.templating import (
     check_value,
@@ -429,7 +430,7 @@ def _check_response_errors(
     if not errors_config:
         return
     errors = get_path(payload, errors_config.get("path", DEFAULT_ERRORS_PATH))
-    if errors is _MISSING or not errors:
+    if errors is MISSING or not errors:
         return
     if not isinstance(errors, list):
         # certaines APIs ne renvoient qu'une erreur, sans l'envelopper
@@ -439,8 +440,8 @@ def _check_response_errors(
     message_field = errors_config.get("message_field", DEFAULT_ERROR_MESSAGE_FIELD)
 
     def _field(error, path):
-        value = get_path(error, path) if isinstance(error, dict) else _MISSING
-        return None if value is _MISSING else value
+        value = get_path(error, path) if isinstance(error, dict) else MISSING
+        return None if value is MISSING else value
 
     retryable_codes = errors_config.get("retryable_codes") or []
     codes = [_field(e, code_field) for e in errors]
