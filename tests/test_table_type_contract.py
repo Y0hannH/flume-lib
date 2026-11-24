@@ -7,6 +7,8 @@ tables Delta — un mock de `write_deltalake` dirait toujours oui, et c'est
 précisément la coercition de delta-rs qui est en cause.
 """
 
+from importlib.metadata import version
+
 import pytest
 from fakes import SinglePageSession
 
@@ -17,6 +19,11 @@ from flume_lib._delta import (
     write_records,
 )
 from flume_lib.source import run_source
+
+# deltalake 1.7 a cessé de tronquer en silence un Float64 écrit dans une
+# colonne Int64 ; les versions antérieures, encore supportées, le font.
+_DELTALAKE = tuple(int(part) for part in version("deltalake").split(".")[:2])
+DELTALAKE_REFUSES_NARROWING = _DELTALAKE >= (1, 7)
 
 
 class FakeSession(SinglePageSession):
@@ -86,13 +93,22 @@ class TestNarrowingIsRefused:
             write(uri, batch(987654.321, start=1))
         assert "987654" not in str(caught.value)
 
+    @pytest.mark.skipif(DELTALAKE_REFUSES_NARROWING, reason="deltalake >= 1.7 refuse lui-même")
     def test_without_the_table_types_the_old_silent_truncation_is_still_there(self, uri):
         """Ce test documente le défaut que le garde-fou ferme : sans lui, delta-rs
-        écrit 2 et 3 à la place de 2.5 et 3.7. Si delta-rs un jour refuse, il
-        devient inutile et peut partir."""
+        < 1.7 écrit 2 et 3 à la place de 2.5 et 3.7. Le jour où le plancher de
+        dépendance passe à 1.7, ce test et le garde-fou peuvent partir."""
         write_records(uri, batch(1, 2))
         write_records(uri, batch(2.5, 3.7, start=2))
         assert rows(uri) == [1, 2, 2, 3]
+
+    @pytest.mark.skipif(not DELTALAKE_REFUSES_NARROWING, reason="deltalake < 1.7 tronque")
+    def test_without_the_table_types_recent_deltalake_refuses_on_its_own(self, uri):
+        """Depuis deltalake 1.7, delta-rs refuse le rétrécissement de lui-même."""
+        write_records(uri, batch(1, 2))
+        with pytest.raises(DeltaWriteError, match="Float64 to Int64"):
+            write_records(uri, batch(2.5, 3.7, start=2))
+        assert rows(uri) == [1, 2]
 
 
 class TestWideningPasses:
